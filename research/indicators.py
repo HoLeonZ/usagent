@@ -104,3 +104,148 @@ def indicators_ready(df: pd.DataFrame) -> pd.Series:
     for c in need:
         mask &= df[c].notna()
     return mask
+
+
+# ================================================================ 扩展指标
+# 2026-10-14:为"把能用的指标都加上"补的这一组。全部按 symbol 分组、
+# 只用 ≤T 的数据 —— 因果性由 test_indicators_ext 的截断重算测试钉住。
+
+EXT_COLS = [
+    # RSI(Wilder)
+    "rsi14", "rsi7",
+    # 布林带
+    "bb_mid", "bb_sd", "bb_up", "bb_lo", "bb_pctb", "bb_width",
+    # 随机指标 KDJ
+    "stoch_k", "stoch_d",
+    # 趋势强度 ADX/DMI
+    "plus_di", "minus_di", "adx14",
+    # 量价
+    "obv", "obv_slope", "vol_z",
+    # 位置
+    "hh252", "ll252", "dist_high252", "dist_low252",
+    # 波动
+    "rvol20",
+    # 横截面
+    "mom60", "xs_mom120", "xs_mom60", "xs_rvol20",
+]
+
+RSI_PERIOD = 14
+BB_PERIOD, BB_STD = 20, 2.0
+STOCH_PERIOD, STOCH_SMOOTH = 14, 3
+ADX_PERIOD = 14
+HH252_BARS = 252
+
+
+def _wilder(s: pd.Series, period: int) -> pd.Series:
+    """Wilder 平滑 —— 等价于 alpha = 1/period 的 EWM。RSI/ADX 的标准口径。"""
+    return s.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+
+
+def add_extended_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """追加 RSI / 布林 / KDJ / ADX / OBV / 52 周位置 / 横截面相对强度。
+
+    输入需已过 compute_indicators(用到 tr / ma20 / mom120 等)。
+    """
+    out = df.copy()
+    g = out.groupby("symbol", group_keys=False)
+
+    # ---- RSI(Wilder)------------------------------------------------
+    delta = g["close"].diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    for p in (RSI_PERIOD, 7):
+        ag = gain.groupby(out["symbol"]).transform(lambda s, p=p: _wilder(s, p))
+        al = loss.groupby(out["symbol"]).transform(lambda s, p=p: _wilder(s, p))
+        rs = ag / al.replace(0.0, np.nan)
+        rsi = (100.0 - 100.0 / (1.0 + rs)).where(al.notna())
+        # 边界:窗口内**一次下跌都没有** → al == 0 → rs 为 inf → 上面会得 NaN。
+        # 正确取值是 100(纯上涨)。这是经典 RSI 实现的坑:单调上涨的序列会
+        # 整段变成 NaN,而 NaN 会静默退出所有下游筛选(看起来像"没信号")。
+        rsi = rsi.mask((al == 0.0) & ag.notna() & (ag > 0.0), 100.0)
+        # 完全无波动(ag 与 al 都是 0,价格横盘)→ 无方向,取中性 50
+        rsi = rsi.mask((al == 0.0) & (ag == 0.0), 50.0)
+        out[f"rsi{p}"] = rsi
+
+    # ---- 布林带 -----------------------------------------------------
+    out["bb_mid"] = g["close"].transform(
+        lambda s: s.rolling(BB_PERIOD, min_periods=BB_PERIOD).mean())
+    out["bb_sd"] = g["close"].transform(
+        lambda s: s.rolling(BB_PERIOD, min_periods=BB_PERIOD).std(ddof=0))
+    out["bb_up"] = out["bb_mid"] + BB_STD * out["bb_sd"]
+    out["bb_lo"] = out["bb_mid"] - BB_STD * out["bb_sd"]
+    rng = (out["bb_up"] - out["bb_lo"]).replace(0.0, np.nan)
+    out["bb_pctb"] = (out["close"] - out["bb_lo"]) / rng
+    out["bb_width"] = rng / out["bb_mid"]
+
+    # ---- 随机指标 KDJ -----------------------------------------------
+    ll = g["low"].transform(
+        lambda s: s.rolling(STOCH_PERIOD, min_periods=STOCH_PERIOD).min())
+    hh = g["high"].transform(
+        lambda s: s.rolling(STOCH_PERIOD, min_periods=STOCH_PERIOD).max())
+    span = (hh - ll).replace(0.0, np.nan)
+    out["stoch_k"] = 100.0 * (out["close"] - ll) / span
+    out["stoch_d"] = out.groupby("symbol")["stoch_k"].transform(
+        lambda s: s.rolling(STOCH_SMOOTH, min_periods=STOCH_SMOOTH).mean())
+
+    # ---- ADX / DMI --------------------------------------------------
+    up_move = g["high"].diff()
+    down_move = -g["low"].diff()
+    plus_dm = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=out.index)
+    minus_dm = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=out.index)
+    atr_w = out.groupby("symbol")["tr"].transform(lambda s: _wilder(s, ADX_PERIOD))
+    pdi = 100.0 * plus_dm.groupby(out["symbol"]).transform(
+        lambda s: _wilder(s, ADX_PERIOD)) / atr_w.replace(0.0, np.nan)
+    mdi = 100.0 * minus_dm.groupby(out["symbol"]).transform(
+        lambda s: _wilder(s, ADX_PERIOD)) / atr_w.replace(0.0, np.nan)
+    out["plus_di"], out["minus_di"] = pdi, mdi
+    denom = (pdi + mdi).replace(0.0, np.nan)
+    dx = 100.0 * (pdi - mdi).abs() / denom
+    out["adx14"] = dx.groupby(out["symbol"]).transform(lambda s: _wilder(s, ADX_PERIOD))
+
+    # ---- OBV / 量能 z 分 --------------------------------------------
+    sign = np.sign(g["close"].diff().fillna(0.0))
+    out["obv"] = (sign * out["volume"]).groupby(out["symbol"]).cumsum()
+    out["obv_slope"] = out.groupby("symbol")["obv"].transform(
+        lambda s: s.diff(20) / s.abs().rolling(20, min_periods=20).mean().replace(0.0, np.nan))
+    vmean = g["volume"].transform(lambda s: s.rolling(20, min_periods=20).mean())
+    vsd = g["volume"].transform(lambda s: s.rolling(20, min_periods=20).std(ddof=1))
+    out["vol_z"] = (out["volume"] - vmean) / vsd.replace(0.0, np.nan)
+
+    # ---- 52 周位置 ---------------------------------------------------
+    out["hh252"] = g["high"].transform(
+        lambda s: s.rolling(HH252_BARS, min_periods=HH252_BARS).max())
+    out["ll252"] = g["low"].transform(
+        lambda s: s.rolling(HH252_BARS, min_periods=HH252_BARS).min())
+    out["dist_high252"] = out["close"] / out["hh252"] - 1.0
+    out["dist_low252"] = out["close"] / out["ll252"] - 1.0
+
+    # ---- 已实现波动 --------------------------------------------------
+    out["rvol20"] = out.groupby("symbol")["ret1"].transform(
+        lambda s: s.rolling(20, min_periods=20).std(ddof=1))
+    out["mom60"] = out["close"] / g["close"].shift(60) - 1.0
+
+    return out
+
+
+def add_cross_sectional(df: pd.DataFrame) -> pd.DataFrame:
+    """横截面相对强度:同一交易日、全池内的百分位排名。
+
+    **因果性**:每个日期只用**当天**的横截面(各标的那一天的值),不涉及未来。
+    这是"这只票相对同池其他票有多强",与"它自己涨了多少"不同 ——
+    纯多头选股里,后者会被市场整体涨跌淹没。
+
+    必须**在 add_extended_indicators 之后**调用(依赖 mom120 / mom60 / rvol20)。
+    预热期的 NaN 会天然退出排名(pandas rank 默认 na_option='keep')。
+    """
+    out = df.copy()
+    for src, dst in (("mom120", "xs_mom120"), ("mom60", "xs_mom60"),
+                     ("rvol20", "xs_rvol20")):
+        out[dst] = out.groupby("date")[src].rank(pct=True)
+    return out
+
+
+def compute_all(panel: pd.DataFrame) -> pd.DataFrame:
+    """compute_indicators + add_extended_indicators + add_cross_sectional。"""
+    return add_cross_sectional(add_extended_indicators(compute_indicators(panel)))
