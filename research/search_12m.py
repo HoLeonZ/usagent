@@ -113,6 +113,9 @@ def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
     ts = metrics.tail_stats(tr) if len(tr) else {"expectancy_r": float("nan")}
     return {
         "cagr": float(cagr), "trades": int(len(tr)),
+        # Sharpe 也一并给出 —— 判据可以换,搜索空间不必重跑。
+        # 注意 broker 的 sharpe 是**年化**的(mean/std × sqrt(252))。
+        "sharpe": float(res["metrics"]["sharpe"]),
         "total": float(res["metrics"]["total_return"]),
         "max_dd": float(res["metrics"]["max_dd"]),
         "win": float(res["metrics"].get("win_rate", float("nan"))),
