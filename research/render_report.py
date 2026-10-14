@@ -339,11 +339,31 @@ code{background:#1b2029;padding:1px 5px;border-radius:4px;font-size:12px}
 """
 
 
+def _target_note(cagr: float) -> str:
+    """警告框第 2 条按**实际展示的 preset** 生成。
+
+    2026-10-14:这条原先写死成"而 0 个达到 30% 的目标"。换 preset 之后它就成了
+    假陈述 —— 展示的那个恰恰达到了 30%。同一类 bug 在"跑输/跑赢"上也出现过一次。
+    教训:**凡是从 preset 派生的叙述,都必须由 preset 算出来,不能写死。**
+    """
+    if cagr >= 0.30:
+        return ('"达到 30%" 这件事本身不作为有效性证据。'
+                'stage1+stage2 的 82 个配置没有一个达到 30%;达标靠的是把每笔风险'
+                '从 1% 提到 5%(后来 15 个杠杆配置里有 5 个达标),'
+                '而 E[R] 在各杠杆下恒定不变 —— 变的是倍数,不是信号质量')
+    return ('这个 preset <b>没有</b>达到 30% CAGR 的目标 —— stage1+stage2 的 82 个'
+            '配置全部未达标,' + ('而且它连无脑持有都没跑赢' if cagr < 0.156 else ''))
+
+
 def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                 cfg: dict, bench: pd.Series, summary: dict) -> str:
     e = html.escape
     tot = float(eq["equity"].iloc[-1] / eq["equity"].iloc[0] - 1)
     bench_tot = float(bench.iloc[-1] / bench.iloc[0] - 1) if bench is not None and len(bench) else float("nan")
+    # ⚠️ 必须同口径比较。警告框原来拿策略的 CAGR 去比基准的**总收益**,
+    # 一年期两者接近但不相等 —— 那是拿两个不同的量做差。
+    _bdays = (pd.Timestamp(bench.index[-1]) - pd.Timestamp(bench.index[0])).days if len(bench) else 0
+    bench_cagr = ((1 + bench_tot) ** (365.25 / _bdays) - 1) if _bdays > 0 else float("nan")
 
     parts = [f'<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">',
              f'<meta name="viewport" content="width=device-width,initial-scale=1">',
@@ -363,11 +383,14 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                  '</div>')
 
     # ---- 诚实声明(不折叠)----
-    parts.append('<div class="warn"><h3>读这份报告之前必须知道的四件事</h3><ul>'
-                 f'<li><b>这是 {summary["n_trials"]} 次试验里最好的一个</b>,'
-                 f'而 <b>0 个</b>达到 30% CAGR 的目标。'
-                 f'最好成绩 {summary["cagr"]*100:+.2f}%,同期无脑等权持有 {(bench_tot)*100:+.2f}% —— '
-                 f'<b>跑输 {abs((bench_tot - summary["cagr"]))*100:.1f}pp</b>。</li>'
+    _diff = summary["cagr"] - bench_cagr
+    _over = "跑赢" if _diff >= 0 else "跑输"
+    parts.append('<div class="warn"><h3>读这份报告之前必须知道的五件事</h3><ul>'
+                 f'<li>本 preset 最近 12 个月 <b>CAGR {summary["cagr"]*100:+.2f}%</b>,'
+                 f'同期无脑等权持有 CAGR {bench_cagr*100:+.2f}% —— '
+                 f'<b>{_over} {abs(_diff)*100:.1f}pp</b>(同口径比较)。'
+                 f'它是 {summary["n_trials"]} 次试验里选出来的。</li>'
+                 f'<li><b>{_target_note(summary["cagr"])}</b></li>'
                  f'<li><b>样本只有 {len(trades)} 笔</b>,敞口 {summary["exposure"]*100:.0f}%。'
                  f'运气对照(同止损止盈、同笔数随机入场 {summary["ctl_runs"]} 次):'
                  f'本配置位于随机分布的 <b>{summary["ctl_pct"]:.1f} 百分位</b>,'
