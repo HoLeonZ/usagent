@@ -28,7 +28,8 @@ FIRST_SIGNAL_FLOOR = "2024-04-09"     # mom120 就绪的最早日期(3 年数据
 
 def _build(args):
     p = panel_mod.load_full_panel()
-    ind = indicators.compute_indicators(p)
+    ind = indicators.compute_all(p)   # 必须用 compute_all(55列):
+                            # 带新过滤层的 preset 需要 rsi/stoch/bb/dist_high252 等列
     reg = regime.compute_regime(ind, **(presets.get_preset(args.preset).get("regime") or {}))
     return p, ind, reg
 

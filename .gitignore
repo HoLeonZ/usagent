@@ -35,3 +35,7 @@ research/results/earnings_cache.json
 
 # Claude Code 调度器运行时产物(不是项目内容)
 .claude/scheduled_tasks.lock
+
+# Playwright 检查报告时的临时产物
+.playwright-mcp/
+report-top.png

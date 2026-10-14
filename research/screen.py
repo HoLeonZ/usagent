@@ -257,7 +257,7 @@ def main() -> int:
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
     p = P.load_full_panel()
-    ind = I.compute_indicators(p)
+    ind = I.compute_all(p)
 
     if a.measure:
         m = measure(ind, a.horizon, lo=a.start, hi=a.end)
