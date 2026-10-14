@@ -43,6 +43,14 @@ MAX_RETRY = 4
 BACKOFF_BASE = 3.0            # 退避基数：3s / 9s / 27s / 81s
 
 
+# 是否采集期权链。False = 只做标的数据(本项目当前口径)。
+#
+# 关掉之后有三个连带效果:run_daily.sh 少两步(~110 分钟 -> ~7 分钟)、
+# 运行时刻不再受 ET 16:15-23:45 窗口约束、validate.py 不再断言期权链表。
+# 打开时请一并加回 run_daily.sh 里的两步,并注意窗口约束会重新生效。
+COLLECT_OPTIONS = False
+
+
 def history_start(today: date | None = None) -> date:
     t = today or date.today()
     return t - timedelta(days=365 * HISTORY_YEARS)
