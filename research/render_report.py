@@ -27,17 +27,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from research import broker, indicators, metrics, panel as panel_mod, regime, signals
+from research import (broker, indicators, metrics, panel as panel_mod, presets,
+                      regime, signals)
 
 logger = logging.getLogger("render")
 
-# 12 个月搜索里成绩最好的配置(见 search_12m.py 与提交 eed59c1)
-BEST_CFG: dict = {
-    "min_dist_high252": -0.1,
-    "max_stoch_k": 60.0,
-    "sl_mult": 1.5,
-    "tp_mult": 6.0,
-}
+# 默认渲染哪个 preset —— **从 presets.py 读,不在这里硬编码**。
+# 早先这里写死了一份 BEST_CFG(mp=1/risk=1%,CAGR +7.95%),而真正达到
+# "12 个月 CAGR >= 30%" 目标的注册 preset 是 mp=2/risk=5%(+44.5%)。
+# 报告展示的不是目标 preset —— 这个不一致由 presets.py 做单一事实来源来消除。
+DEFAULT_PRESET = "us_uptrend_pullback_12m_target"
 WIN_LO, WIN_HI = "2025-10-14", "2026-10-14"
 PRE_SIG_BARS = 60          # 卡片左侧多看多少根 K 线
 POST_EXIT_BARS = 8         # 卡片右侧多看多少根
@@ -401,7 +400,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     parts.append('<h2>配置</h2><div class="card"><table class="conds">')
     parts.append('<tr><th>项</th><th>值</th></tr>')
     for k, v in cfg.items():
-        parts.append(f'<tr><td>{e(str(k))}</td><td>{e(str(v))}</td></tr>')
+        parts.append(f'<tr><td>signal.{e(str(k))}</td><td>{e(str(v))}</td></tr>')
     for k in ("max_hold", "risk_per_trade", "max_positions",
               "max_volume_participation", "intraday_tiebreak"):
         parts.append(f'<tr><td>{e(k)}</td><td>{e(str(summary["preset"].get(k)))}</td></tr>')
@@ -479,25 +478,26 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
 
 # ---------------------------------------------------------------- 入口
 
-def run(lo: str, hi: str, cfg: dict) -> tuple:
+def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET) -> tuple:
+    P = presets.get_preset(preset_name)
     p = panel_mod.load_full_panel()
     ind = indicators.compute_all(p)
     reg = regime.compute_regime(ind)
 
-    kw = dict(signals.V21_SIGNAL_PARAMS)
-    for k in ("min_dist_high252", "max_stoch_k", "max_rsi14",
-              "max_bb_pctb", "min_adx14", "min_xs_mom120"):
-        if cfg.get(k) is not None:
-            kw[k] = cfg[k]
-    sig = signals.select_entries(ind, start_date=lo, end_date=hi, regime_df=reg, **kw)
+    # 信号:preset 里声明的 signal 字典直接透传(含可选过滤层)。
+    # preset 是**单一事实来源** —— 不在这里重新拼参数,否则报告展示的配置
+    # 会与 presets.py 里注册的那个悄悄分叉。
+    sig = signals.select_entries(ind, start_date=lo, end_date=hi,
+                                regime_df=reg if P.get("regime") else None,
+                                **P["signal"])
 
-    preset = {
-        "atr_sl_mult": cfg["sl_mult"], "atr_tp_mult": cfg["tp_mult"],
-        "max_hold": 18, "max_positions": 1, "risk_per_trade": 0.01,
-        "max_volume_participation": 0.10, "intraday_tiebreak": "sl_first",
-        "initial_cash": 100_000.0,
-    }
-    res = broker.simulate(preset, sig, ind, start=lo, end=hi, cost_bps_roundtrip=5.0)
+    # 执行:broker 只吃它认识的键
+    preset = {k: P[k] for k in (
+        "atr_sl_mult", "atr_tp_mult", "max_hold", "max_positions",
+        "risk_per_trade", "max_volume_participation", "intraday_tiebreak") if k in P}
+    preset.setdefault("initial_cash", 100_000.0)
+    res = broker.simulate(preset, sig, ind, start=lo, end=hi,
+                          cost_bps_roundtrip=P.get("cost_bps_roundtrip", 5.0))
 
     # 每笔对应的信号日:入场日是信号日之后的第一个交易日,取 ≤ 入场日 的最后一个信号
     sig_dates = {}
@@ -513,20 +513,27 @@ def run(lo: str, hi: str, cfg: dict) -> tuple:
 
     ts = metrics.tail_stats(res["trades"])
     summary = {
-        "preset_name": "us_uptrend_pullback_12m_best", "preset": preset,
+        "preset_name": preset_name, "preset": preset, "signal": P["signal"],
         "lo": lo, "hi": hi,
         "cagr": metrics.cagr(eq["equity"], eq["date"]),
         "max_dd": float(res["metrics"]["max_dd"]),
         "win": float(res["metrics"]["win_rate"]) if len(res["trades"]) else float("nan"),
         "e_r": float(ts["expectancy_r"]), "exposure": float(res["metrics"]["avg_exposure"]),
-        "sig_dates": sig_dates, "n_trials": 106,
+        "sig_dates": sig_dates, "n_trials": P.get("n_comparisons", 106),
     }
 
     # 运气对照:**真跑**,不硬编码。同止损止盈、同交易笔数的随机入场 200 次,
     # 再算本配置落在该分布的第几百分位。渲染一份报告多花 ~1 分钟,换的是
     # "报告里的每个数字都可复现"。
     from research import search_12m as _S
-    cfg = {**BEST_CFG, **preset}
+    # 对照配置:从**已解析的 broker preset** 反推,保证对照与策略同杠杆同止损止盈。
+    # (search_12m.make_preset 读的是 sl_mult/tp_mult 这套键名,broker preset 用的是
+    #  atr_sl_mult/atr_tp_mult —— 名字不同,值必须一致,否则对照就不成立。)
+    cfg = {
+        "sl_mult": preset["atr_sl_mult"], "tp_mult": preset["atr_tp_mult"],
+        "max_hold": preset["max_hold"], "max_positions": preset["max_positions"],
+        "risk_per_trade": preset["risk_per_trade"],
+    }
     ctl = _S.random_control(ind, cfg, len(res["trades"]),
                             n_runs=200, lo=lo, hi=hi, seed=0)
     summary.update({
@@ -569,13 +576,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--lo", default=WIN_LO)
     ap.add_argument("--hi", default=WIN_HI)
+    ap.add_argument("--preset", default=DEFAULT_PRESET)
     ap.add_argument("--out", default=str(OUT_HTML))
     a = ap.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
-    res, eq, ind, bench, summary = run(a.lo, a.hi, BEST_CFG)
+    res, eq, ind, bench, summary = run(a.lo, a.hi, a.preset)
     n = len(res["trades"])
-    doc = render_html(res["trades"], eq, ind, BEST_CFG, bench, summary)
+    doc = render_html(res["trades"], eq, ind, summary["signal"], bench, summary)
 
     problems = selfcheck(doc, n)
     out = Path(a.out)
