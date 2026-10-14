@@ -132,7 +132,7 @@ def _scale(vals, lo, hi, y0, y1):
 
 
 def candles_svg(win: pd.DataFrame, tr: pd.Series, sig_date: pd.Timestamp,
-                symbol: str) -> str:
+                symbol: str, uid: str = "0") -> str:
     """单笔的 K 线卡:价格面板 + 成交量面板 + 止损止盈线 + 入场/出场标记。"""
     n = len(win)
     if n < 3:
@@ -164,7 +164,11 @@ def candles_svg(win: pd.DataFrame, tr: pd.Series, sig_date: pd.Timestamp,
     vol = (win["volume"].to_numpy(float) / vmax * VOL_H)
 
     p = [f'<svg viewBox="0 0 {SVG_W} {total_h}" class="kchart" '
-         f'preserveAspectRatio="none" role="img" aria-label="{html.escape(symbol)} K线">']
+         f'preserveAspectRatio="none" role="img" aria-label="{html.escape(symbol)} K线">',
+         # MA 折线必须被裁到价格面板内。不裁的话,预热期 MA 值可能落在价格带外,
+         # 折线会被画进下方的成交量面板里 —— 看着像"成交量的均线",会误导。
+         f'<defs><clipPath id="pc-{uid}">'
+         f'<rect x="0" y="0" width="{SVG_W}" height="{PRICE_H}"/></clipPath></defs>']
 
     # 信号日之前的区域压暗
     dates = list(win["date"])
@@ -213,7 +217,8 @@ def candles_svg(win: pd.DataFrame, tr: pd.Series, sig_date: pd.Timestamp,
             pts.append(f"{xs[i]:.1f},{yy:.1f}")
             started = True
         if started and len(pts) > 1:
-            p.append(f'<polyline points="{" ".join(pts)}" class="{cls}"/>')
+            p.append(f'<polyline points="{" ".join(pts)}" class="{cls}" '
+                     f'clip-path="url(#pc-{uid})"/>')
 
     # 入场 / 出场标记
     if pd.Timestamp(tr["entry_date"]) in dates:
@@ -348,18 +353,30 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     parts.append(f'<h1>回测明细 · {e(summary["preset_name"])}</h1>')
     parts.append(f'<div class="sub">窗口 {e(summary["lo"])} → {e(summary["hi"])} ｜ '
                  f'成交 {len(trades)} 笔 ｜ 未计滑点,成本双边 5bp</div>')
+    # 价格口径必须披露(2026-10-14 独立验证查出:报告展示的是复权价,而非可成交价)
+    parts.append('<div class="sub" style="margin-top:-10px;color:var(--warn)">'
+                 '⚠️ 价格口径:面板价 = <b>分红再投资的复权价(total-return)</b>,'
+                 '<b>不是当日的可成交价</b>。派息日之后,复权价与真实盘口价会分叉'
+                 '(实测 APA 复权 22.65 vs 当日实际 23.18)。'
+                 '回测用复权价是正确的(否则除息跳空会被误判为止损),'
+                 '但<b>照这份报告下单时,请以行情软件的实际报价为准</b>。'
+                 '另:换成未复权价重跑,成交集合会变(实测 10 笔,APA 出局、FFBC 进入)。'
+                 '</div>')
 
     # ---- 诚实声明(不折叠)----
-    parts.append('<div class="warn"><h3>读这份报告之前必须知道的三件事</h3><ul>'
-                 f'<li><b>这是 82 个候选里最好的一个</b>,而 <b>0 个</b>达到 30% CAGR 的目标。'
+    parts.append('<div class="warn"><h3>读这份报告之前必须知道的四件事</h3><ul>'
+                 f'<li><b>这是 {summary["n_trials"]} 次试验里最好的一个</b>,'
+                 f'而 <b>0 个</b>达到 30% CAGR 的目标。'
                  f'最好成绩 {summary["cagr"]*100:+.2f}%,同期无脑等权持有 {(bench_tot)*100:+.2f}% —— '
                  f'<b>跑输 {abs((bench_tot - summary["cagr"]))*100:.1f}pp</b>。</li>'
                  f'<li><b>样本只有 {len(trades)} 笔</b>,敞口 {summary["exposure"]*100:.0f}%。'
-                 f'运气对照(同止损止盈、同笔数随机入场 200 次)的 p90 是 '
-                 f'{summary["ctl_p90"]*100:+.1f}% —— 本配置落在随机分布的这个位置附近,'
-                 f'证据很弱。</li>'
+                 f'运气对照(同止损止盈、同笔数随机入场 {summary["ctl_runs"]} 次):'
+                 f'本配置位于随机分布的 <b>{summary["ctl_pct"]:.1f} 百分位</b>,'
+                 f'即约 {100 - summary["ctl_pct"]:.0f}% 的随机策略做得和它一样好或更好'
+                 f'(随机 p90 {summary["ctl_p90"]*100:+.1f}%、最大 {summary["ctl_max"]*100:+.1f}%)。'
+                 f'按 §5,{summary["n_trials"]} 次试验的选择偏差折算后门槛还要更高。</li>'
                  '<li><b>卡片右侧显示出场之后的价格</b>(供复盘),那是展示,不参与信号。'
-                 '信号日清单只用当日及之前的数据。</li>'
+                 '信号日清单只用当日及之前的数据 —— 已由截断重算独立验证。</li>'
                  '</ul></div>')
 
     # ---- 摘要 ----
@@ -438,7 +455,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                      f'<span class="tag">入场 {e(str(pd.Timestamp(t["entry_date"]).date()))} @ {t["entry_price"]:.2f}</span>'
                      f'<span class="tag">出场 {e(str(pd.Timestamp(t["exit_date"]).date()))} @ {t["exit_price"]:.2f}</span>'
                      '</div>')
-        parts.append(candles_svg(win, t, sig_d, sym))
+        parts.append(candles_svg(win, t, sig_d, sym, uid=str(i)))
         parts.append('<div class="chead" style="margin-top:8px">'
                      f'<span class="tag">信号日 atr_pct {t["atr_pct"]*100:.2f}%</span>'
                      f'<span class="tag neg">止损宽度 {t["sl_width"]*100:.2f}%</span>'
@@ -502,8 +519,20 @@ def run(lo: str, hi: str, cfg: dict) -> tuple:
         "max_dd": float(res["metrics"]["max_dd"]),
         "win": float(res["metrics"]["win_rate"]) if len(res["trades"]) else float("nan"),
         "e_r": float(ts["expectancy_r"]), "exposure": float(res["metrics"]["avg_exposure"]),
-        "sig_dates": sig_dates, "ctl_p90": 0.059,
+        "sig_dates": sig_dates, "n_trials": 106,
     }
+
+    # 运气对照:**真跑**,不硬编码。同止损止盈、同交易笔数的随机入场 200 次,
+    # 再算本配置落在该分布的第几百分位。渲染一份报告多花 ~1 分钟,换的是
+    # "报告里的每个数字都可复现"。
+    from research import search_12m as _S
+    cfg = {**BEST_CFG, **preset}
+    ctl = _S.random_control(ind, cfg, len(res["trades"]),
+                            n_runs=200, lo=lo, hi=hi, seed=0)
+    summary.update({
+        "ctl_runs": ctl["n_runs"], "ctl_p90": ctl["p90"], "ctl_max": ctl["max"],
+        "ctl_pct": float((ctl["cagrs"] < summary["cagr"]).mean() * 100.0),
+    })
     return res, eq, ind, bench, summary
 
 

@@ -171,6 +171,9 @@ def random_control(ind: pd.DataFrame, cfg: dict, n_trades: int, *,
         "median": float(np.median(a)), "p90": float(np.quantile(a, 0.90)),
         "p95": float(np.quantile(a, 0.95)), "max": float(a.max()),
         "p_ge_target": float((a >= TARGET_CAGR).mean()),
+        # 原始分布一并返回 —— 调用方要用它算"策略落在第几百分位"。
+        # 早先 render_report 把 p90 硬编码成常数,独立验证指出那是不可复现的。
+        "cagrs": a,
     }
 
 
