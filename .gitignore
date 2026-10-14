@@ -32,3 +32,6 @@ venv/
 
 # 抓取产物,可再生(706 个工作日的 Nasdaq 财报日历,约 33KB)
 research/results/earnings_cache.json
+
+# Claude Code 调度器运行时产物(不是项目内容)
+.claude/scheduled_tasks.lock
