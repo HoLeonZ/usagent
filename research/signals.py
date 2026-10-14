@@ -64,6 +64,15 @@ def select_entries(
     min_mom120: float = 0.18,
     close_ma60_buffer: float = 0.0,
     regime_df: pd.DataFrame | None = None,
+    # ---- 可选技术指标过滤层(2026-10-14 新增)--------------------------
+    # 全部默认 None/关闭 ⇒ 原有行为一字不变(既有测试因此仍然有效)。
+    # 这些是**额外的收窄条件**,叠加在 A~F 之上,不改变 uptrend_pullback 的骨架。
+    max_rsi14: float | None = None,          # RSI 超卖:回调到低位
+    max_bb_pctb: float | None = None,        # 布林位置:贴近下轨
+    max_stoch_k: float | None = None,        # KDJ 低位
+    min_adx14: float | None = None,          # 趋势强度:只要趋势够陡的
+    min_dist_high252: float | None = None,   # 52 周位置:不要接在深跌里
+    min_xs_mom120: float | None = None,      # 横截面:相对同池要够强
 ) -> pd.DataFrame:
     """上升趋势中的回调做多信号(左闭右开 [start_date, end_date))。
 
@@ -110,6 +119,27 @@ def select_entries(
     # A' —— 趋势质量增强(可选):close 需高出 MA60 一定缓冲
     if close_ma60_buffer > 0:
         mask = mask & (df["close"] >= df["ma60"] * (1 + close_ma60_buffer))
+
+    # ---- 可选技术指标过滤层(2026-10-14)------------------------------
+    # 每个都是"再 ∧ 一个条件",且显式要求该指标非空 —— 指标预热期不得因为
+    # NaN 与比较运算的怪癖而被静默放进或踢出。
+    for col, thr, op in (
+        ("rsi14", max_rsi14, "<="),
+        ("bb_pctb", max_bb_pctb, "<="),
+        ("stoch_k", max_stoch_k, "<="),
+        ("adx14", min_adx14, ">="),
+        ("dist_high252", min_dist_high252, ">="),
+        ("xs_mom120", min_xs_mom120, ">="),
+    ):
+        if thr is None:
+            continue
+        if col not in df.columns:
+            raise SignalError(
+                f"过滤层用到 {col},但面板里没有这一列 —— "
+                f"需要先用 indicators.compute_all() 而不是 compute_indicators()"
+            )
+        cond = (df[col] <= thr) if op == "<=" else (df[col] >= thr)
+        mask = mask & df[col].notna() & cond
 
     # 信号窗口
     mask = mask & (df["date"] >= pd.Timestamp(start_date)) & (df["date"] < pd.Timestamp(end_date))
