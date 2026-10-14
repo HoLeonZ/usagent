@@ -1,0 +1,34 @@
+# usagent —— 版本控制排除清单
+#
+# 63MB 的 SQLite。排除它的理由不是"不可再生",而是:
+#   1) 它是大体量二进制,每次变更都会把仓库再撑大一份,即使事后 git rm 也删不干净;
+#   2) 现有内容(ohlcv 425,332 行)可以用一条命令重下(~35 分钟)。
+# ⚠️ 但**如果**将来开始收集 option_chain / iv_history,这两张表是不可回补的
+#    (Yahoo 期权链只有当前快照)。到那时 DB 就变成"唯一副本",排除它的理由
+#    从"体量"升级为"它就是原始数据本身" —— 那时应当考虑把 DB 移出版本树之外
+#    并单独备份,而不是继续放在 data/ 里。
+# 审计 M9 因此要求:**先建 .gitignore,再 git init**(顺序不能反)。
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# 运行产物:日志、临时结果
+logs/
+*.log
+
+# 注意:**不要**忽略 data/universe_*.json 与 data/universe_*.csv。
+# src/ 里没有任何代码写它们,它们是人工的 point-in-time 输入 ——
+# 属于"口径定义",必须可追溯、可 diff。
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# 抓取产物,可再生(706 个工作日的 Nasdaq 财报日历,约 33KB)
+research/results/earnings_cache.json
