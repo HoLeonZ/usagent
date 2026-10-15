@@ -80,3 +80,22 @@ def test_data_vintage_is_a_stable_fingerprint():
         "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-02"]),
     })
     assert data_vintage(panel) == "rows=3;symbols=2;from=2024-01-01;to=2024-01-02"
+
+
+def test_load_full_panel_explains_a_missing_database(tmp_path, monkeypatch):
+    """缺库/缺表时要报**可行动**的错,而不是抛一句 sqlite 原始异常(§0 Fail-Fast)。
+
+    data/*.db 不入库(§7),所以 fresh clone 上第一条该跑的是取数。此前这里抛的是
+    `sqlite3.OperationalError: no such table: ohlcv` —— 一个新读者拿到这句话不知道
+    该干什么。实测于干净 worktree(只有 tracked 文件、没有 data/*.db)。
+    """
+    import sqlite3
+
+    import db as dbmod
+    from research import panel
+
+    empty = tmp_path / "empty.db"
+    sqlite3.connect(str(empty)).close()
+    monkeypatch.setattr(dbmod, "connect", lambda: sqlite3.connect(str(empty)))
+    with pytest.raises(panel.PanelError, match="download_ohlcv"):
+        panel.load_full_panel()

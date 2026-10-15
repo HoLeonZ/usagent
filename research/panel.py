@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Iterable
 
 import pandas as pd
@@ -95,7 +96,18 @@ def load_full_panel(
     con = db.connect()
     try:
         if symbols is None:
-            rows = con.execute("SELECT DISTINCT symbol FROM ohlcv ORDER BY symbol").fetchall()
+            try:
+                rows = con.execute(
+                    "SELECT DISTINCT symbol FROM ohlcv ORDER BY symbol").fetchall()
+            except sqlite3.OperationalError as exc:
+                # data/*.db 不入库(§7),fresh clone 上第一条该跑的是取数。裸抛
+                # sqlite3.OperationalError 会让新读者不知道要干什么(§0 Fail-Fast 要求
+                # 立刻抛,但也要抛得可行动)。
+                raise PanelError(
+                    f"读不到 ohlcv 表({exc})—— data/*.db 不随仓库分发,先跑取数:\n"
+                    f"    python src/download_ohlcv.py --universe oi100 --as-of <YYYY-MM-DD>\n"
+                    f"    (--as-of 钉住数据 vintage;窗口与命令见 research/README.md 的「复现」)"
+                ) from exc
             symbols = [r[0] for r in rows]
         symbols = list(symbols)
         if not symbols:
