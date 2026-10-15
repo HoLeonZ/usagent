@@ -1,0 +1,11 @@
+# golden baseline —— 交易列表与权益曲线的行为锁(CLAUDE.md §6)
+# 只放哈希与计数,不放任何收益数字(§7:仓库里不得有历史业绩主张)。
+# 重生成:python -m research.golden_baseline --regen
+# 重生成 = 承认交易列表漂移,必须在 commit message / PR 里说明原因与量级。
+case=us_uptrend_pullback_wfv
+preset=us_uptrend_pullback_wfv
+window=2024-04-09..2026-10-14
+vintage=rows=425332;symbols=596;from=2023-10-16;to=2026-10-13
+n_trades=40
+trades_sha256=d60a00eba8144e61534e4c7b06503be2c9dfde95de47a0d28cc0f93f25a2aaf2
+equity_sha256=ba213c39ac2a006e347a6f5a1a57265d1766557e3d303784136dedfdf9bf1407

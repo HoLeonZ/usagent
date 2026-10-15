@@ -50,6 +50,10 @@ CASES: list[dict] = [
      "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": True},
     {"name": "us_uptrend_pullback_12m_target", "preset": "us_uptrend_pullback_12m_target",
      "start": "2025-10-14", "end": "2026-10-14", "is_cli_default": False},
+    # WFV 搜索选出的候选:窗口取**全可评估期**,让行为锁覆盖尽量多的分支
+    # (它的预注册搜索期是 2024-04-09..2025-10-13,holdout 是 2025-10-14..2026-10-13)。
+    {"name": "us_uptrend_pullback_wfv", "preset": "us_uptrend_pullback_wfv",
+     "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": False},
 ]
 
 
