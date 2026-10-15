@@ -20,6 +20,11 @@ logs/
 # src/ 里没有任何代码写它们,它们是人工的 point-in-time 输入 ——
 # 属于"口径定义",必须可追溯、可 diff。
 
+# 本仓库铁律(CLAUDE.md)—— 按项目所有者决定:**不纳入版本控制**。
+# ⚠️ 代码与文档里共有 52 处 「CLAUDE.md §2(d)」这类引用,对没有这份文件的读者是悬空的;
+#    若将来要把仓库分享出去,建议在 README 里加一句「铁律文件不随仓库分发」。
+CLAUDE.md
+
 # Python
 __pycache__/
 *.py[cod]
@@ -30,8 +35,13 @@ venv/
 # macOS
 .DS_Store
 
-# 抓取产物,可再生(706 个工作日的 Nasdaq 财报日历,约 33KB)
-research/results/earnings_cache.json
+# 研究运行产物 —— **整个目录**都不入库(CLAUDE.md §7(a))。
+# 「results/, trades.csv, metrics JSON, 以及生成的报告都必须保持 gitignored。
+#  提交它们是 contract violation —— 一个 fresh clone 必须零历史业绩主张。」
+# 2026-10-15 审计实测:此前只有 earnings_cache.json 被忽略,于是 BASELINE.md(374 行
+# CAGR/Sharpe 胜率表)、trades_12m.html(296KB 逐笔)、三份 *.json 全被提交了。
+# 例外只有**人工的**口径输入(见下面 data/universe_* 的说明),那些不在这里。
+research/results/
 
 # Claude Code 调度器运行时产物(不是项目内容)
 .claude/scheduled_tasks.lock
