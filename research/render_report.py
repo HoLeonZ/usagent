@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from core.preset_contract import resolve
 from research import (broker, indicators, metrics, panel as panel_mod, presets,
                       regime, signals)
 
@@ -34,7 +35,8 @@ logger = logging.getLogger("render")
 
 # 默认渲染哪个 preset —— **从 presets.py 读,不在这里硬编码**。
 # 早先这里写死了一份 BEST_CFG(mp=1/risk=1%,CAGR +7.95%),而真正达到
-# "12 个月 CAGR >= 30%" 目标的注册 preset 是 mp=2/risk=5%(+44.5%)。
+# "12 个月 CAGR >= 30%" 目标的注册 preset 是 mp=2/risk=5%。⚠️ 该目标在 2026-10-15
+# 修正记账/口径后**已不再达成**(CAGR +10.61%),报告里的数字一律现算,不写死在这里。
 # 报告展示的不是目标 preset —— 这个不一致由 presets.py 做单一事实来源来消除。
 DEFAULT_PRESET = "us_uptrend_pullback_12m_target"
 WIN_LO, WIN_HI = "2025-10-14", "2026-10-14"
@@ -66,7 +68,11 @@ def condition_rows(ind: pd.DataFrame, symbol: str, sig_date: pd.Timestamp,
     def num(v, n=2):
         return "—" if not np.isfinite(v) else f"{v:.{n}f}"
 
-    sp = signals.V21_SIGNAL_PARAMS
+    # 阈值必须与**引擎实际用的**一致:引擎是 select_entries(**preset["signal"]),
+    # 而 select_entries 的缺省值就是 V21_SIGNAL_PARAMS ⇒ 合并两者即可。
+    # (此前直接用全局常量:只要某个 preset 改了 A~E 任一阈值,卡片上的「阈值」列
+    #  与 ✓/✗ 就会与引擎分叉 —— 与本轮修掉的 7 键白名单是同一类。)
+    sp = {**signals.V21_SIGNAL_PARAMS, **cfg}
     out = [
         # A 趋势
         ("A1", "close > MA60", f"{r['close']:.2f} @{r['ma60']:.2f}",
@@ -147,14 +153,17 @@ def candles_svg(win: pd.DataFrame, tr: pd.Series, sig_date: pd.Timestamp,
     sl_px = float(tr["entry_price"]) * (1.0 - float(tr["sl_width"]))
     tp_px = float(tr["entry_price"]) * (1.0 + float(tr["tp_width"]))
 
-    lo = float(min(win["low"].min(), sl_px))
-    hi = float(max(win["high"].max(), tp_px))
+    # ⚠️ 整张卡只用**一套价**:as-traded(raw_*)。入场/出场/止损/止盈价都是 raw 空间的
+    # (broker 的执行与记账都在 raw 空间),蜡烛与均线若画复权价,两套轴会在同一张图里
+    # 错位 —— 2026-10-15 复核实测最大错位 14.8%,表现为「图上出现从未发生的止损击穿」。
+    lo = float(min(win["raw_low"].min(), sl_px))
+    hi = float(max(win["raw_high"].max(), tp_px))
     pad = (hi - lo) * 0.06 or 1.0
     lo, hi = lo - pad, hi + pad
-    y = _scale(win["close"].to_numpy(float), lo, hi, 0, PRICE_H)
-    yo = _scale(win["open"].to_numpy(float), lo, hi, 0, PRICE_H)
-    yh = _scale(win["high"].to_numpy(float), lo, hi, 0, PRICE_H)
-    yl = _scale(win["low"].to_numpy(float), lo, hi, 0, PRICE_H)
+    y = _scale(win["raw_close"].to_numpy(float), lo, hi, 0, PRICE_H)
+    yo = _scale(win["raw_open"].to_numpy(float), lo, hi, 0, PRICE_H)
+    yh = _scale(win["raw_high"].to_numpy(float), lo, hi, 0, PRICE_H)
+    yl = _scale(win["raw_low"].to_numpy(float), lo, hi, 0, PRICE_H)
     xs = [PAD_L + i * step + step / 2 for i in range(n)]
 
     # 成交量
@@ -198,7 +207,7 @@ def candles_svg(win: pd.DataFrame, tr: pd.Series, sig_date: pd.Timestamp,
 
     # K 线
     for i in range(n):
-        cls = "up" if win["close"].iloc[i] >= win["open"].iloc[i] else "dn"
+        cls = "up" if win["raw_close"].iloc[i] >= win["raw_open"].iloc[i] else "dn"
         x = xs[i]
         p.append(f'<line x1="{x:.1f}" y1="{yh[i]:.1f}" x2="{x:.1f}" y2="{yl[i]:.1f}" class="wick {cls}"/>')
         top, bot = min(yo[i], y[i]), max(yo[i], y[i])
@@ -206,7 +215,8 @@ def candles_svg(win: pd.DataFrame, tr: pd.Series, sig_date: pd.Timestamp,
                  f'height="{max(bot-top,1):.1f}" class="body {cls}"/>')
 
     # MA20 / MA60
-    for col, cls in (("ma20", "ma20"), ("ma60", "ma60")):
+    # 均线也要在同一条轴(raw)上,否则「价格穿过均线」的视觉是假的。
+    for col, cls in (("raw_ma20", "ma20"), ("raw_ma60", "ma60")):
         pts, started = [], False
         for i in range(n):
             v = win[col].iloc[i]
@@ -339,20 +349,25 @@ code{background:#1b2029;padding:1px 5px;border-radius:4px;font-size:12px}
 """
 
 
-def _target_note(cagr: float) -> str:
-    """警告框第 2 条按**实际展示的 preset** 生成。
+def _target_note(cagr: float, bench_cagr: float) -> str:
+    """警告框第 2 条按**当次算出的** cagr / 基准生成 —— 一个字都不许写死。
 
-    2026-10-14:这条原先写死成"而 0 个达到 30% 的目标"。换 preset 之后它就成了
-    假陈述 —— 展示的那个恰恰达到了 30%。同一类 bug 在"跑输/跑赢"上也出现过一次。
-    教训:**凡是从 preset 派生的叙述,都必须由 preset 算出来,不能写死。**
+    ⚠️ 这条路走过两次、两次翻车,教训同一条:
+      * 2026-10-14:写死「0 个达到 30% 的目标」,换 preset 后成了假陈述;
+      * 2026-10-15:≥30% 分支写死「15 个杠杆配置里有 5 个达标」,并把基准门槛写死成
+        字面量 0.156(同一次渲染算出的 bench_cagr 其实是另一个数)。修正引擎后同一根
+        杠杆旋钮 1%/2%/5%/25% → +3.35%/+6.45%/+10.61%/+13.23%,怎么推都到不了 30%
+        —— 那句达标叙述已不可复现。
+    两个分支现在都由参数派生;要复核自己跑 run_baseline。
     """
     if cagr >= 0.30:
-        return ('"达到 30%" 这件事本身不作为有效性证据。'
-                'stage1+stage2 的 82 个配置没有一个达到 30%;达标靠的是把每笔风险'
-                '从 1% 提到 5%(后来 15 个杠杆配置里有 5 个达标),'
-                '而 E[R] 在各杠杆下恒定不变 —— 变的是倍数,不是信号质量')
-    return ('这个 preset <b>没有</b>达到 30% CAGR 的目标 —— stage1+stage2 的 82 个'
-            '配置全部未达标,' + ('而且它连无脑持有都没跑赢' if cagr < 0.156 else ''))
+        return ('「达到 30%」本身不作为有效性证据:同一根杠杆旋钮换个取值或换个窗口就能'
+                '得到完全不同的数,而风险归一化后的 E[R] 不随杠杆变 —— 变的是倍数,不是'
+                '信号质量。判据见本框其余各条;复核:python -m research.run_baseline')
+    _rel = ('而且它连无脑持有都没跑赢' if cagr < bench_cagr else '它跑赢了同期等权持有')
+    return (f'这个 preset 在<b>本窗口</b>没有达到 30% CAGR 的目标'
+            f'({cagr*100:+.2f}% &lt; 30%),{_rel}(基准 {bench_cagr*100:+.2f}%)。'
+            f'30% 是目标,不是有效性判据 —— 判据见本框其余各条。')
 
 
 def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
@@ -370,32 +385,45 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
              f'<title>回测明细 · {e(summary["preset_name"])}</title>',
              f'<style>{CSS}</style></head><body><div class="wrap">']
     parts.append(f'<h1>回测明细 · {e(summary["preset_name"])}</h1>')
+    _spec = summary["preset"]
+    _slip = (f'含执行滑点(f(ATR,参与率),scale={_spec["atr_slip_scale"]:g})'
+             if _spec["atr_slip_scale"] > 0 else '零滑点')
     parts.append(f'<div class="sub">窗口 {e(summary["lo"])} → {e(summary["hi"])} ｜ '
-                 f'成交 {len(trades)} 笔 ｜ 未计滑点,成本双边 5bp</div>')
-    # 价格口径必须披露(2026-10-14 独立验证查出:报告展示的是复权价,而非可成交价)
+                 f'成交 {len(trades)} 笔 ｜ {_slip},成本双边 '
+                 f'{_spec["cost_bps_roundtrip"]:g}bp</div>')
+    # 价格口径必须披露。2026-10-15 起是**双轨**(§3(b)):指标用复权价、成交与记账用
+    # as-traded 价 —— 旧版这段写的是「回测用复权价是正确的」,在新语义下正好相反。
     parts.append('<div class="sub" style="margin-top:-10px;color:var(--warn)">'
-                 '⚠️ 价格口径:面板价 = <b>分红再投资的复权价(total-return)</b>,'
-                 '<b>不是当日的可成交价</b>。派息日之后,复权价与真实盘口价会分叉'
-                 '(实测 APA 复权 22.65 vs 当日实际 23.18)。'
-                 '回测用复权价是正确的(否则除息跳空会被误判为止损),'
-                 '但<b>照这份报告下单时,请以行情软件的实际报价为准</b>。'
-                 '另:换成未复权价重跑,成交集合会变(实测 10 笔,APA 出局、FFBC 进入)。'
+                 '⚠️ 价格口径(双轨,§3(b)):数学指标与条件清单用 <b>分红回补价(total-return)</b>;'
+                 '而<b>成交价、止损止盈触发、跳空判定、逐日市值与现金记账一律用当日的 '
+                 'as-traded 价</b>;E 条件的成交额代理量 <code>amount60</code> 同样是 '
+                 'as-traded 口径(volume × as-traded close)——它比的是绝对美元阈值,'
+                 '用复权价会让「能不能进池」取决于未来的分红。K 线卡上的一切(蜡烛、均线、止损止盈线、买卖标记)都画在 '
+                 '<b>as-traded</b> 这一条轴上,与真实成交同源。'
+                 '现金分红在持有穿过除息日时<b>显式入账</b>并计入该笔净盈亏(§3(c))。'
+                 '照这份报告下单时,请以行情软件的实际报价为准。'
                  '</div>')
 
     # ---- 诚实声明(不折叠)----
     _diff = summary["cagr"] - bench_cagr
     _over = "跑赢" if _diff >= 0 else "跑输"
+    if summary.get("ctl_runs"):
+        _ctl_line = (
+            f'运气对照(同止损止盈、同笔数随机入场 {summary["ctl_runs"]} 次):'
+            f'本配置位于随机分布的 <b>{summary["ctl_pct"]:.1f} 百分位</b>,'
+            f'即约 {100 - summary["ctl_pct"]:.0f}% 的随机策略做得和它一样好或更好'
+            f'(随机 p90 {summary["ctl_p90"]*100:+.1f}%、最大 {summary["ctl_max"]*100:+.1f}%)。')
+    else:
+        _ctl_line = ("运气对照本次未跑(control_runs=0)—— 这份报告因此**不含**"
+                     "「位于随机分布第几百分位」那条判词。")
     parts.append('<div class="warn"><h3>读这份报告之前必须知道的五件事</h3><ul>'
                  f'<li>本 preset 最近 12 个月 <b>CAGR {summary["cagr"]*100:+.2f}%</b>,'
                  f'同期无脑等权持有 CAGR {bench_cagr*100:+.2f}% —— '
                  f'<b>{_over} {abs(_diff)*100:.1f}pp</b>(同口径比较)。'
                  f'它是 {summary["n_trials"]} 次试验里选出来的。</li>'
-                 f'<li><b>{_target_note(summary["cagr"])}</b></li>'
+                 f'<li><b>{_target_note(summary["cagr"], bench_cagr)}</b></li>'
                  f'<li><b>样本只有 {len(trades)} 笔</b>,敞口 {summary["exposure"]*100:.0f}%。'
-                 f'运气对照(同止损止盈、同笔数随机入场 {summary["ctl_runs"]} 次):'
-                 f'本配置位于随机分布的 <b>{summary["ctl_pct"]:.1f} 百分位</b>,'
-                 f'即约 {100 - summary["ctl_pct"]:.0f}% 的随机策略做得和它一样好或更好'
-                 f'(随机 p90 {summary["ctl_p90"]*100:+.1f}%、最大 {summary["ctl_max"]*100:+.1f}%)。'
+                 f'{_ctl_line}'
                  f'按 §5,{summary["n_trials"]} 次试验的选择偏差折算后门槛还要更高。</li>'
                  '<li><b>卡片右侧显示出场之后的价格</b>(供复盘),那是展示,不参与信号。'
                  '信号日清单只用当日及之前的数据 —— 已由截断重算独立验证。</li>'
@@ -424,9 +452,11 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     parts.append('<tr><th>项</th><th>值</th></tr>')
     for k, v in cfg.items():
         parts.append(f'<tr><td>signal.{e(str(k))}</td><td>{e(str(v))}</td></tr>')
-    for k in ("max_hold", "risk_per_trade", "max_positions",
-              "max_volume_participation", "intraday_tiebreak"):
-        parts.append(f'<tr><td>{e(k)}</td><td>{e(str(summary["preset"].get(k)))}</td></tr>')
+    # 执行参数**全部**由已解析的 spec 渲染,不手写键名清单:手写清单会让新增的执行键
+    # 从报告里静默消失。2026-10-15 复核实测:旧版只印了 5 个键,比引擎实际读的少 9 个。
+    for k in sorted(summary["preset"]):
+        parts.append(f'<tr><td>{e(k)}</td><td>'
+                     f'{e(str(summary["preset"][k]))}</td></tr>')
     parts.append('</table></div>')
 
     # ---- 交易总表 ----
@@ -485,7 +515,11 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                      f'<span class="tag">计划风险 ${t["risk_amount"]:,.0f}</span>'
                      f'<span class="tag">毛盈亏 ${t["gross_pnl"]:,.0f}</span>'
                      f'<span class="tag">费用 ${t["fees"]:,.0f}</span>'
-                     f'<span class="tag">净盈亏 <b>${t["net_pnl"]:,.0f}</b></span>'
+                     # 分红必须单独列:净 = 毛 + 分红 − 费用(§3(c))。不列出来,持仓穿过
+                     # 除息日的那几笔三个数就对不上(实测 VNOM 差 $1,662)。
+                     + (f'<span class="tag pos">分红 ${t["dividends"]:,.0f}</span>'
+                        if float(t.get("dividends") or 0) != 0 else '')
+                     + f'<span class="tag">净盈亏 <b>${t["net_pnl"]:,.0f}</b></span>'
                      '</div>')
         parts.append('<table class="conds"><tr><th>#</th><th>条件</th>'
                      '<th>信号日实际值</th><th>阈值</th><th></th></tr>')
@@ -501,11 +535,22 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
 
 # ---------------------------------------------------------------- 入口
 
-def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET) -> tuple:
+def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
+        control_runs: int = 200) -> tuple:
     P = presets.get_preset(preset_name)
     p = panel_mod.load_full_panel()
     ind = indicators.compute_all(p)
-    reg = regime.compute_regime(ind)
+    # 卡片上的均线也要落在 **as-traded** 轴上(与蜡烛、止损止盈线、买卖标记同轴)——
+    # 见 candles_svg 的注释:混轴会让图上出现从未发生的止损击穿。
+    ind = ind.assign(
+        raw_ma20=ind.groupby("symbol")["raw_close"].transform(
+            lambda s: s.rolling(20, min_periods=20).mean()),
+        raw_ma60=ind.groupby("symbol")["raw_close"].transform(
+            lambda s: s.rolling(60, min_periods=60).mean()),
+    )
+    # ⚠️ 必须把 preset 的 regime 参数传进去:此前这里用函数默认值做择时,而 CLI 用
+    #    preset 值 —— preset 的 regime 一改,报告与 CLI 就分叉(审计实测差 13 笔成交)。
+    reg = regime.compute_regime(ind, **(P.get("regime") or {}))
 
     # 信号:preset 里声明的 signal 字典直接透传(含可选过滤层)。
     # preset 是**单一事实来源** —— 不在这里重新拼参数,否则报告展示的配置
@@ -514,13 +559,12 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET) -> tuple:
                                 regime_df=reg if P.get("regime") else None,
                                 **P["signal"])
 
-    # 执行:broker 只吃它认识的键
-    preset = {k: P[k] for k in (
-        "atr_sl_mult", "atr_tp_mult", "max_hold", "max_positions",
-        "risk_per_trade", "max_volume_participation", "intraday_tiebreak") if k in P}
-    preset.setdefault("initial_cash", 100_000.0)
-    res = broker.simulate(preset, sig, ind, start=lo, end=hi,
-                          cost_bps_roundtrip=P.get("cost_bps_roundtrip", 5.0))
+    # 执行:**整包透传**。此前这里是一份 7 键白名单,对 broker 实际会读的键静默丢弃
+    # (position_fraction / sl_pct / tp_pct / atr_slip_scale / trailing_sl),
+    # 实测同一个 preset 在报告与 CLI 上跑出差 45.5pp 的两条曲线。
+    # 现在唯一的展开入口是契约的 resolve(),CLI 与报告读到的是同一份参数。
+    preset = resolve(P)
+    res = broker.simulate(preset, sig, ind, start=lo, end=hi)
 
     # 每笔对应的信号日:入场日是信号日之后的第一个交易日,取 ≤ 入场日 的最后一个信号
     sig_dates = {}
@@ -557,12 +601,18 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET) -> tuple:
         "max_hold": preset["max_hold"], "max_positions": preset["max_positions"],
         "risk_per_trade": preset["risk_per_trade"],
     }
-    ctl = _S.random_control(ind, cfg, len(res["trades"]),
-                            n_runs=200, lo=lo, hi=hi, seed=0)
-    summary.update({
-        "ctl_runs": ctl["n_runs"], "ctl_p90": ctl["p90"], "ctl_max": ctl["max"],
-        "ctl_pct": float((ctl["cagrs"] < summary["cagr"]).mean() * 100.0),
-    })
+    if control_runs > 0:
+        ctl = _S.random_control(ind, cfg, len(res["trades"]),
+                                n_runs=control_runs, lo=lo, hi=hi, seed=0)
+        summary.update({
+            "ctl_runs": ctl["n_runs"], "ctl_p90": ctl["p90"], "ctl_max": ctl["max"],
+            "ctl_pct": float((ctl["cagrs"] < summary["cagr"]).mean() * 100.0),
+        })
+    else:
+        # 跳过运气对照(测试与快速迭代用)。渲染层据此不出那条判词 ——
+        # **不能**留着 NaN 让它渲染成 "nan 百分位"。
+        summary.update({"ctl_runs": 0, "ctl_p90": float("nan"),
+                        "ctl_max": float("nan"), "ctl_pct": float("nan")})
     return res, eq, ind, bench, summary
 
 

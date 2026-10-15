@@ -38,7 +38,9 @@ def make_synth_panel(symbols: tuple[str, ...] = ("AAA", "BBB"), bars: int = BARS
         frames.append(pd.DataFrame({
             "symbol": sym, "date": dates,
             "open": open_, "high": high, "low": low, "close": close,
-            "volume": volume, "amount": volume * close,
+            # as-traded 价与复权价相同(合成分红为 0)⇒ 双价格体系对这份 panel 是恒等操作。
+            "raw_open": open_, "raw_high": high, "raw_low": low, "raw_close": close,
+            "volume": volume, "amount": volume * close, "dividends": 0.0,
         }))
     return pd.concat(frames, ignore_index=True).sort_values(
         ["symbol", "date"]).reset_index(drop=True)

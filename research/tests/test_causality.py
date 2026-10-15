@@ -127,8 +127,19 @@ def test_above_ma60_ratio_uses_fabricated_zeros_during_warmup(synth_panel):
     assert a["above_ma60_ratio"].iloc[120] == pytest.approx(window.mean())
 
 
-def test_amount_is_volume_times_close(synth_panel):
-    """amount 代理量口径(设计文档 §1.2)。"""
-    ind = compute_indicators(synth_panel)
-    expect = ind["volume"] * ind["close"]
-    assert np.allclose(ind["amount"].to_numpy(), expect.to_numpy(), rtol=0, atol=0)
+def test_indicators_pass_amount_through_without_recomputing(synth_panel):
+    """compute_indicators 必须**原样透传** amount,不许用 close 自己重算。
+
+    amount 的口径由 panel.to_panel_frame 定死(volume × **as-traded** close);
+    指标层若"顺手"用分红回补 close 重算一遍,就把未来分红又注入了 E 条件 ——
+    那正是 2026-10-15 审计抓到的前视(740 个就绪格的 E 判定被未来分红翻转)。
+
+    这条测试用「与 close 完全无关的 amount」来钉:只要指标层重算,立刻红。
+    (旧版本写的是 `amount == volume × close`,在新口径下它恒真 —— 因为它拿的是同一个
+     被复权的 close,区分不出两套价。)
+    """
+    p = synth_panel.copy()
+    p["amount"] = p["volume"] * 7.5            # 与 close 无关的常数
+    ind = compute_indicators(p)
+    assert np.allclose(ind["amount"].to_numpy(), p["amount"].to_numpy(), rtol=0, atol=0)
+

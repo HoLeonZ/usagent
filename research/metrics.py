@@ -203,6 +203,19 @@ def deflated_sharpe_ratio(observed_sharpe: float, n_trials: int, *,
             "deflated_sharpe": dsr, "dsr_p_value": p, "n_trials": int(n_trials)}
 
 
+def bonferroni_t_threshold(family_size: int, alpha: float = 0.05) -> float:
+    """Bonferroni 校正后的**双侧** t 门槛(CLAUDE.md §5(c))。
+
+    报告一次多参数扫描的结果时,族错误率要按比较次数折减:
+        t_crit = Φ⁻¹(1 − α/(2k))
+    单次(k=1, α=0.05)给出 1.96;4 层给 2.498;12 次给 2.865。
+    没有这一步,「优于基准」这类判词会在未达族显著性的 t 上就印出来。
+    """
+    if family_size < 1:
+        raise ValueError(f"family_size 必须 >= 1,得到 {family_size}")
+    return _norm_ppf(1.0 - alpha / (2.0 * family_size))
+
+
 def sharpe_significance_pvalue(observed_sharpe: float, n_returns: int,
                                trading_days_per_year: int = TRADING_DAYS) -> float:
     if n_returns < 2:

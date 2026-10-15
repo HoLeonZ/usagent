@@ -12,7 +12,8 @@ v33_long_mirror 是 short_reversal v33 的做多镜像,五个条件严格对应:
 语义:T 日收盘满足全部条件 → T+1 开盘买入(由 broker.py 执行)。
 排序分 score = mom120,broker 按分数降序抢占仓位。
 
-**E 条件的上界是这里唯一的口径分歧点。** amount60 是代理量(volume × close,
+**E 条件的上界是这里唯一的口径分歧点。** amount60 是代理量(volume ×
+**as-traded** close,见 panel.to_panel_frame —— 不能用复权价,否则 E 判定依赖未来分红),
 见 panel.py),hiagent 的 [3e7, 3e8] 是 A 股主板口径。美股实测 NVDA 的
 amount60 ≈ $26.0B/天,上界 $300M 几乎全被击穿。max_amount=None 表示移除上界。
 两者都跑、都记 n_trials,让结果回答"这条 A 股筛选能不能搬"。

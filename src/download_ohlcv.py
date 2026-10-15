@@ -121,15 +121,19 @@ def fetch_with_split(batch: list[str], start: date, end: date,
 
 
 def download(universe_name: str, limit: int | None, skip_covered: bool,
-             recent_days: int | None = None) -> int:
+             recent_days: int | None = None,
+             as_of: date | None = None) -> int:
     """recent_days 为 None 时做 3 年全量回补；给定值则只拉最近 N 天做增量刷新。"""
     uni = load_universe(universe_name)
     symbols = list(uni.symbols[:limit] if limit else uni.symbols)
+    # as_of 用来**钉住**数据 vintage:默认取今天,给了值就按给定日期算窗口。
+    # 不钉住的话同一份代码在两个日期会下到两份不同的数据,结果不可复现(§0)。
+    today = as_of or date.today()
     if recent_days:
-        start = date.today() - timedelta(days=recent_days)
+        start = today - timedelta(days=recent_days)
     else:
-        start = history_start()
-    end = date.today()
+        start = history_start(today)
+    end = today
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     run_id = f"ohlcv-{now}"
 
@@ -178,11 +182,15 @@ def main() -> int:
     ap.add_argument("--universe", default="tight", choices=["all", "oi100", "tight"])
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--no-skip", action="store_true", help="不跳过已覆盖的标的")
+    ap.add_argument("--as-of", type=date.fromisoformat, default=None,
+                    metavar="YYYY-MM-DD",
+                    help="钉住数据窗口的右端(默认为今天);用于复现一份既有 vintage")
     ap.add_argument("--recent", type=int, default=None, metavar="DAYS",
                     help="增量模式：只拉最近 N 天（每日任务用，约 1 分钟）")
     a = ap.parse_args()
     try:
-        download(a.universe, a.limit, not a.no_skip, recent_days=a.recent)
+        download(a.universe, a.limit, not a.no_skip, recent_days=a.recent,
+             as_of=a.as_of)
     except RateLimited as exc:
         log.error("被限流中止：%s（已写入的数据保留，重跑会自动续）", exc)
         return 2

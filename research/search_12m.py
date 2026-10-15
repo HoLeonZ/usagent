@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from core import costs
 from research import broker, indicators, metrics, panel as panel_mod, presets, regime, signals
 
 logger = logging.getLogger("search")
@@ -77,9 +78,12 @@ def make_preset(cfg: dict) -> dict:
         "max_hold": cfg.get("max_hold", BASE_EXIT["max_hold"]),
         "max_positions": cfg.get("max_positions", 1),
         "risk_per_trade": cfg.get("risk_per_trade", 0.01),
-        "max_volume_participation": 0.10,
+        "max_volume_participation": costs.MAX_VOLUME_PARTICIPATION,
         "intraday_tiebreak": "sl_first",
-        "initial_cash": 100_000.0,
+        "initial_cash": costs.INITIAL_CASH,
+        "position_fraction": 1.0,          # §2(a):派生量,风险预算下不生效
+        "atr_slip_scale": costs.ATR_SLIP_SCALE,
+        "cost_bps_roundtrip": costs.COST_BPS_ROUNDTRIP,
     }
 
 
@@ -103,8 +107,8 @@ def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
 
     preset = make_preset(cfg)
     try:
-        res = broker.simulate(preset, sig, ind, start=lo, end=hi,
-                              cost_bps_roundtrip=5.0)
+        # 不覆盖成本口径 —— 让引擎读 preset 里的(§2(b) 单一来源)
+        res = broker.simulate(preset, sig, ind, start=lo, end=hi)
     except broker.BrokerError as exc:
         return {"cagr": None, "trades": 0, "reason": str(exc)[:40], "cfg": cfg}
 
@@ -159,8 +163,7 @@ def random_control(ind: pd.DataFrame, cfg: dict, n_trades: int, *,
             rows.append(row)
         sig = pd.DataFrame(rows)[signals.ENTRY_COLS]
         try:
-            res = broker.simulate(preset, sig, ind, start=lo, end=hi,
-                                  cost_bps_roundtrip=5.0)
+            res = broker.simulate(preset, sig, ind, start=lo, end=hi)
             c = metrics.cagr(res["equity"]["equity"], res["equity"]["date"])
             if np.isfinite(c):
                 cagrs.append(float(c))
@@ -200,6 +203,16 @@ def stage1(ind, reg) -> tuple[pd.DataFrame, int]:
             r.update(axis=axis, value=v)
             rows.append(r)
     return pd.DataFrame(rows), n
+
+
+def _wf_fmt(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "  (没有任何折窗有结果)"
+    d = df.copy()
+    d["train_cagr"] = d["train_cagr"].map(lambda v: f"{v*100:+.1f}%")
+    d["test_cagr"] = d["test_cagr"].map(lambda v: f"{v*100:+.1f}%")
+    return d[["train_lo", "train_hi", "train_cagr", "train_trades",
+              "test_lo", "test_hi", "test_cagr", "test_trades", "cfg"]].to_string(index=False)
 
 
 def _fmt(df: pd.DataFrame) -> str:
@@ -269,11 +282,111 @@ def stage2(ind, reg) -> tuple[pd.DataFrame, int]:
     return pd.DataFrame(rows), n
 
 
+# ---------------------------------------------------------------- Walk-Forward(§5(b))
+# 铁律原文:Optimization logic MUST enforce Walk-Forward Validation (WFV) with strict
+# out-of-sample (OOS) testing windows.
+#
+# 为什么必须有:stage1/stage2 是在**同一个窗口**上取 argmax,而且 stage2 还对胜者在同
+# 一窗口继续精调退出参数。2026-10-15 审计复跑显示胜者的**五个参数全部落在网格边界**上
+# —— 边界最优意味着「最优」由网格取景范围决定,不由数据决定。WFV 不能消除过拟合,
+# 但它让「选出来的配置在没见过的数据上是什么样」变成一个必须报出来的数。
+
+
+def cfg_key(cfg: dict) -> str:
+    """配置的规范字符串 —— 折窗结果里用它记住「这一折选了哪一个」。"""
+    return json.dumps({k: cfg[k] for k in sorted(cfg)}, sort_keys=True, default=str)
+
+
+def make_folds(start: str, end: str, *, train_months: int, test_months: int,
+               step_months: int) -> list[tuple[str, str, str, str]]:
+    """滚动折窗 [(train_lo, train_hi, test_lo, test_hi), ...],全部左闭右开。
+
+    训练窗紧邻其测试窗之前;窗与窗之间不重叠;整体不越过 end。
+    """
+    if min(train_months, test_months, step_months) < 1:
+        raise ValueError("train_months / test_months / step_months 必须 >= 1")
+    out: list[tuple[str, str, str, str]] = []
+    lo, end_ts = pd.Timestamp(start), pd.Timestamp(end)
+    while True:
+        tr_hi = lo + pd.DateOffset(months=train_months)
+        te_hi = tr_hi + pd.DateOffset(months=test_months)
+        if te_hi > end_ts:
+            break
+        out.append((lo.strftime("%Y-%m-%d"), tr_hi.strftime("%Y-%m-%d"),
+                    tr_hi.strftime("%Y-%m-%d"), te_hi.strftime("%Y-%m-%d")))
+        lo = lo + pd.DateOffset(months=step_months)
+    if not out:
+        raise ValueError(
+            f"在 {start}..{end} 里排不下一个 fold(train={train_months}m + "
+            f"test={test_months}m)—— WFV 需要比单窗口更长的历史(§5(b))"
+        )
+    return out
+
+
+def walk_forward(ind, reg, *, grid: list[dict], folds: list[tuple],
+                 criterion: str = "cagr", evaluate_fn=None) -> pd.DataFrame:
+    """训练窗选参 → **测试窗**验证。
+
+    ⚠️ 选择只看训练窗。测试窗在每个 fold 里只被评估**一次**,且在选完参数之后 ——
+       这是 §5(b) 的全部内容。判据是「同一份网格在训练窗上的 argmax」,不做任何
+       测试窗反馈(那正是 stage2 的错)。
+
+    返回每折一行:train_lo/hi、train_cagr、test_lo/hi、test_cagr、test_trades、cfg。
+    `evaluate_fn` 只用于测试注入(默认走模块级 `evaluate`)。
+    """
+    if not folds:
+        raise ValueError("folds 不能为空 —— WFV 至少需要一个训练/测试折(§5(b))")
+    if not grid:
+        raise ValueError("grid 不能为空 —— 没有候选就没有要验证的东西")
+    ev = evaluate_fn or evaluate
+
+    rows: list[dict] = []
+    for tr_lo, tr_hi, te_lo, te_hi in folds:
+        best: dict | None = None
+        best_val = float("-inf")
+        best_trades = 0
+        for cfg in grid:                          # ← 只碰训练窗
+            r = ev(ind, reg, cfg, tr_lo, tr_hi)
+            v = r.get(criterion)
+            if v is None or not np.isfinite(v):
+                continue
+            if v > best_val:
+                best, best_val = dict(cfg), float(v)
+                # 训练窗里「胜者」成交了几笔 —— 只看 CAGR 会漏掉「零交易空转」那种胜者
+                best_trades = int(r.get("trades") or 0)
+        if best is None:
+            logger.warning("fold %s..%s:训练窗上没有任何有效配置", tr_lo, tr_hi)
+            continue
+        te = ev(ind, reg, best, te_lo, te_hi)     # ← 测试窗只读一次
+        rows.append({
+            "train_lo": tr_lo, "train_hi": tr_hi,
+            "train_cagr": best_val, "train_trades": best_trades,
+            "test_lo": te_lo, "test_hi": te_hi,
+            "test_cagr": te.get("cagr"),
+            "test_trades": te.get("trades"),
+            "test_e_r": te.get("e_r"),
+            "cfg": cfg_key(best),
+        })
+    return pd.DataFrame(rows)
+
+
+def wf_grid() -> list[dict]:
+    """WFV 用的网格 —— 与 stage2 的信号层同源,保证「被检验的东西」就是被交付的那类。"""
+    keys = list(STAGE2_SIGNAL_GRID)
+    return [{k: v for k, v in zip(keys, combo) if v is not None}
+            for combo in itertools.product(*(STAGE2_SIGNAL_GRID[k] for k in keys))]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage1", action="store_true", help="单轴扫描")
     ap.add_argument("--stage2", action="store_true", help="有界组合搜索")
     ap.add_argument("--control", action="store_true", help="运气对照")
+    ap.add_argument("--walk-forward", action="store_true",
+                    help="训练窗选参 → 测试窗验证(CLAUDE.md §5(b),优化逻辑必须 enforce)")
+    ap.add_argument("--train-months", type=int, default=6)
+    ap.add_argument("--test-months", type=int, default=3)
+    ap.add_argument("--step-months", type=int, default=3)
     ap.add_argument("--lo", default=WIN_LO)
     ap.add_argument("--hi", default=WIN_HI)
     ap.add_argument("--runs", type=int, default=200)
@@ -295,6 +408,34 @@ def main() -> int:
               f"中位 {ctl['median']*100:+.1f}%  p90 {ctl['p90']*100:+.1f}%  "
               f"p95 {ctl['p95']*100:+.1f}%  最大 {ctl['max']*100:+.1f}%")
         print(f"随机达到 >=30% 的概率: {ctl['p_ge_target']*100:.1f}%")
+        return 0
+
+    if a.walk_forward:
+        folds = make_folds(FULL_LO, WIN_HI, train_months=a.train_months,
+                           test_months=a.test_months, step_months=a.step_months)
+        grid = wf_grid()
+        df = walk_forward(ind, reg, grid=grid, folds=folds)
+        print(f"\nWalk-Forward:{len(folds)} 折(train {a.train_months}m / "
+              f"test {a.test_months}m / step {a.step_months}m),每折在训练窗上扫 "
+              f"{len(grid)} 个配置(§5(b):选择只看训练窗)")
+        print(_wf_fmt(df))
+        if df.empty:
+            return 1
+        # 诚实对照:同一批**测试窗**上,不做任何过滤的 v21 基线是什么样。
+        base = [evaluate(ind, reg, {}, r["test_lo"], r["test_hi"])["cagr"]
+                for _, r in df.iterrows()]
+        win = float(np.mean(df["test_cagr"]))
+        bl = float(np.nanmean(base))
+        print(f"\n测试窗平均 CAGR:  WFV 选出的配置 {win*100:+.2f}%   "
+              f"v21 基线(不做任何过滤) {bl*100:+.2f}%   差 {(win-bl)*100:+.2f}pp")
+        print(f"测试窗 CAGR 为正的折: {int((df['test_cagr'] > 0).sum())}/{len(df)}")
+        if win <= bl:
+            print("⚠️ 训练窗选参在测试窗上**没有跑赢**什么都不做的基线 —— "
+                  "这就是 §5(b) 要暴露的东西,不要把训练窗上的数字当结论。")
+        if a.out:
+            Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+            df.to_json(a.out, orient="records", force_ascii=False, indent=1)
+            print(f"已写入 {a.out}")
         return 0
 
     if a.stage2:

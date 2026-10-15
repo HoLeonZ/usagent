@@ -7,7 +7,9 @@
     **直接复用 src/series.py,不重写复权数学。**
 
     amount 列是代理量(设计文档 §1.2):usagent 的 ohlcv 没有成交额字段,
-    用 volume × close 合成,以支撑 hiagent 的 E 条件。
+    用 **volume × as-traded close** 合成,以支撑 hiagent 的 E 条件。
+    ⚠️ 不能用复权 close:E 条件把它比**绝对美元阈值**,用复权价会让 T 日的判定
+       依赖 T 之后的分红(见 to_panel_frame 的 docstring)。
 
 一次性载入全历史而不是逐窗口载入,有两个好处:
   1. 指标只需算一遍(见 indicators 模块),而非 34 个窗口各算一遍;
@@ -32,6 +34,45 @@ logger = logging.getLogger(__name__)
 MAX_LOOKBACK_BARS = 120
 
 PANEL_COLS = ["symbol", "date", "open", "high", "low", "close", "volume", "amount"]
+
+# as-traded 价(= 未做**分红**回补)。数据源给的 Close 本身已是拆股后价位
+# (src/series.py::source_is_split_adjusted 实测),所以「raw」在这里的含义就是
+# 「没有把未来分红折进去」的那一套价 —— 止损伤、跳空判定、逐日市值与现金记账用它。
+RAW_COLS = ["raw_open", "raw_high", "raw_low", "raw_close"]
+
+
+def to_panel_frame(sym: str, adj: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
+    """把一个标的的 (复权序列, as-traded 序列) 合成面板行。
+
+    价格分两套(CLAUDE.md §3(b) Dual-Price System):
+      * `open/high/low/close` —— 分红回补后的价,供数学指标(MA / MACD / ATR / 动量)用;
+      * `raw_open/.../raw_close` —— as-traded 价,供止损止盈触发、跳空判定、逐日市值
+        与现金记账用。全仓 grep 不到第二条价格序列,是 2026-10-15 审计的一处 HIGH。
+
+    ⚠️ `amount` 必须用 **raw_close** 算。用复权 close 算会让 T 日的成交额成为
+       T **之后**所有分红的函数,而 E 条件把它与绝对美元常数 [3e7, 3e8] 比较 ——
+       于是「能不能进池」变成数据 vintage 的函数(实测 740 个就绪格的判定被翻转)。
+       比例型指标对同一个因子免疫(分子分母同乘一个常数),所以只有绝对比对要改。
+    """
+    dates_adj = pd.DatetimeIndex(adj.index)
+    dates_raw = pd.DatetimeIndex(raw.index)
+    if not dates_adj.equals(dates_raw):
+        raise PanelError(
+            f"{sym}: 复权序列与 as-traded 序列的日期轴不一致"
+            f"(复权 {len(dates_adj)} 行 / as-traded {len(dates_raw)} 行)"
+        )
+
+    out = adj.reset_index().rename(columns={"index": "date"})
+    out["date"] = pd.to_datetime(out["date"])
+    r = (raw.reset_index()[["date", "open", "high", "low", "close"]]
+         .rename(columns={"open": "raw_open", "high": "raw_high",
+                          "low": "raw_low", "close": "raw_close"}))
+    out = out.merge(r, on="date", how="left", validate="one_to_one")
+    out["symbol"] = sym
+    if out[RAW_COLS].isna().any().any():
+        raise PanelError(f"{sym}: as-traded 价有缺口 —— 两条序列日期对不上")
+    out["amount"] = out["volume"] * out["raw_close"]
+    return out
 
 
 class PanelError(RuntimeError):
@@ -62,12 +103,12 @@ def load_full_panel(
 
         frames: list[pd.DataFrame] = []
         for sym in symbols:
-            d = series.daily(sym, adjust=adjust, con=con)
-            if d.empty:
+            # 两套价:复权(指标) + as-traded(执行/记账)。见 to_panel_frame 的 docstring。
+            adj = series.daily(sym, adjust=adjust, con=con)
+            raw = series.daily(sym, adjust=None, con=con)
+            if adj.empty or raw.empty:
                 continue
-            d = d.reset_index()
-            d["symbol"] = sym
-            frames.append(d)
+            frames.append(to_panel_frame(sym, adj, raw))
     finally:
         con.close()
 
@@ -77,8 +118,6 @@ def load_full_panel(
         )
 
     panel = pd.concat(frames, ignore_index=True)
-    # amount 代理:成交额 ≈ 量 × 收盘(设计文档 §1.2)
-    panel["amount"] = panel["volume"] * panel["close"]
     panel = panel.sort_values(["symbol", "date"]).reset_index(drop=True)
 
     logger.info(
@@ -86,7 +125,17 @@ def load_full_panel(
         len(panel), panel["symbol"].nunique(),
         panel["date"].min().date(), panel["date"].max().date(), adjust,
     )
-    return panel[PANEL_COLS + ["dividends", "splits"]]
+    return panel[PANEL_COLS + RAW_COLS + ["dividends", "splits"]]
+
+
+def data_vintage(panel: pd.DataFrame) -> str:
+    """数据 vintage 指纹:行数 / 标的数 / 起止日。不含任何收益信息(§7)。
+
+    被 run_baseline 的结果 JSON 与 golden 基线共用 —— 没有它,「当前代码 + 一条命令」
+    复现不出任何历史数字,因为 data/*.db 本身不入库(§0/§7)。
+    """
+    return (f"rows={len(panel)};symbols={panel['symbol'].nunique()};"
+            f"from={panel['date'].min():%Y-%m-%d};to={panel['date'].max():%Y-%m-%d}")
 
 
 def first_signal_date(panel: pd.DataFrame) -> pd.Timestamp:

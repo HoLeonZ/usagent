@@ -6,16 +6,19 @@
 设计文档: docs/superpowers/specs/2026-10-14-uptrend-pullback-us-baseline-design.md
 
 本包**不修改 src/**(数据层不被交易逻辑污染)。下面这段 sys.path 垫片是
-research 能 import 到 src/ 下扁平模块(series / db / config)的唯一手段 ——
-usagent 的 src/ 不是包,`import series` 依赖 sys.path[0] == src/。
+research 能 import 到 src/ 下扁平模块(series / db / config)与仓库根的 core/
+(§2(b) 的常数单一来源)的唯一手段 —— usagent 的 src/ 不是包,
+`import series` 依赖 sys.path[0] == src/。
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parent.parent / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+for _p in (ROOT, SRC):                       # 倒序插入 ⇒ src/ 落在 sys.path[0],扁平模块优先
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
-__all__ = ["SRC"]
+__all__ = ["SRC", "ROOT"]

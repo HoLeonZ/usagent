@@ -17,16 +17,25 @@ FLAT = 100.0
 
 
 def mk_panel(bars: list[dict]) -> pd.DataFrame:
-    """bars: [{date, open, high, low, close, volume, atr_pct?}] → broker 需要的 panel。"""
+    """bars: [{date, open, high, low, close, volume, atr_pct?, raw_*, dividends?}] → broker 需要的 panel。
+
+    ⚠️ raw_* 缺省**等于**复权价。这是刻意的:无分红的标的两套价相同,于是「执行改用
+    as-traded 价」(§3(b)) 对这些标的必须是**逐位不变的操作** —— 既有的合成用例因此
+    全部继续有效,而它也正是这条改动没引入额外回归的证据。
+    """
     rows = []
     for b in bars:
+        o, h, lo, c = (b.get("open", FLAT), b.get("high", FLAT),
+                       b.get("low", FLAT), b.get("close", FLAT))
         rows.append({
             "symbol": b.get("symbol", "AAA"),
             "date": pd.Timestamp(b["date"]),
-            "open": b.get("open", FLAT), "high": b.get("high", FLAT),
-            "low": b.get("low", FLAT), "close": b.get("close", FLAT),
+            "open": o, "high": h, "low": lo, "close": c,
+            "raw_open": b.get("raw_open", o), "raw_high": b.get("raw_high", h),
+            "raw_low": b.get("raw_low", lo), "raw_close": b.get("raw_close", c),
             "volume": b.get("volume", 1_000_000.0),
             "atr_pct": b.get("atr_pct", 0.02),
+            "dividends": b.get("dividends", 0.0),
         })
     return pd.DataFrame(rows)
 
@@ -51,7 +60,11 @@ def flat_days(n: int, start: str = "2024-01-01") -> list[dict]:
 
 BASE = {"tp_pct": 0.2628, "sl_pct": 0.021, "max_hold": 18, "max_positions": 1,
         "position_fraction": 1.0, "max_volume_participation": 0.10,
-        "intraday_tiebreak": "sl_first", "initial_cash": 100_000.0}
+        "intraday_tiebreak": "sl_first", "initial_cash": 100_000.0,
+        # 契约(§2(a)/§4)要求这两个键显式在场。这里取 0 滑点 / 5bp 成本,是为了让
+        # 机制类断言(仓位、止损、记账)不被价格冲击污染;滑点本身由
+        # 「滑点(§4(c))」一节单独测,那一节显式设 atr_slip_scale=1.0。
+        "atr_slip_scale": 0.0, "cost_bps_roundtrip": 5.0}
 
 
 # ---------------------------------------------------------------- 权益曲线
@@ -430,3 +443,379 @@ def test_trailing_stop_off_by_default():
     r = simulate(p, mk_signal("2024-01-01", atr_pct=0.05), panel,
                  start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
     assert r["trades"].iloc[0]["exit_price"] == pytest.approx(95.0)   # 初始止损,未被抬高
+
+
+# ------------------------------------------------- 滑点(CLAUDE.md §4(c))
+# 铁律原文:Execution slippage (price impact between signal trigger and fill) MUST be
+# modeled dynamically as a function of the asset's current ATR (Average True Range) and
+# the order's participation rate. Do not use flat-rate slippage (e.g. 1 tick).
+#
+# 2026-10-15 审计实测:旧实现滑点**恒为 0** —— 钩子默认 0.0、两个交付 preset 都没开它,
+# 且公式里参与率的位置被字面量 1.0 占死。而「开了会怎样」的实测是:CAGR 从 +44.5%
+# 一路到 −28.9%。也就是说「达标 30%」完全取决于一根从未被设定、从未被记录的旋钮取 0。
+
+
+def _atr_preset(**over) -> dict:
+    p = {k: v for k, v in BASE.items() if k not in ("sl_pct", "tp_pct")}
+    p.update({"atr_sl_mult": 1.0, "atr_tp_mult": 12.51})
+    p.update(over)
+    return p
+
+
+def _entry_of(preset: dict, *, atr_pct: float = 0.02, volume: float = 1_000_000.0) -> pd.Series:
+    """跑一笔并返回成交记录。
+
+    用 25 根 bar 让仓位走到 max_hold 平仓 —— trades 只记录**已平仓**的仓位,
+    平盘 panel 下 ATR 归一化的止损止盈都不会被触发。
+    """
+    bars = flat_days(25)
+    for b in bars:
+        b["volume"] = volume
+    panel = mk_panel(bars)
+    r = simulate(preset, mk_signal("2024-01-01", atr_pct=atr_pct), panel,
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    assert len(r["trades"]) == 1, f"预期恰好一笔平仓,得到 {len(r['trades'])}"
+    return r["trades"].iloc[0]
+
+
+def test_slippage_is_zero_when_not_configured():
+    """不设 atr_slip_scale ⇒ 入场价逐位等于开盘价(老行为,合成用例继续有效)。"""
+    assert _entry_of(_atr_preset())["entry_price"] == pytest.approx(FLAT)
+
+
+def test_slippage_grows_with_atr():
+    """买入付更高的价,且 ATR 越大滑点越大(f(ATR) 这一半)。"""
+    lo = _entry_of(_atr_preset(atr_slip_scale=1.0), atr_pct=0.02)
+    hi = _entry_of(_atr_preset(atr_slip_scale=1.0), atr_pct=0.08)
+    assert lo["entry_price"] > FLAT, "滑点必须抬升入场价"
+    assert hi["entry_price"] > lo["entry_price"], "ATR 越大,滑点越大"
+
+
+def test_slippage_grows_with_participation_rate():
+    """同一笔订单吃掉 bar 成交量的比例越大,滑点越大(f(参与率) 这一半)。
+
+    成交量降到 1/100 ⇒ 参与率 ×100 ⇒ sqrt 律下滑点放大约 10 倍。
+    """
+    thin = _entry_of(_atr_preset(atr_slip_scale=1.0), volume=10_000.0)
+    thick = _entry_of(_atr_preset(atr_slip_scale=1.0), volume=1_000_000.0)
+    assert thin["entry_price"] > thick["entry_price"], "参与率越高,滑点越大"
+    ratio = ((thin["entry_price"] / FLAT - 1.0) / (thick["entry_price"] / FLAT - 1.0))
+    assert ratio == pytest.approx(10.0, rel=0.15), f"sqrt 律下应约 10x,实测 {ratio:.2f}x"
+
+
+def test_slippage_stays_within_the_participation_cap():
+    """滑点用**受量能上限约束后**的参与率算 ⇒ 不会因为一笔巨单而爆炸。
+
+    ⚠️ 场景必须让 target_qty **大于** cap,否则 min() 不咬合、这条断言分辨不出
+    「用没用截断后的参与率」—— 第三层复核实测:旧场景 target_qty == cap == 1000,
+    把 `qty_pre = min(target_qty(o), cap)` 改成 `qty_pre = target_qty(o)` 之后,
+    entry_price 逐位不变、用例照样绿。现在 initial_cash=1e7 ⇒ target_qty=1e5 ≫ cap=1e3。
+    """
+    p = _atr_preset(atr_slip_scale=1.0, initial_cash=10_000_000.0)
+    bars = flat_days(25)
+    for b in bars:
+        b["volume"] = 10_000.0
+    r = simulate(p, mk_signal("2024-01-01", atr_pct=0.08), mk_panel(bars),
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    t = r["trades"].iloc[0]
+    assert t["size"] == 1_000, "量能上限没咬合(应恰好 = 0.10 × 10_000)"
+    # 参与率 = 1000/10000 = 0.10 ⇒ slip = 1.0 × 0.08 × sqrt(0.10)
+    assert t["entry_price"] == pytest.approx(FLAT * (1.0 + 0.08 * np.sqrt(0.10)), rel=1e-12)
+
+
+def test_slippage_requires_valid_atr():
+    """开了滑点却拿不到 atr_pct ⇒ fail-fast,不得静默退化为零滑点(§0)。"""
+    with pytest.raises(BrokerError, match="atr_slip_scale"):
+        _entry_of(_atr_preset(atr_slip_scale=1.0), atr_pct=float("nan"))
+
+
+def test_slippage_scale_must_be_non_negative():
+    with pytest.raises(BrokerError, match="atr_slip_scale"):
+        simulate(_atr_preset(atr_slip_scale=-0.5), mk_signal("2024-01-01"),
+                 mk_panel(flat_days(6)), start="2024-01-01", end="2024-01-15")
+
+
+# ------------------------------------------------- 结算隔离(CLAUDE.md §2(d))
+# 铁律原文:differentiate Free_Cash / Locked_Margin / Settling_Funds。Do NOT assume
+# funds from a sell order at T are available for a buy order at T unless explicitly
+# modeling margin borrowing with interest.
+#
+# 2026-10-15 审计实测:主循环「先平仓(用当日盘中价)后开仓(用当日开盘价)」把这条
+# 整条绕过了 —— 入场闸门直接读已被同日卖出所得充值的 cash。交付的 12m preset 里
+# 13 笔有 3 笔**必须**靠这笔钱才能成交(2026-04-29 的 MTSI 用一个多小时后才发生的
+# PCVX 盘中止损回款,付了当日开盘的入场款)。规则改为:
+#     **当日入场的预算与容量 = 上一交易日收盘时的账本快照。**
+
+
+def _two_symbol_flat(n: int, *, stop_on: int | None = None,
+                     start: str = "2024-01-01") -> pd.DataFrame:
+    """两个标的的平盘 panel;stop_on 指定第几根 bar 的 low 击穿 2.1% 止损。"""
+    rows = []
+    for i, d in enumerate(pd.bdate_range(start, periods=n)):
+        for sym in ("AAA", "BBB"):
+            b = {"date": d, "symbol": sym, "open": FLAT, "high": FLAT,
+                 "low": FLAT, "close": FLAT, "volume": 1_000_000.0, "atr_pct": 0.02}
+            if i == stop_on:
+                b["low"] = FLAT * 0.90
+            rows.append(b)
+    return mk_panel(rows)
+
+
+def _signals(*pairs) -> pd.DataFrame:
+    return pd.concat([mk_signal(d, symbol=s) for d, s in pairs], ignore_index=True)
+
+
+def test_same_day_sale_proceeds_cannot_fund_same_day_entry():
+    """卖出所得不得为**同日**入场出资。max_positions=2 ⇒ 这里只测现金这一条。"""
+    panel = _two_symbol_flat(8, stop_on=2)          # d2 = 2024-01-03 盘中击穿止损
+    p = {**BASE, "max_positions": 2}
+    sig = _signals(("2024-01-01", "AAA"), ("2024-01-02", "BBB"))   # BBB 想买在 d2 开盘
+    r = simulate(p, sig, panel, start="2024-01-01", end="2024-01-20",
+                 cost_bps_roundtrip=0.0)
+    syms = list(r["trades"]["symbol"])
+    assert syms == ["AAA"], f"BBB 用同日止损回款付了 d2 开盘的入场款:{syms}"
+
+
+def test_same_day_exit_does_not_free_a_slot_for_same_day_entry():
+    """同日出场释放的仓位槽不得为同日入场所用。
+
+    现金充足(position_fraction=0.1)⇒ 这里只测**容量**这一条:d2 开盘时 AAA 仍在场。
+    """
+    panel = _two_symbol_flat(8, stop_on=2)
+    p = {**BASE, "max_positions": 1, "position_fraction": 0.1}
+    sig = _signals(("2024-01-01", "AAA"), ("2024-01-02", "BBB"))
+    r = simulate(p, sig, panel, start="2024-01-01", end="2024-01-20",
+                 cost_bps_roundtrip=0.0)
+    assert list(r["trades"]["symbol"]) == ["AAA"]
+
+
+def test_symbol_held_at_the_open_cannot_be_re_entered_same_day():
+    """开盘时仍持有的标的不得在当日被再次建仓 —— 它当天盘中才出场。"""
+    panel = _two_symbol_flat(8, stop_on=2)
+    p = {**BASE, "max_positions": 2, "position_fraction": 0.1}
+    sig = _signals(("2024-01-01", "AAA"), ("2024-01-02", "AAA"))
+    r = simulate(p, sig, panel, start="2024-01-01", end="2024-01-20",
+                 cost_bps_roundtrip=0.0)
+    assert list(r["trades"]["symbol"]) == ["AAA"]
+
+
+def test_proceeds_are_usable_the_next_trading_day():
+    """隔日使用是合法的 —— 上面三条不得把正常的「出场后换仓」一起堵死。
+
+    这条是**反过度收紧的护栏**(不依赖第二笔平仓,只看账本状态):出场之后的每一天
+    都必须还有持仓在场。
+    """
+    panel = _two_symbol_flat(8, stop_on=2)
+    p = {**BASE, "max_positions": 2}
+    sig = _signals(("2024-01-01", "AAA"), ("2024-01-03", "BBB"))   # BBB 信号在出场日之后
+    r = simulate(p, sig, panel, start="2024-01-01", end="2024-01-20",
+                 cost_bps_roundtrip=0.0)
+    tr = r["trades"]
+    eq = r["equity"].set_index("date")
+    assert list(tr["symbol"]) == ["AAA"], "AAA 应在 d2 止损出场"
+    exit_day = tr.iloc[0]["exit_date"]
+    after = eq.loc[eq.index > exit_day]
+    assert len(after) > 0
+    assert (after["n_pos"] == 1).all(), "出场后应能开新仓 —— 隔日复用被误堵"
+
+
+def test_entry_capacity_reads_the_previous_close_not_the_current_bar():
+    """入场容量用的是**上一交易日收盘**的持仓数,不是当日出场后的持仓数。
+
+    与 test_same_day_exit_does_not_free_a_slot... 的区别:这条把「当日出场」换成
+    「当日开盘 gap 出场」—— get 到同一结论(槽位在开盘时仍被占用),但走的是另一条
+    代码分支(o <= sl_price 的 gap 路径)。
+    """
+    bars = flat_days(8)
+    bars[2].update({"open": FLAT * 0.90, "high": FLAT, "low": FLAT * 0.90, "close": FLAT})
+    panel = mk_panel(bars)
+    p = {**BASE, "max_positions": 1, "position_fraction": 0.1}
+    sig = _signals(("2024-01-01", "AAA"), ("2024-01-02", "BBB"))
+    r = simulate(p, sig, panel, start="2024-01-01", end="2024-01-20",
+                 cost_bps_roundtrip=0.0)
+    assert list(r["trades"]["symbol"]) == ["AAA"]
+    assert r["trades"].iloc[0]["exit_reason"] == "sl_gap"
+
+
+# ------------------------------------------------- 价格口径与公司行动(CLAUDE.md §3(b)/§3(c))
+# §3(b) Dual-Price System:复权价只用于**数学指标**;止损止盈触发、跳空判定、逐日市值与
+#   现金记账必须用 **as-traded 价**。
+# §3(c) Event-Sourced Corporate Actions:现金分红必须**显式**触发一笔现金存入。
+# 2026-10-15 审计实测:旧实现 open/high/low/close **四个价一起**被乘上分红回补因子,
+# 于是执行与记账全在复权价空间;而那个因子是 ∏_{事件晚于 t},即 T 日的成交价取决于
+# T 之后的除息日。另一面:1728 次分红事件没有一次进入账本。
+
+
+def test_broker_fails_fast_without_as_traded_price_columns():
+    """缺 as-traded 价 ⇒ fail-fast,不得静默退回复权价(那正是要被修掉的缺陷)。"""
+    panel = mk_panel(flat_days(6)).drop(columns=["raw_close"])
+    with pytest.raises(BrokerError, match="raw_close"):
+        simulate(BASE, mk_signal("2024-01-01"), panel,
+                 start="2024-01-01", end="2024-01-15")
+
+
+def test_entry_uses_as_traded_open_not_adjusted():
+    bars = flat_days(25)
+    for b in bars:
+        b.update({"raw_open": 100.0, "raw_high": 100.0, "raw_low": 100.0, "raw_close": 100.0,
+                  "open": 50.0, "high": 50.0, "low": 50.0, "close": 50.0})
+    r = simulate(BASE, mk_signal("2024-01-01"), mk_panel(bars),
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    assert r["trades"].iloc[0]["entry_price"] == pytest.approx(100.0)
+
+
+def test_equity_marks_positions_at_as_traded_close():
+    """逐日市值用 as-traded 收盘价(旧实现用复权价,现金记账因此不是物理现金)。"""
+    bars = flat_days(25)
+    for i, b in enumerate(bars):
+        b.update({"raw_open": 100.0, "raw_high": 100.0, "raw_low": 100.0, "raw_close": 100.0,
+                  "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0})
+        if i >= 2:                       # 入场后 as-traded 涨到 110,而复权价不动
+            b.update({"raw_open": 110.0, "raw_high": 110.0, "raw_low": 110.0, "raw_close": 110.0})
+    r = simulate(BASE, mk_signal("2024-01-01"), mk_panel(bars),
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    eq = r["equity"].set_index("date")
+    assert r["trades"].iloc[0]["size"] == 1000
+    day2 = pd.Timestamp(bars[2]["date"])
+    assert float(eq.loc[day2, "equity"]) == pytest.approx(110_000.0)
+
+
+def test_stop_loss_triggers_on_as_traded_price_when_dividend_gaps_it_down():
+    """除息跳空在 as-traded 口径下是真的会穿透止损 —— 复权口径把它抹平了(偏乐观)。"""
+    bars = flat_days(25)
+    for b in bars:
+        b.update({"raw_open": 100.0, "raw_high": 100.0, "raw_low": 100.0, "raw_close": 100.0,
+                  "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0})
+    bars[4].update({"raw_open": 95.0, "raw_high": 96.0, "raw_low": 94.0, "raw_close": 95.0,
+                    "dividends": 5.0})
+    t = simulate(BASE, mk_signal("2024-01-01"), mk_panel(bars),
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)["trades"].iloc[0]
+    assert t["exit_reason"] == "sl_gap", "95 < 止损价 98,应按开盘价 gap 出场"
+    assert t["exit_price"] == pytest.approx(95.0)
+
+
+def test_dividend_is_credited_to_cash_when_held_through_ex_date():
+    """持有穿过除息日 ⇒ 现金必须**显式**增加 size × 每股分红(§3(c))。"""
+    bars = flat_days(25)
+    bars[4]["dividends"] = 2.0
+    r = simulate(BASE, mk_signal("2024-01-01"), mk_panel(bars),
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    t = r["trades"].iloc[0]
+    eq = r["equity"].set_index("date")
+    ex_day = pd.Timestamp(bars[4]["date"])
+    step = float(eq.loc[ex_day, "equity"]) - float(eq.loc[:ex_day].iloc[-2]["equity"])
+
+    assert t["size"] == 1000
+    assert t["dividends"] == pytest.approx(2000.0), "分红没进账本"
+    assert step == pytest.approx(2000.0), "权益曲线没反映这笔现金流入"
+    assert t["net_pnl"] == pytest.approx(2000.0), (
+        "分红必须计入该笔净盈亏 —— 否则 Σ net_pnl 与现金流对不上,双式记账断裂")
+
+
+def test_dividend_is_not_credited_when_entered_on_the_ex_date():
+    """除息**当日**才建仓 ⇒ 不领这次分红(T+1 下进场者不是登记持有人)。"""
+    bars = flat_days(25)
+    bars[1]["dividends"] = 2.0           # 01-02,正是信号 T+1 的开盘入场日
+    r = simulate(BASE, mk_signal("2024-01-01"), mk_panel(bars),
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    assert r["trades"].iloc[0]["dividends"] == pytest.approx(0.0)
+
+
+def test_dividend_is_credited_even_if_stopped_out_on_the_ex_date():
+    """除息日**开盘就**被 gap 止损 ⇒ 仍要领这次分红(卖在除息日 = 含息卖出)。"""
+    bars = flat_days(25)
+    for b in bars:
+        b.update({"raw_open": 100.0, "raw_high": 100.0, "raw_low": 100.0, "raw_close": 100.0,
+                  "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0})
+    bars[4].update({"raw_open": 90.0, "raw_high": 91.0, "raw_low": 89.0, "raw_close": 90.0,
+                    "dividends": 2.0})
+    t = simulate(BASE, mk_signal("2024-01-01"), mk_panel(bars),
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)["trades"].iloc[0]
+    assert t["exit_reason"] == "sl_gap"
+    assert t["dividends"] == pytest.approx(2000.0)
+    assert t["net_pnl"] == pytest.approx(-10_000.0 + 2000.0)
+
+
+# ------------------------------------------- 成交价必须落在 bar 的价格区间内(§0/§4)
+# 2026-10-15 复核实测:atr_sl_mult=0.1 + atr_slip_scale=1.0 时,引擎在 [100,100] 的
+# 平盘 bar 上以 **102.13** 出场(高于该 bar 的最高价)—— 一次物理上不存在的成交。
+# 根因有二:(a) 入场当日那条路径缺 §4(f) 的 gap 分支,与步骤 1 不对称;
+#            (b) 滑点是对开盘价的加成,不受 bar 已实现区间约束。
+# 修法:补齐 gap 分支,并把「出场价必须在该 bar 的 as-traded [low, high] 内」作为
+# §0 的 fail-fast 断言 —— 正常区间(滑点 ≪ 止损宽度)永远满足,病态配置立刻报错。
+
+
+def _exit_bar_range(panel: pd.DataFrame, symbol: str, day) -> tuple[float, float]:
+    row = panel[(panel["symbol"] == symbol) & (panel["date"] == day)].iloc[0]
+    return float(row["raw_low"]), float(row["raw_high"])
+
+
+def _assert_exit_fills_inside_their_bars(r: dict, panel: pd.DataFrame) -> None:
+    """⚠️ 只管**出场**价(与出场日 bar 的区间)。
+
+    入场侧**不在**这条护栏内,而且入场价确实可能落在当日最高价之上 —— 那是已知且已
+    披露的建模简化(见 broker.py 里「已知建模简化」那段:实测 v1 2/41 笔、12m 3/15 笔,
+    超出 ≤0.13%)。第三层复核实测:旧名字叫 test_slippage_never_pushes_the_entry_
+    above_the_bar_high,而函数体只查出场价 —— 一条绿着的用例会让读者得出「入场侧
+    已被守住」的相反结论。名字与函数体现在都改成只管出场。
+    """
+    for _, t in r["trades"].iterrows():
+        lo, hi = _exit_bar_range(panel, t["symbol"], t["exit_date"])
+        assert lo - 1e-9 <= float(t["exit_price"]) <= hi + 1e-9, (
+            f"{t['symbol']} {t['exit_date'].date()} 成交 {t['exit_price']:.4f} "
+            f"落在 bar [{lo}, {hi}] 之外 —— 物理上不可能"
+        )
+
+
+def test_normal_configs_fill_inside_the_bar_range():
+    """正常配置(滑点 ≪ 止损宽度)下该不变量必须处处成立。"""
+    bars = flat_days(25)
+    bars[3].update({"low": 90.0})            # 击穿 2.1% 止损
+    panel = mk_panel(bars)
+    r = simulate(BASE, mk_signal("2024-01-01"), panel,
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    assert len(r["trades"]) == 1
+    _assert_exit_fills_inside_their_bars(r, panel)
+
+
+def test_exit_fills_stay_inside_the_exit_bar_range():
+    """开仓当日的**出场**分支也必须落在 bar 区间内(入场侧是已知简化,不在本用例范围)。"""
+    bars = flat_days(25)
+    for b in bars:
+        b.update({"high": FLAT + 0.5, "low": FLAT - 0.5})
+    bars[3].update({"low": FLAT * 0.90})     # 盘中击穿止损
+    panel = mk_panel(bars)
+    p = {**BASE, "atr_slip_scale": 1.0}
+    r = simulate(p, mk_signal("2024-01-01"), panel,
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    _assert_exit_fills_inside_their_bars(r, panel)
+
+
+def test_gap_through_stop_on_the_entry_bar_fills_at_the_open():
+    """入场当日开盘就已越过止损 ⇒ 按**开盘价**成交(§4(f)),不得用止损价。
+
+    2026-10-15 复核发现的原始缺陷:入场当日那条路径**缺** gap 分支(步骤 1 有、它没有),
+    于是在这种配置下报出「成交价 102.13 而该 bar 最高价只有 100」—— 物理上不存在的成交。
+    """
+    bars = flat_days(8)
+    for b in bars:
+        b["volume"] = 10_000.0
+    p = {k: v for k, v in BASE.items() if k not in ("sl_pct", "tp_pct")}
+    p.update({"atr_sl_mult": 0.1, "atr_tp_mult": 1.2, "atr_slip_scale": 1.0})
+    panel = mk_panel(bars)
+    r = simulate(p, mk_signal("2024-01-01", atr_pct=0.10), panel,
+                 start="2024-01-01", end="2024-01-20", cost_bps_roundtrip=0.0)
+    t = r["trades"].iloc[0]
+    assert t["exit_reason"] == "sl_gap"
+    assert t["exit_price"] == pytest.approx(FLAT)          # 当日开盘价 100
+    _assert_exit_fills_inside_their_bars(r, panel)
+
+
+
+def test_participation_rate_must_be_a_fraction():
+    """参与率上限必须 ∈ (0,1]:>1 等于买超整根 bar,<0 会让 sqrt 产生 NaN。"""
+    panel = mk_panel(flat_days(6))
+    for bad in (0.0, -0.1, 1.5):
+        with pytest.raises(BrokerError, match="max_volume_participation"):
+            simulate(BASE | {"max_volume_participation": bad}, mk_signal("2024-01-01"),
+                     panel, start="2024-01-01", end="2024-01-15")

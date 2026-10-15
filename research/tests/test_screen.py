@@ -130,3 +130,42 @@ def test_candidates_columns_and_ordering(ind):
     assert list(c.columns) == ["symbol", "close", "mom120", "pullback", "down_streak",
                                "ret1", "atr_pct", "amount60", "above_ma60_ratio", "score"]
     assert c["score"].is_monotonic_decreasing
+
+
+# ------------------------------------------------- 多重比较校正(CLAUDE.md §5(c))
+# 铁律原文:evaluation scripts MUST output Deflated Sharpe Ratio (DSR) or apply
+# Bonferroni corrections when reporting backtest results from multi-parameter sweeps.
+#
+# 2026-10-15 审计实测:screen.py 是仓库里唯一把统计判词**直接印给人看**的评估脚本,
+# 而它逐个层级下判词、阈值却硬编码 |t|=2(等价 α=0.05 单次),全文没有 DSR /
+# Bonferroni / n_trials。已实测触发过 t=−2.52 的判词,而 4 层级 × 3 个推荐 horizon
+# 的族门槛是 2.865。
+
+def test_bonferroni_threshold_grows_with_family_size():
+    assert screen.bonferroni_t_threshold(1) == pytest.approx(1.96, abs=0.01)
+    assert screen.bonferroni_t_threshold(4) == pytest.approx(2.498, abs=0.01)
+    assert screen.bonferroni_t_threshold(12) == pytest.approx(2.865, abs=0.02)
+    with pytest.raises(ValueError, match="family_size"):
+        screen.bonferroni_t_threshold(0)
+
+
+def test_verdict_uses_the_corrected_threshold():
+    r = pd.Series({"t_adj": 2.2, "ann": 0.10})
+    assert "优于" in screen._verdict(r, 1.96), "族规模 1 时 2.2 应判优于"
+    assert "无差别" in screen._verdict(r, 2.498), "族规模 4 时 2.2 达不到门槛,应判无差别"
+    assert "劣于" in screen._verdict(pd.Series({"t_adj": -2.9, "ann": -0.1}), 2.498)
+
+
+def test_measure_records_the_family_size_and_threshold(ind):
+    m = screen.measure(ind, 18, lo=str(ind["date"].min().date()),
+                       hi=str(ind["date"].max().date()), family_size=4)
+    assert m.attrs["family_size"] == 4
+    assert m.attrs["t_crit"] == pytest.approx(2.498, abs=0.01)
+
+
+def test_measure_defaults_the_family_to_the_number_of_tested_tiers(ind):
+    """族规模按**被检验**的层级算 —— base 是全池基准本身,不是一次比较。"""
+    m = screen.measure(ind, 18, lo=str(ind["date"].min().date()),
+                       hi=str(ind["date"].max().date()))
+    assert m.attrs["family_size"] == len(screen.COMPARED_TIERS) == 4
+    assert m.attrs["t_crit"] == pytest.approx(2.498, abs=0.01)
