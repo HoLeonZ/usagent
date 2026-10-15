@@ -96,7 +96,8 @@ def signal_kwargs(cfg: dict) -> dict:
 
 
 def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
-             lo: str = WIN_LO, hi: str = WIN_HI, *, use_regime: bool = True) -> dict:
+             lo: str = WIN_LO, hi: str = WIN_HI, *, use_regime: bool = True,
+             signals_df: pd.DataFrame | None = None) -> dict:
     """跑一个配置,返回窗口指标。**三种结果必须可区分** —— 这是 argmax(CAGR) 的前提:
 
       * 正常      → cagr 是有限数
@@ -107,9 +108,14 @@ def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
                     非法配置;若出现说明空间写错了,必须立刻知道 —— 不能静默出局却照计
                     n_trials(审计实测旧版把 BrokerError 降级成一行 cagr=None)。
     """
-    kw = signal_kwargs(cfg)
-    sig = signals.select_entries(ind, start_date=lo, end_date=hi,
-                                 regime_df=reg if use_regime else None, **kw)
+    # signals_df 非空 ⇒ 直接用调用方给好的信号表(供「其它策略族」复用本函数的
+    # 「跑回测 + 取指标 + 三种结果可区分」这套逻辑,而不是各家自己再实现一遍)。
+    if signals_df is None:
+        kw = signal_kwargs(cfg)
+        sig = signals.select_entries(ind, start_date=lo, end_date=hi,
+                                     regime_df=reg if use_regime else None, **kw)
+    else:
+        sig = signals_df
     if sig.empty:
         return {"cagr": None, "trades": 0, "reason": "no_signals", "cfg": cfg}
 
@@ -160,7 +166,8 @@ def _control_pool(ind: pd.DataFrame, lo: str, hi: str, *,
 
 def random_control(ind: pd.DataFrame, cfg: dict, n_trades: int, *,
                    n_runs: int = 200, lo: str = WIN_LO, hi: str = WIN_HI,
-                   seed: int = 0, reg: pd.DataFrame | None = None) -> dict:
+                   seed: int = 0, reg: pd.DataFrame | None = None,
+                   pool: pd.DataFrame | None = None) -> dict:
     """同止损止盈、同交易笔数、**同机会集**的随机入场对照。
 
     做法:从 _control_pool 里随机抽 n_trades 个 (symbol, date) 作为入场点,套用与候选
@@ -169,7 +176,11 @@ def random_control(ind: pd.DataFrame, cfg: dict, n_trades: int, *,
     这是本脚本里唯一能区分"策略"与"运气"的东西。
     """
     rng = np.random.default_rng(seed)
-    pool = _control_pool(ind, lo, hi, reg=reg).to_numpy(dtype=object)
+    # pool 非空 ⇒ 用调用方指定的抽样池。聚簇策略必须用这个:信号集中在少数几天时,
+    # 从「全窗口所有日」抽的对照是**分散的随机**,与聚簇的策略不可比(提案的 F4 判据
+    # 明确要求从同一聚簇日抽)。
+    _p = pool if pool is not None else _control_pool(ind, lo, hi, reg=reg)
+    pool = _p[["symbol", "date", "atr_pct"]].to_numpy(dtype=object)
     if len(pool) == 0:
         raise SearchError("随机对照的候选池为空")
 

@@ -54,6 +54,9 @@ CASES: list[dict] = [
     # (它的预注册搜索期是 2024-04-09..2025-10-13,holdout 是 2025-10-14..2026-10-13)。
     {"name": "us_uptrend_pullback_wfv", "preset": "us_uptrend_pullback_wfv",
      "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": False},
+    # 族型 preset(走 families.py 的短周期反转):同样锁全可评估期
+    {"name": "us_reversal_dip_v1", "preset": "us_reversal_dip_v1",
+     "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": False},
 ]
 
 
@@ -118,9 +121,15 @@ def run_preset(case: dict, panel: pd.DataFrame,
     """
     preset = presets.get_preset(case["preset"])
     reg = regime_mod.compute_regime(ind, **(preset.get("regime") or {}))
-    sig = signals.select_entries(
-        ind, start_date=case["start"], end_date=case["end"],
-        regime_df=reg if preset.get("regime") else None, **preset["signal"])
+    if preset.get("family"):
+        from research import families
+        sig = families.select(ind, str(preset["family"]),
+                              dict(preset.get("family_params") or {}),
+                              case["start"], case["end"], reg=reg)
+    else:
+        sig = signals.select_entries(
+            ind, start_date=case["start"], end_date=case["end"],
+            regime_df=reg if preset.get("regime") else None, **preset["signal"])
     res = broker.simulate(preset, sig, ind, start=case["start"], end=case["end"],
                           cost_bps_roundtrip=preset_cost(case["preset"]))
     return res, sig

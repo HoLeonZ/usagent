@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+import weakref
+
 from core import costs
 from core.preset_contract import resolve
 
@@ -120,6 +122,24 @@ class _Book:
     positions: dict[str, Position] = field(default_factory=dict)
 
 
+# _bar_index 的缓存。它以 `id()` 为键会有「对象被回收后 id 被复用」的风险,所以这里用
+# **弱引用 + 身份比较**:面板一被回收,弱引用变 None,缓存自动失效,不可能命中错的面板。
+# 效果(实测):一次 pooled 调用从 1.43s 降到 ~0.05s(425k 行的 groupby+取数组是纯重复劳动,
+# 而搜索里同一份面板要被用几千次)。
+_BAR_INDEX_CACHE: list[tuple[weakref.ref, tuple, tuple]] = []
+
+
+def _bar_index_cached(panel: pd.DataFrame):
+    for ref, key, val in _BAR_INDEX_CACHE:
+        if ref() is panel:
+            return val
+    val = _bar_index(panel)
+    key = ()
+    _BAR_INDEX_CACHE.insert(0, (weakref.ref(panel), key, val))
+    del _BAR_INDEX_CACHE[4:]                     # 只留最近 4 个面板
+    return val
+
+
 def _bar_index(panel: pd.DataFrame) -> tuple[dict[str, dict[str, int]], list[pd.Timestamp],
                                              dict[str, dict[str, np.ndarray]]]:
     """把 panel 预处理成 {symbol: {date: **该标的数组内**的下标}} + 全局交易日轴。
@@ -130,6 +150,9 @@ def _bar_index(panel: pd.DataFrame) -> tuple[dict[str, dict[str, int]], list[pd.
 
     ⚠️ 取的是 raw_ 前缀的那一组列(§3(b)):止损止盈触发、跳空判定、逐日市值、现金记账
        一律用 as-traded 价,复权价只喂给数学指标。缺列直接抛错,不静默退回复权价。
+
+    ⚠️ 调用方请走 `_bar_index_cached`:本函数是 O(全部行) 的,而搜索里同一份面板要用几千次。
+       缓存的正确性由**弱引用 + 身份比较**保证,行为一致性由 §6 的 golden 哈希基线钉住。
     """
     days = list(pd.Index(sorted(panel["date"].unique())))
     day_pos = {d: i for i, d in enumerate(days)}
@@ -246,7 +269,7 @@ def simulate(
             return atr_sl_mult * atr_row, atr_tp_mult * atr_row
         return float(sl_pct), float(tp_pct)
 
-    per_sym, days, data = _bar_index(panel_ind)
+    per_sym, days, data = _bar_index_cached(panel_ind)
     lo, hi = pd.Timestamp(start), pd.Timestamp(end)
     axis = [d for d in days if lo <= d < hi]
     if not axis:

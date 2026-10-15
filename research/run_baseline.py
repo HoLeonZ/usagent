@@ -52,9 +52,16 @@ def _build(args):
 
 
 def _signals(ind, reg, preset, lo, hi, *, avoid_earnings: bool = False):
-    kw = dict(preset["signal"])
-    sig = signals.select_entries(ind, start_date=lo, end_date=hi,
-                                 regime_df=reg if preset.get("regime") else None, **kw)
+    if preset.get("family"):
+        # 走 families.py 的族(str 反转、volshock、cap…)。**只有一处实现**:
+        # 这里不再重写掩码,避免与 families.select 分叉。
+        from research import families
+        sig = families.select(ind, str(preset["family"]),
+                              dict(preset.get("family_params") or {}), lo, hi, reg=reg)
+    else:
+        kw = dict(preset["signal"])
+        sig = signals.select_entries(ind, start_date=lo, end_date=hi,
+                                     regime_df=reg if preset.get("regime") else None, **kw)
     if avoid_earnings:
         from research.earnings import earnings_dates_by_symbol, load_calendar
         by_symbol = earnings_dates_by_symbol(load_calendar())

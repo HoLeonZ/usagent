@@ -60,6 +60,9 @@ INDICATOR_PRICE_ADJUST: str = "total"
 # 引擎不读、但链路里有明确消费者的键。
 METADATA_KEYS: frozenset[str] = frozenset({
     "signal", "regime",                      # 编排层(signals.select_entries / regime)
+    # 走 families.py 的族(不走 signals.select_entries)。编排层会读它们;
+    # broker 侧仍然只吃 ENGINE_KEYS,所以执行契约不变。
+    "family", "family_params",
     "universe", "universe_note",             # 口径声明(引擎不读,见模块 docstring)
     "n_comparisons", "validated", "verdict", "notes",   # §5 纪律与负面证据
     "position_sizing",                       # 派生量,声明值必须与键一致(见 validate)

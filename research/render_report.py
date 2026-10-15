@@ -540,6 +540,12 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
 def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
         control_runs: int = 200) -> tuple:
     P = presets.get_preset(preset_name)
+    if P.get("family"):
+        # 族型 preset 的逐笔 HTML 报告尚未实现:报告里的「信号日条件清单」是 uptrend-pullback
+        # 的 A~F 表,对族**没有意义**,照印会误导。宁可明确失败,不静默印一张无关的表。
+        raise NotImplementedError(
+            f"preset {preset_name!r} 走的是 families.py 的族({P['family']}),"
+            f"逐笔 HTML 报告尚未支持;数字请用 research.run_baseline / research.family_search")
     p = panel_mod.load_full_panel()
     ind = indicators.compute_all(p)
     # 卡片上的均线也要落在 **as-traded** 轴上(与蜡烛、止损止盈线、买卖标记同轴)——

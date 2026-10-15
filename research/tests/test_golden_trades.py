@@ -237,3 +237,31 @@ def test_golden_carrier_uses_the_preset_regime(real_chain, monkeypatch):
     assert G.run_case(case, *real_chain)["n_trades"] != before, (
         "改了 preset 的 regime 但载体结果不变 —— 它没读 preset 的 regime 参数"
     )
+
+
+def test_family_path_reproduces_select_entries_on_real_data(real_chain):
+    """两条路径在**真实数据**上必须给出逐位相同的信号表。
+
+    为什么必须有这条:family_search 用 families.select 自己构造信号表,而 search_12m 走
+    signals.select_entries。「新族 vs uptrend-pullback」的结论只有在两条路径构造出的表
+    逐位相同时才成立 —— 否则比的是两台机器。参考族 upb_ref 逐字复刻 A~F + 两个过滤层。
+
+    ⚠️ 断言里必须包含「信号数 > 0」:合成面板上 A~F 常常 0 信号,那时 0==0 是空断言。
+    """
+    from research import families as F, signals
+
+    panel, ind = real_chain
+    ind = F.add_family_indicators(ind)
+    lo, hi = "2024-04-09", "2025-10-13"
+    p = {"min_dist_high252": -0.1, "max_stoch_k": 70.0}
+
+    via_family = F.select(ind, "upb_ref", p, lo, hi)
+    via_signals = signals.select_entries(
+        ind, start_date=lo, end_date=hi, **{**signals.V21_SIGNAL_PARAMS, **p})
+
+    assert len(via_signals) >= 20, (
+        f"窗口内信号太少({len(via_signals)})—— 空信号时两条路径都是 0 个,断言 0==0 是空断言")
+    assert len(via_family) == len(via_signals)
+    assert via_family["symbol"].tolist() == via_signals["symbol"].tolist()
+    assert via_family["date"].tolist() == via_signals["date"].tolist()
+    assert via_family["score"].tolist() == via_signals["score"].tolist()
