@@ -97,20 +97,24 @@ def signal_kwargs(cfg: dict) -> dict:
 
 def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
              lo: str = WIN_LO, hi: str = WIN_HI, *, use_regime: bool = True) -> dict:
-    """跑一个配置,返回窗口指标。信号集为空 → 返回 cagr=None(不静默当 0)。"""
+    """跑一个配置,返回窗口指标。**三种结果必须可区分** —— 这是 argmax(CAGR) 的前提:
+
+      * 正常      → cagr 是有限数
+      * 信号为空  → cagr=None, reason="no_signals",**且不去跑回测**
+                    (跑了会得到一条平直权益曲线 → cagr=+0.0%,而 +0.0% 在 argmax(CAGR)
+                     里会赢过所有负收益配置,搜索会系统性朝过度过滤的方向跑)
+      * 参数非法 / 记账断言 → **直接抛**(§0 Fail-Fast)。搜索空间是预注册的,里面不该有
+                    非法配置;若出现说明空间写错了,必须立刻知道 —— 不能静默出局却照计
+                    n_trials(审计实测旧版把 BrokerError 降级成一行 cagr=None)。
+    """
     kw = signal_kwargs(cfg)
-    try:
-        sig = signals.select_entries(ind, start_date=lo, end_date=hi,
-                                     regime_df=reg if use_regime else None, **kw)
-    except signals.SignalError:
+    sig = signals.select_entries(ind, start_date=lo, end_date=hi,
+                                 regime_df=reg if use_regime else None, **kw)
+    if sig.empty:
         return {"cagr": None, "trades": 0, "reason": "no_signals", "cfg": cfg}
 
-    preset = make_preset(cfg)
-    try:
-        # 不覆盖成本口径 —— 让引擎读 preset 里的(§2(b) 单一来源)
-        res = broker.simulate(preset, sig, ind, start=lo, end=hi)
-    except broker.BrokerError as exc:
-        return {"cagr": None, "trades": 0, "reason": str(exc)[:40], "cfg": cfg}
+    # 不覆盖成本口径 —— 让引擎读 preset 里的(§2(b) 单一来源)
+    res = broker.simulate(make_preset(cfg), sig, ind, start=lo, end=hi)
 
     eq, tr = res["equity"], res["trades"]
     cagr = metrics.cagr(eq["equity"], eq["date"])
@@ -131,26 +135,47 @@ def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
 
 # ---------------------------------------------------------------- 运气对照
 
+def _control_pool(ind: pd.DataFrame, lo: str, hi: str, *,
+                  reg: pd.DataFrame | None = None) -> pd.DataFrame:
+    """随机对照的抽样池 = **策略自己够得着的机会集**(只去掉信号本身)。
+
+    口径与信号层同源的三个门:指标就绪、E 条件的流动性下界(amount60 ≥ min_amount)、
+    regime 可做多(给了 reg 时)。
+
+    2026-10-15 实测:旧实现只要求「指标就绪」,于是从全池 596 只里抽 —— 含被 E 的流动性门
+    挡在外面、策略永远不会碰的小盘股。后果有两个:(a) null 与策略不在同一个机会集上,
+    对照不成立;(b) 200 次里 33 次在出场时撞上 §4(a) 的量能上限而 fail-fast,
+    失败重抽把分布筛成了成功子集。
+    """
+    sp = signals.V21_SIGNAL_PARAMS
+    win = ind[(ind["date"] >= pd.Timestamp(lo)) & (ind["date"] < pd.Timestamp(hi))]
+    ok = (win["ma120"].notna() & win["atr_pct"].notna()
+          & win["amount60"].notna() & (win["amount60"] >= sp["min_amount"]))
+    pool = win[ok]
+    if reg is not None:
+        ok_days = set(pd.to_datetime(reg.loc[reg["regime_ok"], "date"]).tolist())
+        pool = pool[pool["date"].isin(ok_days)]
+    return pool[["symbol", "date", "atr_pct"]]
+
+
 def random_control(ind: pd.DataFrame, cfg: dict, n_trades: int, *,
                    n_runs: int = 200, lo: str = WIN_LO, hi: str = WIN_HI,
-                   seed: int = 0) -> dict:
-    """同止损止盈、同交易笔数的**随机入场**对照。
+                   seed: int = 0, reg: pd.DataFrame | None = None) -> dict:
+    """同止损止盈、同交易笔数、**同机会集**的随机入场对照。
 
-    做法:从窗口内随机抽 n_trades 个 (symbol, date) 作为入场点,套用与候选
+    做法:从 _control_pool 里随机抽 n_trades 个 (symbol, date) 作为入场点,套用与候选
     完全相同的 preset 跑一遍。重复 n_runs 次 → 得到"纯运气"的 CAGR 分布。
 
     这是本脚本里唯一能区分"策略"与"运气"的东西。
     """
     rng = np.random.default_rng(seed)
-    win = ind[(ind["date"] >= pd.Timestamp(lo)) & (ind["date"] < pd.Timestamp(hi))]
-    # 只在有信号资格的日期里抽(指标就绪),否则随机点会落在预热期
-    ok = win[win["ma120"].notna() & win["atr_pct"].notna()]
-    pool = ok[["symbol", "date", "atr_pct"]].to_numpy(dtype=object)
+    pool = _control_pool(ind, lo, hi, reg=reg).to_numpy(dtype=object)
     if len(pool) == 0:
         raise SearchError("随机对照的候选池为空")
 
     preset = make_preset(cfg)
-    cagrs = []
+    cagrs: list[float] = []
+    n_failed = 0
     for _ in range(n_runs):
         idx = rng.choice(len(pool), size=min(n_trades, len(pool)), replace=False)
         # 必须补全 ENTRY_COLS 的全部列(broker 只用 date/symbol/score/atr_pct,
@@ -162,18 +187,26 @@ def random_control(ind: pd.DataFrame, cfg: dict, n_trades: int, *,
                         "score": 1.0, "atr_pct": float(pool[i][2])})
             rows.append(row)
         sig = pd.DataFrame(rows)[signals.ENTRY_COLS]
+        # 失败必须计数并报出 —— 「200 次」不能只是名义值。静默 continue 会让
+        # n_runs 只记成功次数,而分布已被成功子集筛过(§ 无 silent cap)。
         try:
             res = broker.simulate(preset, sig, ind, start=lo, end=hi)
             c = metrics.cagr(res["equity"]["equity"], res["equity"]["date"])
             if np.isfinite(c):
                 cagrs.append(float(c))
-        except broker.BrokerError:
-            continue
+            else:
+                n_failed += 1
+        except broker.BrokerError as exc:
+            n_failed += 1
+            logger.warning("随机对照第 %d 次失败:%s", n_failed, str(exc)[:60])
     a = np.array(cagrs)
     if len(a) == 0:
         raise SearchError("随机对照全部失败")
+    if n_failed:
+        logger.warning("随机对照:%d 次成功 / %d 次失败(合计 %d) —— "
+                       "分布只由成功子集给出", len(a), n_failed, len(a) + n_failed)
     return {
-        "n_runs": int(len(a)), "n_trades": int(n_trades),
+        "n_runs": int(len(a)), "n_failed": int(n_failed), "n_trades": int(n_trades),
         "median": float(np.median(a)), "p90": float(np.quantile(a, 0.90)),
         "p95": float(np.quantile(a, 0.95)), "max": float(a.max()),
         "p_ge_target": float((a >= TARGET_CAGR).mean()),

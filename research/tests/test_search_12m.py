@@ -111,3 +111,111 @@ def test_walk_forward_requires_folds():
 def test_walk_forward_requires_a_non_empty_grid():
     with pytest.raises(ValueError, match="grid"):
         S.walk_forward(None, None, grid=[], folds=FOLDS)
+
+
+# ------------------------------- 搜索结果的三态必须可区分(argmax(CAGR) 的正确性前提)
+# 2026-10-15 审计:stage1 的 37 行里有 3 行是「过滤层杀光信号 → 空转 → 记成 +0.0%,
+# reason=ok」。在一个 argmax(CAGR) 的搜索里,+0.0% 会**赢过所有负收益配置** ——
+# 搜索会系统性朝「过度过滤」的方向跑。这正是挖高 CAGR 前必须先修掉的东西。
+
+def _one_signal():
+    import pandas as pd
+    from research import signals
+    row = {c: float("nan") for c in signals.ENTRY_COLS}
+    row.update({"date": pd.Timestamp("2024-01-02"), "symbol": "AAA",
+                "score": 1.0, "atr_pct": 0.02})
+    return pd.DataFrame([row])[signals.ENTRY_COLS]
+
+
+def _empty_signals():
+    import pandas as pd
+    from research import signals
+    return pd.DataFrame(columns=signals.ENTRY_COLS)
+
+
+def test_evaluate_does_not_report_zero_cagr_for_an_empty_signal_set(monkeypatch):
+    from research import signals
+    monkeypatch.setattr(signals, "select_entries", lambda *a, **k: _empty_signals())
+    monkeypatch.setattr(S.broker, "simulate",
+                        lambda *a, **k: pytest.fail("空信号不该去跑回测(会得到平直曲线 → +0.0%)"))
+    r = S.evaluate(None, None, {})
+    assert r["cagr"] is None, "空信号被记成了数字 —— argmax(CAGR) 会把空转配置选成最优"
+    assert r["reason"] == "no_signals"
+    assert r["trades"] == 0
+
+
+def test_evaluate_propagates_broker_errors(monkeypatch):
+    """broker 的 fail-fast 不得被 evaluate 吞成 cagr=None(§0)。
+
+    审计实测:evaluate 把 BrokerError 降级成一行 cagr=None,于是「记账断言被触发」
+    这类真错误在 106 次试验里静默消失,而 n_trials 照加。
+    """
+    from research import signals
+    monkeypatch.setattr(signals, "select_entries", lambda *a, **k: _one_signal())
+
+    def boom(*a, **k):
+        raise S.broker.BrokerError("权益曲线含非有限值 —— 记账错了")
+
+    monkeypatch.setattr(S.broker, "simulate", boom)
+    with pytest.raises(S.broker.BrokerError, match="记账错了"):
+        S.evaluate(None, None, {})
+
+
+def test_random_control_counts_failed_draws(monkeypatch):
+    """随机对照必须报出失败次数 —— 「200 次」不能只是名义值(不许有 silent cap)。"""
+    from research import broker as B
+    from research.indicators import compute_indicators
+    from research.tests.conftest import make_synth_panel
+
+    ind = compute_indicators(make_synth_panel(("AAA", "BBB"), bars=140))
+    days = sorted(ind["date"].unique())
+    real = B.simulate
+    calls = {"n": 0}
+
+    def flaky(preset, sig, panel, **kw):
+        calls["n"] += 1
+        if calls["n"] % 2 == 0:
+            raise B.BrokerError("模拟一次失败")
+        return real(preset, sig, panel, **kw)
+
+    monkeypatch.setattr(B, "simulate", flaky)
+    out = S.random_control(ind, {"sl_mult": 1.5, "tp_mult": 4.0}, n_trades=2, n_runs=6,
+                           lo=str(days[125])[:10], hi=str(days[-1])[:10], seed=0)
+    assert out["n_failed"] > 0, "失败的重抽被静默丢弃了"
+    assert out["n_runs"] + out["n_failed"] == 6, (
+        f"成功 {out['n_runs']} + 失败 {out['n_failed']} 应等于请求的 6 次")
+
+
+def test_random_control_draws_from_the_strategys_opportunity_set():
+    """随机对照必须从**策略自己够得着的池子**里抽,不是全池。
+
+    2026-10-15 实测:旧实现从全池 596 只里抽(含小盘股),200 次里 33 次在出场时撞上
+    §4(a) 的量能上限而 fail-fast —— 因为 E 条件的流动性门(amount60 ≥ $3e7)只在策略
+    一侧生效。拿一个「永远不会碰小盘股」的策略去和「会碰小盘股」的随机对照比,
+    对照本身就不成立;顺带还让重抽失败率 16.5%,分布只由成功子集给出。
+    """
+    import pandas as pd
+    from research.indicators import compute_indicators
+    from research.tests.conftest import make_synth_panel
+
+    ind = compute_indicators(make_synth_panel(("AAA", "BBB"), bars=140))
+    # 人为把其中一只标的的流动性打到门槛之下;对照池不应再抽到它
+    ind.loc[ind["symbol"] == "BBB", "amount60"] = 1.0
+    days = sorted(ind["date"].unique())
+    lo, hi = str(days[125])[:10], str(days[-1])[:10]
+    seen = set()
+    real = S.broker.simulate
+
+    def spy(preset, sig, panel, **kw):
+        seen.update(sig["symbol"].tolist())
+        return real(preset, sig, panel, **kw)
+
+    S.broker.simulate = spy
+    try:
+        S.random_control(ind, {"sl_mult": 1.5, "tp_mult": 4.0}, n_trades=2,
+                         n_runs=8, lo=lo, hi=hi, seed=0)
+    finally:
+        S.broker.simulate = real
+    pool = set(S._control_pool(ind, lo, hi)["symbol"])
+    assert "BBB" not in pool, "流动性不达标的标的仍在对照池里"
+    assert seen and seen <= {"AAA"}, f"抽到了池子外的标的:{seen - {'AAA'}}"

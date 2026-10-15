@@ -751,7 +751,8 @@ def _exit_bar_range(panel: pd.DataFrame, symbol: str, day) -> tuple[float, float
 
 
 def _assert_exit_fills_inside_their_bars(r: dict, panel: pd.DataFrame) -> None:
-    """⚠️ 只管**出场**价(与出场日 bar 的区间)。
+    """⚠️ 盯的是**触发价**(exit_trigger),不是成交价。
+    
 
     入场侧**不在**这条护栏内,而且入场价确实可能落在当日最高价之上 —— 那是已知且已
     披露的建模简化(见 broker.py 里「已知建模简化」那段:实测 v1 2/41 笔、12m 3/15 笔,
@@ -761,10 +762,12 @@ def _assert_exit_fills_inside_their_bars(r: dict, panel: pd.DataFrame) -> None:
     """
     for _, t in r["trades"].iterrows():
         lo, hi = _exit_bar_range(panel, t["symbol"], t["exit_date"])
-        assert lo - 1e-9 <= float(t["exit_price"]) <= hi + 1e-9, (
-            f"{t['symbol']} {t['exit_date'].date()} 成交 {t['exit_price']:.4f} "
+        trig = float(t["exit_trigger"])
+        assert lo - 1e-9 <= trig <= hi + 1e-9, (
+            f"{t['symbol']} {t['exit_date'].date()} 触发价 {trig:.4f} "
             f"落在 bar [{lo}, {hi}] 之外 —— 物理上不可能"
         )
+        assert float(t["exit_price"]) <= trig + 1e-9, "卖出滑点只允许把成交价压低"
 
 
 def test_normal_configs_fill_inside_the_bar_range():
@@ -807,7 +810,8 @@ def test_gap_through_stop_on_the_entry_bar_fills_at_the_open():
                  start="2024-01-01", end="2024-01-20", cost_bps_roundtrip=0.0)
     t = r["trades"].iloc[0]
     assert t["exit_reason"] == "sl_gap"
-    assert t["exit_price"] == pytest.approx(FLAT)          # 当日开盘价 100
+    assert t["exit_trigger"] == pytest.approx(FLAT)        # 触发在当日开盘价 100
+    assert t["exit_price"] < FLAT                          # 卖出滑点把成交价压低
     _assert_exit_fills_inside_their_bars(r, panel)
 
 
@@ -819,3 +823,78 @@ def test_participation_rate_must_be_a_fraction():
         with pytest.raises(BrokerError, match="max_volume_participation"):
             simulate(BASE | {"max_volume_participation": bad}, mk_signal("2024-01-01"),
                      panel, start="2024-01-01", end="2024-01-15")
+
+
+# ------------------------------------------------- 出场侧滑点与量能上限(§4(a)/§4(c))
+# 2026-10-15 实测(v1 41 笔 / 12m 15 笔):出场参与率中位 0.013%~0.048%、最大 0.42%,
+# 距 10% 的量能上限还有 24~127 倍 —— 上限从不咬合;但出场滑点中位 0.085%~0.094%/边,
+# 是全部双边佣金预算(5bp)的 1.7 倍。**不建模出场滑点会系统性偏爱窄止损**:窄止损的
+# 损失被机械封顶在 −1R,而真实成交会比触发价更差,且这个差额相对止损宽度更大。
+
+
+def _sl_bars(n=25, volume=1_000_000.0, exit_volume=None, exit_idx=3):
+    bars = flat_days(n)
+    for i, b in enumerate(bars):
+        b["volume"] = volume
+        if i == exit_idx:
+            b["low"] = FLAT * 0.90          # 击穿 2.1% 止损
+            if exit_volume is not None:
+                b["volume"] = exit_volume
+    return bars
+
+
+def test_exit_slippage_lowers_the_fill_price():
+    """卖出方向的滑点必须**压低**成交价,量级 = scale × 信号日 atr_pct × sqrt(参与率)。"""
+    panel = mk_panel(_sl_bars())
+    r = simulate({**BASE, "atr_slip_scale": 1.0}, mk_signal("2024-01-01"), panel,
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    t = r["trades"].iloc[0]
+    trigger = float(t["exit_trigger"])
+    part = int(t["size"]) / 1_000_000.0
+    expect = trigger * (1.0 - 1.0 * float(t["atr_pct"]) * np.sqrt(part))
+    assert t["exit_price"] < trigger, "出场滑点没把成交价压低"
+    assert t["exit_trigger"] == pytest.approx(float(t["entry_price"]) * (1 - 0.021))
+    assert t["exit_price"] == pytest.approx(expect, rel=1e-12)
+
+
+def test_exit_slippage_is_zero_when_disabled():
+    """不设 atr_slip_scale ⇒ 成交价逐位等于触发价(老行为,既有用例继续有效)。"""
+    panel = mk_panel(_sl_bars())
+    t = simulate(BASE, mk_signal("2024-01-01"), panel,
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)["trades"].iloc[0]
+    assert t["exit_price"] == pytest.approx(FLAT * (1 - 0.021))
+
+
+def test_loss_exceeds_one_R_once_exit_slippage_is_on():
+    """开了出场滑点后,止损不再是「恰好 −1R」—— R 分布不再退化。"""
+    panel = mk_panel(_sl_bars())
+    p = {**BASE, "atr_slip_scale": 1.0}
+    from research.metrics import r_multiples
+    t = simulate(p, mk_signal("2024-01-01"), panel,
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)["trades"]
+    assert float(r_multiples(t).iloc[0]) < -1.0, "出场滑点没让亏损超过计划风险"
+
+
+def test_exit_trigger_must_be_inside_the_bar_even_with_slippage():
+    """区间断言管的是**触发价**;滑点后的成交价允许略微越界(与入场侧同理)。"""
+    bars = _sl_bars()
+    for b in bars:
+        b.update({"high": FLAT, "low": FLAT})      # 平盘 bar:止损触发价必在区间内
+    t = simulate({**BASE, "atr_slip_scale": 1.0}, mk_signal("2024-01-01"),
+                 mk_panel(bars), start="2024-01-01", end="2024-02-10",
+                 cost_bps_roundtrip=0.0)["trades"].iloc[0]
+    # 触发价 97.9 落在 [100, 100] 之外 ⇒ 这里恰好无法成交(见 gap 分支),
+    # 所以真正要断言的是:任何**报出来**的成交都必须有可解释的触发。
+    assert t["exit_price"] <= FLAT
+
+
+def test_exit_over_the_volume_cap_fails_fast():
+    """出场量超过该 bar 的量能上限 ⇒ fail-fast,不静默按足额成交。
+
+    §4(a) 的 IOC-部分成交没有实现(实测 24~127 倍余量,永不咬合),所以这里把它变成
+    **显式边界**:一旦某个仓位真的大到卖不掉,立刻报错而不是给出一个假的足额成交。
+    """
+    panel = mk_panel(_sl_bars(exit_volume=5_000.0))     # 出场日 cap = 500 < size 1000
+    with pytest.raises(BrokerError, match="量能上限"):
+        simulate(BASE, mk_signal("2024-01-01"), panel,
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)

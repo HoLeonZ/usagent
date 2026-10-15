@@ -7,5 +7,5 @@ preset=us_uptrend_pullback_12m_target
 window=2025-10-14..2026-10-14
 vintage=rows=425332;symbols=596;from=2023-10-16;to=2026-10-13
 n_trades=15
-trades_sha256=ad9fa09c0c4bbeea5ae245b144aebbd3a8607a3a1ef227fc64fcff212db0fca1
-equity_sha256=1db9cad7771238dc43cef5c69d759258e444adc4893a005b0d2e087fc9de0624
+trades_sha256=2b8a5caf7318f9142037f9dece94572fdb38c408e61a273d0189d237281460b2
+equity_sha256=aa05ebaa443cadfe0579c0c4297292839c026686c2d34ca69f77101d9e7a8c4f

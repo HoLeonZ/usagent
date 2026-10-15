@@ -40,6 +40,9 @@ TRADE_COLS = [
     # dividends = 持有期内实际领到的现金分红(§3(c))。它必须进 net_pnl,否则
     # Σ net_pnl 与账本现金流对不上,双式记账(§2)断裂。
     "gross_pnl", "dividends", "fees", "net_pnl", "net_return", "atr_pct",
+    # exit_trigger = 滑点**前**的触发价。区间不变量(触发价必须落在该 bar 的
+    # [raw_low, raw_high] 内)只能盯它 —— 成交价因卖出滑点允许略微越界(§4(c))。
+    "exit_trigger",
     # 每笔的**计划风险**宽度与金额。hiagent 的 tail_objective 用固定 sl_pct 推 R,
     # 但 ATR 归一化后每笔的止损宽度不同,所以必须逐笔记录,否则 E[R] 算不出来。
     "sl_width", "tp_width", "risk_amount",
@@ -55,7 +58,7 @@ EXIT_REASONS = ("sl", "sl_gap", "tp", "tp_gap", "max_hold", "eod")
 # v1 的交易列表与哈希逐字不变(因为 tp 从未被触发),护栏对 tp 几何完全盲。
 TRADE_LOCK_COLS = ["entry_date", "exit_date", "symbol", "exit_reason",
                    "entry_price", "exit_price", "size", "hold_days",
-                   "sl_width", "tp_width", "net_pnl"]
+                   "sl_width", "tp_width", "exit_trigger", "net_pnl"]
 
 
 def trade_fingerprint(trades: pd.DataFrame) -> str:
@@ -284,25 +287,53 @@ def simulate(
         return total
 
     def close_position(pos: Position, day: pd.Timestamp, px: float, reason: str,
-                       *, bar_lo: float | None = None,
-                       bar_hi: float | None = None) -> None:
-        """平仓。bar_lo/bar_hi 给出时必须落在该 bar 区间内(§0 Fail-Fast)。
+                       *, bar_lo: float | None = None, bar_hi: float | None = None,
+                       bar_vol: float | None = None) -> None:
+        """平仓。`px` 是**触发价**,本函数负责把它变成成交价。
 
-        各条路径其实**可证**都在区间内:gap 分支按开盘价成交(开盘必在区间内);
-        盘中分支的触发条件本身保证 low ≤ sl_price ≤… 或 tp_price ≤ high;max_hold 按收盘价。
-        这条断言是形式化的护栏 —— 将来若有人改了价格口径或加了新分支,它会立刻响。
+        三条纪律:
+        * **触发价**必须落在该 bar 的 as-traded [low, high] 内(§0 Fail-Fast)。各条路径
+          其实**可证**:gap 分支按开盘价成交(开盘必在区间内);盘中分支的触发条件本身
+          保证 low ≤ sl_price 或 tp_price ≤ high;max_hold 按收盘价。滑点**后**的成交价
+          允许略微越界 —— 滑点就是「成交比触发差」这件成本本身,与入场侧同理。
+        * **卖出滑点**(§4(c))= scale × 信号日 atr_pct × sqrt(止损股数 / 该 bar 成交量),
+          **压低**成交价。不建模它会让每笔止损恒等于 −1R,而 R 分布退化会让搜索
+          系统性偏爱窄止损(窄止损的损失被机械封顶,真实成交的相对损耗反而更大)。
+        * **出场量超过该 bar 的量能上限** ⇒ 报错。§4(a) 的 IOC 部分成交**未实现**
+          (实测余量 24~127 倍,永不咬合),所以这里做成**显式边界**:真发生就 fail-fast,
+          绝不给出一个假的足额成交。
         """
         if bar_lo is not None and bar_hi is not None:
             if not (bar_lo - 1e-9 <= px <= bar_hi + 1e-9):
                 raise BrokerError(
-                    f"{pos.symbol} {day.date()} 成交价 {px:.6f} 落在该 bar 的 "
+                    f"{pos.symbol} {day.date()} 触发价 {px:.6f} 落在该 bar 的 "
                     f"[{bar_lo}, {bar_hi}] 之外 —— 物理上不可能({reason})"
                 )
-        notional_exit = px * pos.size
+        # §4(a) 量能上限:**与滑点无关**,是独立的一条要求。
+        if bar_vol is not None and np.isfinite(bar_vol) and bar_vol > 0:
+            cap = int(np.floor(float(bar_vol) * max_participation))
+            if pos.size > cap:
+                raise BrokerError(
+                    f"{pos.symbol} {day.date()} 要卖 {pos.size} 股 > 该 bar 量能上限 {cap} 股 —— "
+                    f"§4(a) 的 IOC 部分成交**未实现**(实测余量 24~127 倍,永不咬合);"
+                    f"此处 fail-fast 而不是给出一个足额的假成交({reason})"
+                )
+        fill_px = px
+        if atr_slip_scale > 0:
+            ok = (bar_vol is not None and np.isfinite(bar_vol) and bar_vol > 0
+                  and np.isfinite(pos.atr_pct) and pos.atr_pct > 0)
+            if not ok:
+                raise BrokerError(
+                    f"atr_slip_scale={atr_slip_scale} 需要有效的 atr_pct 与该 bar 成交量,"
+                    f"得到 atr={pos.atr_pct!r} vol={bar_vol!r} —— 滑点不得静默退化为 0(§0)"
+                )
+            fill_px = px * (1.0 - atr_slip_scale * pos.atr_pct
+                            * float(np.sqrt(pos.size / float(bar_vol))))
+        notional_exit = fill_px * pos.size
         exit_fee = notional_exit * cost_half
         entry_notional = pos.entry_price * pos.size
         entry_fee = entry_notional * cost_half
-        gross = (px - pos.entry_price) * pos.size
+        gross = (fill_px - pos.entry_price) * pos.size
         fees = entry_fee + exit_fee
         # 分红是这笔交易的**已实现收入**(§3(c)),必须进净盈亏。
         net = gross + pos.dividends - fees
@@ -311,7 +342,8 @@ def simulate(
         trades.append({
             "entry_date": pos.entry_date, "exit_date": day, "symbol": pos.symbol,
             "exit_reason": reason,
-            "entry_price": pos.entry_price, "exit_price": px, "size": pos.size,
+            "entry_price": pos.entry_price, "exit_price": fill_px, "size": pos.size,
+            "exit_trigger": px,
             # bars_held 是**已走完**的 bar 数:入场当日盘中出场 → 0,持满 max_hold → max_hold。
             # 不要写 +1 —— 那会让 max_hold=18 的仓位报出 hold_days=19(实测踩过)。
             "hold_days": pos.bars_held,
@@ -365,27 +397,28 @@ def simulate(
             o = data[sym]["raw_open"][k]
             h = data[sym]["raw_high"][k]
             low_ = data[sym]["raw_low"][k]
+            v = data[sym]["volume"][k]
             if not (o > 0 and h > 0 and low_ > 0):
                 continue
 
             if o <= pos.sl_price:              # gap 跳过止损 → 按开盘成交
-                close_position(pos, day, o, "sl_gap", bar_lo=low_, bar_hi=h)
+                close_position(pos, day, o, "sl_gap", bar_lo=low_, bar_hi=h, bar_vol=v)
                 continue
             if o >= pos.tp_price:              # gap 跳过止盈 → 按开盘成交
-                close_position(pos, day, o, "tp_gap", bar_lo=low_, bar_hi=h)
+                close_position(pos, day, o, "tp_gap", bar_lo=low_, bar_hi=h, bar_vol=v)
                 continue
 
             hit_sl = low_ <= pos.sl_price
             hit_tp = h >= pos.tp_price
             if hit_sl and hit_tp:
                 # 盘中盲区:两根阈值同 bar 触及 → 按最坏情况(CLAUDE.md §4)
-                close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h)
+                close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=v)
                 continue
             if hit_sl:
-                close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h)
+                close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=v)
                 continue
             if hit_tp:
-                close_position(pos, day, pos.tp_price, "tp", bar_lo=low_, bar_hi=h)
+                close_position(pos, day, pos.tp_price, "tp", bar_lo=low_, bar_hi=h, bar_vol=v)
                 continue
 
         # ---------- 2) 入场:前一交易日(T)的信号在今日(T+1)开盘成交 ----------
@@ -484,15 +517,15 @@ def simulate(
                 # 2026-10-15 复核实测:此前这条路径没有 gap 分支,于是在 [100,100] 的 bar 上
                 # 报出 102.13 的成交价 —— 高于最高价,物理上不存在。
                 if low_ <= pos.sl_price and o <= pos.sl_price:
-                    close_position(pos, day, o, "sl_gap", bar_lo=low_, bar_hi=h)
+                    close_position(pos, day, o, "sl_gap", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
                 elif h >= pos.tp_price and o >= pos.tp_price:
-                    close_position(pos, day, o, "tp_gap", bar_lo=low_, bar_hi=h)
+                    close_position(pos, day, o, "tp_gap", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
                 elif low_ <= pos.sl_price and h >= pos.tp_price:
-                    close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h)
+                    close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
                 elif low_ <= pos.sl_price:
-                    close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h)
+                    close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
                 elif h >= pos.tp_price:
-                    close_position(pos, day, pos.tp_price, "tp", bar_lo=low_, bar_hi=h)
+                    close_position(pos, day, pos.tp_price, "tp", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
 
         # ---------- 3) 收盘:更新最高价(H2)、持仓天数与 max_hold ----------
         for sym in list(book.positions):
@@ -507,7 +540,8 @@ def simulate(
                     continue
                 close_position(pos, day, data[sym]["raw_close"][k], "max_hold",
                                bar_lo=data[sym]["raw_low"][k],
-                               bar_hi=data[sym]["raw_high"][k])
+                               bar_hi=data[sym]["raw_high"][k],
+                               bar_vol=data[sym]["volume"][k])
 
         eq_today = mark_to_market(day)
         prev_equity = eq_today            # 供**下一交易日**的入场定预算(§2(d) 快照)

@@ -36,7 +36,7 @@ logger = logging.getLogger("render")
 # 默认渲染哪个 preset —— **从 presets.py 读,不在这里硬编码**。
 # 早先这里写死了一份 BEST_CFG(mp=1/risk=1%,CAGR +7.95%),而真正达到
 # "12 个月 CAGR >= 30%" 目标的注册 preset 是 mp=2/risk=5%。⚠️ 该目标在 2026-10-15
-# 修正记账/口径后**已不再达成**(CAGR +10.61%),报告里的数字一律现算,不写死在这里。
+# 修正记账/口径后**已不再达成**(CAGR +9.51%),报告里的数字一律现算,不写死在这里。
 # 报告展示的不是目标 preset —— 这个不一致由 presets.py 做单一事实来源来消除。
 DEFAULT_PRESET = "us_uptrend_pullback_12m_target"
 WIN_LO, WIN_HI = "2025-10-14", "2026-10-14"
@@ -356,7 +356,7 @@ def _target_note(cagr: float, bench_cagr: float) -> str:
       * 2026-10-14:写死「0 个达到 30% 的目标」,换 preset 后成了假陈述;
       * 2026-10-15:≥30% 分支写死「15 个杠杆配置里有 5 个达标」,并把基准门槛写死成
         字面量 0.156(同一次渲染算出的 bench_cagr 其实是另一个数)。修正引擎后同一根
-        杠杆旋钮 1%/2%/5%/25% → +3.35%/+6.45%/+10.61%/+13.23%,怎么推都到不了 30%
+        杠杆旋钮 1%/2%/5%/25% → +3.23%/+6.00%/+9.51%/+11.87%,怎么推都到不了 30%
         —— 那句达标叙述已不可复现。
     两个分支现在都由参数派生;要复核自己跑 run_baseline。
     """
@@ -412,7 +412,9 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
             f'运气对照(同止损止盈、同笔数随机入场 {summary["ctl_runs"]} 次):'
             f'本配置位于随机分布的 <b>{summary["ctl_pct"]:.1f} 百分位</b>,'
             f'即约 {100 - summary["ctl_pct"]:.0f}% 的随机策略做得和它一样好或更好'
-            f'(随机 p90 {summary["ctl_p90"]*100:+.1f}%、最大 {summary["ctl_max"]*100:+.1f}%)。')
+            f'(随机 p90 {summary["ctl_p90"]*100:+.1f}%、最大 {summary["ctl_max"]*100:+.1f}%)。'
+            + (f'⚠️ 其中 {summary["ctl_failed"]} 次重抽因量能上限未能成交被丢弃。'
+               if summary.get("ctl_failed") else ''))
     else:
         _ctl_line = ("运气对照本次未跑(control_runs=0)—— 这份报告因此**不含**"
                      "「位于随机分布第几百分位」那条判词。")
@@ -602,16 +604,19 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
         "risk_per_trade": preset["risk_per_trade"],
     }
     if control_runs > 0:
+        # 必须把 reg 传进去:对照要在**策略自己的机会集**里抽(含 regime 门),
+        # 否则比的是两个不同的池子(见 search_12m._control_pool)。
         ctl = _S.random_control(ind, cfg, len(res["trades"]),
-                                n_runs=control_runs, lo=lo, hi=hi, seed=0)
+                                n_runs=control_runs, lo=lo, hi=hi, seed=0, reg=reg)
         summary.update({
-            "ctl_runs": ctl["n_runs"], "ctl_p90": ctl["p90"], "ctl_max": ctl["max"],
+            "ctl_runs": ctl["n_runs"], "ctl_failed": ctl["n_failed"],
+            "ctl_p90": ctl["p90"], "ctl_max": ctl["max"],
             "ctl_pct": float((ctl["cagrs"] < summary["cagr"]).mean() * 100.0),
         })
     else:
         # 跳过运气对照(测试与快速迭代用)。渲染层据此不出那条判词 ——
         # **不能**留着 NaN 让它渲染成 "nan 百分位"。
-        summary.update({"ctl_runs": 0, "ctl_p90": float("nan"),
+        summary.update({"ctl_runs": 0, "ctl_failed": 0, "ctl_p90": float("nan"),
                         "ctl_max": float("nan"), "ctl_pct": float("nan")})
     return res, eq, ind, bench, summary
 

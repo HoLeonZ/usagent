@@ -168,8 +168,12 @@ def select_entries(
     out = hits[ENTRY_COLS].sort_values(
         ["date", "score"], ascending=[True, False]
     ).reset_index(drop=True)
-    if out.empty:
-        raise SignalError("信号集为空 —— 这是口径或参数问题,不是'策略没信号'")
+    # ⚠️ 这里**不**对空结果抛错。曾有一句 `if out.empty: raise SignalError("信号集为空…")`,
+    #    但上面 `hits.empty` 已经 return 了,所以那句话不可达 —— 而 README 与三处 docstring
+    #    都据此声称「信号集为空要抛错不静默」。真相是:空信号是**合法结果**(参数把信号
+    #    杀光),该由调用方按「无结果」处理,而不是当异常吞掉或记成 0 收益。
+    #    2026-10-15 审计实测:search_12m 因此把空转配置记成 cagr=+0.0%,在 argmax(CAGR)
+    #    的搜索里会赢过所有负收益配置。
     logger.info("select_entries: %d 个候选信号", len(out))
     return out
 

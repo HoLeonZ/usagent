@@ -50,10 +50,12 @@ CONST_LITERALS = [
 def test_execution_constants_have_a_single_definition():
     """费用/流动性/滑点常数不得在 core/ 之外再定义一遍(§2(b))。
 
-    判据是**行级**的:同一行里同时出现键名与该字面量,就是又定义了一遍。
-    旧版本按「键名 + 引号 + 字面量」这种形状匹配 —— 2026-10-15 复核实测它漏掉了
-    `default=5.0` / `key: float = 5.0` 这类写法,而审计抓到的那处缺陷正是
-    「跑数路径的默认值写死」。行级判据把这几类一网打尽。
+    两层判据:
+      * 这一条按**绑定形状**匹配(键名 + 冒号/等号 + 该字面量)。不能用「同一行同时出现」
+        —— 那会把 `1.0 - atr_slip_scale * …` 这种算术误报成重定义(实测踩过)。
+      * 间接写法(`_FEE_BPS_ = 5.0` + 键名另起一行)由下面的 AST 用例负责。
+      * CLI 默认值写死(`--cost-bps … default=5.0`)由下面那条专用用例负责 ——
+        审计抓到的那处缺陷正是它。
 
     只扫生产模块:测试 fixture 里的字面量是为隔离而故意写的,不算「引擎或 preset 里
     重定义常数」。
@@ -62,9 +64,16 @@ def test_execution_constants_have_a_single_definition():
         for i, line in enumerate(Path(mod.__file__).read_text(encoding="utf-8").splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
+            if "=" not in line and '":' not in line:
+                continue
             for key, lit in CONST_LITERALS:
-                assert not (key in line and lit in line), (
-                    f"{mod.__name__}:{i} 同一行里出现 {key} 与字面量 {lit} —— "
+                # 只看**绑定形状**:键名后面紧跟冒号/等号再跟那个字面量。
+                # 不能用「同一行同时出现」——那会把 `1.0 - atr_slip_scale * …`
+                # 这种算术误报成重定义(实测踩过)。间接变量写法由下面的 AST 用例负责。
+                shapes = (f'"{key}": {lit}', f"{key}={lit}", f"{key} = {lit}",
+                          f"{key}: float = {lit}", f'"{key}": {lit},')
+                assert not any(sh in line for sh in shapes), (
+                    f"{mod.__name__}:{i} 又定义了一遍 {key} = {lit} —— "
                     f"常数只能 import core.costs(§2(b) 要求恰好定义一次)"
                 )
 
