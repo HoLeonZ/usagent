@@ -38,8 +38,9 @@ venv/
 # 研究运行产物 —— **整个目录**都不入库(CLAUDE.md §7(a))。
 # 「results/, trades.csv, metrics JSON, 以及生成的报告都必须保持 gitignored。
 #  提交它们是 contract violation —— 一个 fresh clone 必须零历史业绩主张。」
-# 2026-10-15 审计实测:此前只有 earnings_cache.json 被忽略,于是 BASELINE.md(374 行
-# CAGR/Sharpe 胜率表)、trades_12m.html(296KB 逐笔)、三份 *.json 全被提交了。
+# 本目录里的东西按定义都是运行产物:BASELINE.md(运行记录,故意含业绩数字)、
+# *.json 结果、render_report 生成的 *.html(逐笔明细)。它们必须能由「当前代码 +
+# 一条命令」再生,而再生的前提是数据 vintage —— 见 research/README.md 的「复现」。
 # 例外只有**人工的**口径输入(见下面 data/universe_* 的说明),那些不在这里。
 research/results/
 
