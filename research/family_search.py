@@ -107,6 +107,53 @@ def pooled(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None,
     return out
 
 
+def overlay(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None) -> dict:
+    """**闲置资金按等权池计息**后的收益 —— 对低敞口策略唯一公平的口径。
+
+    为什么需要它:一个平均敞口 7.7% 的策略与 100% 敞口的指数比原始收益是**结构性不公平**的
+    (它大部分时间在持有零息现金)。但那不等于没法比 —— 真正该问的是「这套信号在它**在场**
+    的那些天里,是否优于随便持有」。做法:
+
+        portfolio_ret(t) = w(t-1) × 策略日收益(t) + (1 − w(t-1)) × 池指数日收益(t)
+
+    其中 w 取**前一交易日**的敞口:当日敞口要到收盘才知道,用它会引入同日前视。
+    这是仓库设计文档要求的「曝光匹配」口径(metrics.beta_attribution 的
+    bench_on_exposed_days 是它的一个变体)。
+
+    判读:overlay CAGR > 池指数 CAGR ⇒ 这套信号**创造了价值**(择时/选股);
+    ≈ 相等 ⇒ 它只是把敞口换成了一张更曲折的指数;明显更低 ⇒ 它的在场是负贡献。
+    """
+    idx = reg.set_index("date")["ew_index"]
+    bret = idx.pct_change()
+    outs, benchs, expos = [], [], []
+    for lo, hi in windows_:
+        sig = (F.select(ind, family_id, fparams or {}, lo, hi, reg=reg)
+               if family_id is not None else None)
+        if sig is not None and sig.empty:
+            benchs.append(_bench_cagr(reg, lo, hi))
+            continue
+        res = broker.simulate(S.make_preset(cfg or {}), sig, ind, start=lo, end=hi)
+        eq = res["equity"].set_index("date")
+        if len(eq) < 3:
+            benchs.append(_bench_cagr(reg, lo, hi))
+            continue
+        sret = eq["equity"].pct_change().fillna(0.0)
+        w = eq["exposure"].shift(1).fillna(0.0)          # 前一日敞口(因果)
+        b = bret.reindex(eq.index).fillna(0.0)
+        ov = (w * sret + (1.0 - w) * b)
+        days = (eq.index[-1] - eq.index[0]).days
+        c = float((1.0 + ov).prod() ** (365.25 / days) - 1.0) if days > 0 else float("nan")
+        outs.append(c)
+        benchs.append(_bench_cagr(reg, lo, hi))
+        expos.append(float(w.mean()))
+    if not outs:
+        return {"cagr": None, "bench": None, "excess": None, "n": 0}
+    cb = float(np.nanmean(benchs)) if benchs else float("nan")
+    co = float(np.mean(outs))
+    return {"cagr": co, "bench": cb, "excess": co - cb, "n": len(outs),
+            "exposure": float(np.mean(expos)) if expos else float("nan")}
+
+
 def _bench_cagr(reg: pd.DataFrame, lo: str, hi: str) -> float:
     """同一窗口上等权池指数的 CAGR(与 uptrend-pullback 的基准是同一把尺)。"""
     idx = reg.set_index("date")["ew_index"]
@@ -221,6 +268,14 @@ def report_family(ind, reg, family_id: str, train, test, *,
         nulls.append({"lo": wlo, "pct": pct, "median": ctl["median"], "failed": ctl["n_failed"]})
         print(f"    随机对照 {wlo[:7]}:策略 {win_cagr*100:+.1f}%  "
               f"随机中位 {ctl['median']*100:+.1f}%  ⇒ 第 {pct:.1f} 百分位  失败 {ctl['n_failed']}")
+    ov = overlay(ind, reg, test, family_id=family_id, fparams=fb, cfg=cfg)
+    ov_cont = overlay(ind, reg, [(lo, hi)], family_id=family_id, fparams=fb, cfg=cfg)
+    print(f"  闲置资金计息(曝光匹配,平滑口径):测试窗 overlay CAGR "
+          f"{0 if ov['cagr'] is None else ov['cagr']*100:+.2f}% vs 基准 "
+          f"{0 if ov['bench'] is None else ov['bench']*100:+.2f}% ⇒ 超额 "
+          f"{0 if ov['excess'] is None else ov['excess']*100:+.2f}pp | 连续 "
+          f"{ov_cont['cagr']*100:+.2f}% vs 基准 {ov_cont['bench']*100:+.2f}% ⇒ "
+          f"{ov_cont['excess']*100:+.2f}pp")
     win50 = sum(1 for x in pcts if x >= 50)
     win90 = sum(1 for x in pcts if x >= 90)
     print(f"  随机对照:≥中位 {win50}/{len(pcts)} 窗   ≥p90 {win90}/{len(pcts)} 窗"
@@ -229,7 +284,8 @@ def report_family(ind, reg, family_id: str, train, test, *,
                                         n_returns=max(2, te["n_trades"]))
     print(f"  DSR(Sharpe {te['mean_sharpe']:+.2f}, k={N_TRIALS['n']}) = "
           f"{dsr['deflated_sharpe']:.3f}")
-    return {"family_id": family_id, "family_params": fb, "exit": ex,
+    return {"family_id": family_id, "family_params": fb, "exit": ex, "overlay": ov,
+            "overlay_cont": ov_cont,
             "train": tr, "test": te, "continuous": cont, "null_pcts": pcts,
             "win90": win90, "dsr": dsr, "n_trials_at_done": N_TRIALS["n"]}
 
@@ -304,6 +360,7 @@ def main(argv=None) -> int:
         verdict = "**战胜**" if all([c1, c2, c3, c4]) else "未战胜"
         print(f"  {r['family_id']:<12} 池化 {te['mean_cagr']*100:+7.2f}% (超额 {te['excess']*100:+7.2f}pp) "
               f"连续 {cont['cagr']*100:+7.2f}% (超额 {(cont['cagr']-cont['bench'])*100:+7.2f}pp) "
+              f"| overlay超额 {r['overlay_cont']['excess']*100:+7.2f}pp "
               f"| ①{_tick(c1)} ②{_tick(c2)} ③{pos}/{n_eff} ④{won_null}/{len(r['null_pcts'])} "
               f"(p90 {r['win90']}/{len(r['null_pcts'])})"
               f"\n               → {verdict}  DSR {r['dsr']['deflated_sharpe']:.3f}")

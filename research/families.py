@@ -99,6 +99,7 @@ def add_family_indicators(ind: pd.DataFrame) -> pd.DataFrame:
     # 市场层的滞后同样必须在**日期轴**上做 shift,再映射回面板 —— 在行序上 shift 会变成
     # 「同一只票的上一行」,而市场层是日期的函数(实测踩过)。
     out["mkt_ret1_S"] = out["date"].map(by_date.shift(1))
+    out["_resid"] = out["ret1"] - out["mkt_ret1"]      # 个股当日收益相对市场的那一块
 
     # 隔夜跳空与它在 5 日跌幅里的占比(横截面折价族用)
     out["gap1"] = out["open"] / out["prev_close"].replace(0.0, np.nan) - 1.0
@@ -379,7 +380,52 @@ def _mask_sf_calm(ind: pd.DataFrame, p: dict) -> pd.Series:
     return base & b & ind["atr_pct"].notna() & ind["ret1"].notna()
 
 
+def _mask_idio(ind: pd.DataFrame, p: dict) -> pd.Series:
+    """族:**特质性弱势的均值回归**(idio)—— 把两个幸存者(str / sf_calm)的共同机制抽出来。
+
+    上一步的横向比较留下两个幸存者,它们的条件看起来不同,但共同点是:
+    **个股自己跌(不是因为市场跌)+ 不放量 + 相对自身 120 日包络便宜 + 中期结构未坏**。
+    本族把这条共同机制**显式**写出来,并用因子式对照臂逐条隔离哪一条在承重:
+
+        mode="idio"      : 正题
+        mode="mktdown"   : 把「市场没跌」翻成「市场也在跌」  → 测「个体性」是否承重
+        mode="highvol"   : 把「不放量」翻成「放量」          → 测「没有增量卖方」是否承重
+        mode="highrvol"  : 加「自身波动率高」(rvol20 ≥ rv)  → 测「安静票」这个偏好是否承重
+
+    机制(为什么这可能是真的):市场没跌而个股独自缩量下跌,最可能是**流动性/情绪性的错位**
+    (有人需要卖、但没人认为公司变了),而不是信息驱动的重定价;信息重定价通常伴随放量
+    (有人真的在重新配置)与市场同向(系统性因子)。这是与 uptrend-pullback **不同的一笔钱**。
+    """
+    mode = p.get("mode", "idio")
+    m = ((ind["close"] >= MIN_PRICE) & (ind["amount60"] >= MIN_AMOUNT60)
+         & ind["atr_pct"].notna() & ind["ret1"].notna() & ind["mkt_ret1"].notna())
+    # A 个股自己跌
+    m &= (ind["ret1"] <= -float(p["ret1_max"]))
+    m &= ((ind["ret1"] - ind["mkt_ret1"]) <= -float(p["resid_max"]))
+    # B 市场没跌(对照臂 mktdown 翻成「市场也在跌」)
+    if mode == "mktdown":
+        m &= (ind["mkt_ret1"] <= -0.01)
+    else:
+        m &= (ind["mkt_ret1"] >= -float(p["mkt_floor"]))
+    # C 不放量(对照臂 highvol 翻成「放量」)
+    if mode == "highvol":
+        m &= (ind["vol_ratio"] >= float(p.get("vol_min", 1.5))) & ind["vol_ratio"].notna()
+    else:
+        m &= (ind["vol_ratio"] <= float(p["vol_max"])) & ind["vol_ratio"].notna()
+    # D 相对自身便宜 / E 中期结构未坏
+    m &= (ind["dd120"] <= -float(p["min_dd120"])) & ind["dd120"].notna()
+    m &= (ind["above_ma60_ratio"] >= 0.40) & ind["above_ma60_ratio"].notna()
+    # 附加:安静票 vs 高波动票(对照臂 highrvol)
+    if mode == "highrvol":
+        m &= (ind["rvol20"] >= float(p["rvol_min"])) & ind["rvol20"].notna()
+    return m
+
+
 MASK = {
+    "idio": _mask_idio,
+    "idio_mktdown": _mask_idio,      # 对照臂:市场也在跌
+    "idio_highvol": _mask_idio,      # 对照臂:放量
+    "idio_highrvol": _mask_idio,     # 对照臂:高波动票
     "str": _mask_short_reversal,
     "str_inv": _mask_short_reversal,     # 对照臂:买 5 日涨得多的
     "cap_inv": _mask_capitulation,       # 对照臂:要收盘趴低
@@ -396,6 +442,9 @@ MASK = {
 # 每族的排序分(同日信号多于 max_positions 时用它抢仓位槽)。
 # 族间不一致是**有意的**:排序是各族策略的一部分。默认 mom120 只为与 uptrend-pullback 可比。
 SCORE_COL = {"volshock": "volshock_score", "cap": "clv", "cap_inv": "clv",
+             # 特质性弱势族:残差越负(跌得越"自己")越优先抢仓位
+             "idio": "__resid", "idio_mktdown": "__resid",
+             "idio_highvol": "__resid", "idio_highrvol": "__resid",
              "lhr": "lhr_score"}
 
 # 需要 regime 帧(状态列 ew_index/ew_ma/breadth_sm/regime_ok)的族
@@ -407,6 +456,11 @@ FIXED: dict[str, dict] = {
     "volshock": {"ret1_floor": -0.04, "mkt_floor": -0.010, "regime_gate": True},
     "cap": {"bad_ratio_max": 0.30, "px_disc_max": None},
     "lhr": {"ma20_buffer": 1.02},
+    "idio": {"mode": "idio"},
+    "idio_mktdown": {"mode": "mktdown"},
+    "idio_highvol": {"mode": "highvol"},
+    "idio_highrvol": {"mode": "highrvol"},
+    "str": {},
     "str_inv": {"side": "rise"},
     "cap_inv": {"bad_ratio_max": 0.30, "px_disc_max": None, "clv_side": "max"},
     "sf_stress": {"v_stress": 0.012},
@@ -460,6 +514,28 @@ GRIDS: dict[str, dict[str, list]] = {
         "dd_norm_k": [12.0, 14.0, 18.0],
         "xs_mom120_max": [None, 0.30, 0.50],
         "min_dd120": [0.20, 0.30],
+    },
+    # 正题:残差阈值 × 市场门 × 便宜度 × 量能上限 = 3×2×2×2 = 24
+    "idio": {
+        "ret1_max": [0.03, 0.04, 0.05],
+        "resid_max": [0.02, 0.04],
+        "mkt_floor": [0.0, 0.005],
+        "min_dd120": [0.15, 0.25],
+        "vol_max": [1.0],
+    },
+    # 三条对照臂:只动各自那一条轴,其余取正题的中位值
+    # 对照臂也在各自那条轴上调两档(≥4 组),否则单一配置的「对照」没有说服力
+    "idio_mktdown": {
+        "ret1_max": [0.04, 0.05], "resid_max": [0.04], "min_dd120": [0.15, 0.25],
+        "vol_max": [1.0],
+    },
+    "idio_highvol": {
+        "ret1_max": [0.04], "resid_max": [0.04, 0.05], "mkt_floor": [0.0],
+        "min_dd120": [0.20], "vol_min": [1.2, 2.0],
+    },
+    "idio_highrvol": {
+        "ret1_max": [0.04, 0.05], "resid_max": [0.04], "mkt_floor": [0.0],
+        "min_dd120": [0.20], "vol_max": [1.0], "rvol_min": [0.04, 0.06],
     },
     # 对照臂:与 str 同样的跌/涨阈值,只把方向翻过来
     "str_inv": {
@@ -535,7 +611,8 @@ def select(ind: pd.DataFrame, family_id: str, params: dict, lo: str, hi: str,
     # 排序分:族间的排序口径要一致,否则「超容量当 T 丢弃」这一步不可比。
     # 统一用 mom120(与 uptrend-pullback 相同):分数只决定同日多信号时的先后,
     # 不参与是否入选 —— 这样族与族之间的差异只在**信号集**,不在容量分配。
-    hits["score"] = hits[SCORE_COL.get(family_id, "mom120")]
+    _sc = SCORE_COL.get(family_id, "mom120")
+    hits["score"] = hits["_resid"] if _sc == "__resid" else hits[_sc]
     hits["sig_close"] = hits["close"]
     hits["sig_ma20"] = hits["ma20"]
     hits["sig_ma60"] = hits["ma60"]
