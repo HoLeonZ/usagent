@@ -442,11 +442,23 @@ MASK = {
 
 # 每族的排序分(同日信号多于 max_positions 时用它抢仓位槽)。
 # 族间不一致是**有意的**:排序是各族策略的一部分。默认 mom120 只为与 uptrend-pullback 可比。
+#
+# ⚠️ **符号约定**（这里是本文件出过错的地方，2026-10-17 审计 F2）：
+#   排序一律**降序**（score 越大越先抢到仓位槽），所以"越小越优先"的族**必须取负**。
+#   `idio*` 的机制是"残差越负（跌得越'自己'）越优先"，掩码要求 `_resid ≤ -resid_max`；
+#   直接把裸 `__resid` 当 score 会让降序排在最前的是**残差最不负**（最像市场）的那次下跌
+#   ——与声明的机制**相反**。`cap_inv` 同理：它要求 clv ≤ clv_max（收盘趴低），
+#   却沿用了 cap 的 clv 降序 ⇒ 在低位集合里挑的是**最不极端**的一批。
+#   `volshock_score`/`lhr_score` 在指标层已经取过负（见 add_family_indicators），
+#   所以它们**不再**出现在下面的取负集合里 —— 两处都取负就会抵消。
 SCORE_COL = {"volshock": "volshock_score", "cap": "clv", "cap_inv": "clv",
-             # 特质性弱势族:残差越负(跌得越"自己")越优先抢仓位
              "idio": "__resid", "idio_mktdown": "__resid",
              "idio_highvol": "__resid", "idio_highrvol": "__resid",
              "lhr": "lhr_score"}
+
+# 这些族的 score 需要**取负**：它们的机制是"该列越小越优先"。
+SCORE_NEGATED = frozenset({"idio", "idio_mktdown", "idio_highvol", "idio_highrvol",
+                           "cap_inv"})
 
 # 需要 regime 帧(状态列 ew_index/ew_ma/breadth_sm/regime_ok)的族
 NEEDS_REGIME = frozenset({"state_flip", "volshock", "sf_stress", "sf_calm"})
@@ -615,7 +627,9 @@ def select(ind: pd.DataFrame, family_id: str, params: dict, lo: str, hi: str,
     # 统一用 mom120(与 uptrend-pullback 相同):分数只决定同日多信号时的先后,
     # 不参与是否入选 —— 这样族与族之间的差异只在**信号集**,不在容量分配。
     _sc = SCORE_COL.get(family_id, "mom120")
-    hits["score"] = hits["_resid"] if _sc == "__resid" else hits[_sc]
+    _raw = hits["_resid"] if _sc == "__resid" else hits[_sc]
+    # 符号约定见 SCORE_COL 的注释：排序是降序，所以"越小越优先"的族要取负。
+    hits["score"] = -_raw if family_id in SCORE_NEGATED else _raw
     hits["sig_close"] = hits["close"]
     hits["sig_ma20"] = hits["ma20"]
     hits["sig_ma60"] = hits["ma60"]
