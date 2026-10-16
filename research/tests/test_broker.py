@@ -930,3 +930,65 @@ def test_a_zero_volume_bar_never_produces_a_fill():
                  start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
     assert not (set(r["trades"]["exit_date"]) & zero_days), \
         "零量 bar 上不该有任何成交（顺延到能成交的那一根，而不是凭空成交）"
+
+
+# ---------------------------------------------------------------- 入场价越界（E7）
+
+def test_entry_overflow_is_recorded_when_the_fill_exceeds_the_bar_high():
+    """滑点/价差把成交价顶出当日 bar 区间 ⇒ 记下越界幅度（审计 E7）。
+
+    为什么必须记：那是**物理上不存在**的成交价（当日最高只到 h），而它同时把
+    止损/止盈的锚点往上挪。实测（真数据）：wfv 15/106 笔、reversal_dip 11/114 笔越界，
+    最大 ~99bp —— 不是可以忽略的量级。
+    """
+    # 窄幅 bar：开盘就是最高价 ⇒ 任何滑点都会把成交价顶出去
+    bars = [{"date": d.strftime("%Y-%m-%d"), "open": 100.0, "high": 100.0,
+             "low": 99.0, "close": 100.0, "volume": 1_000_000.0}
+            for d in pd.bdate_range("2024-01-01", periods=25)]
+    panel = mk_panel(bars)
+    r = simulate({**BASE, "atr_slip_scale": 1.0}, mk_signal("2024-01-01", atr_pct=0.05),
+                 panel, start="2024-01-01", end="2024-02-28", cost_bps_roundtrip=0.0)
+    tr = r["trades"]
+    assert len(tr) == 1
+    assert tr["entry_overflow_bps"].iloc[0] > 0, "窄幅 bar + 滑点 ⇒ 必然越界"
+    assert r["metrics"]["n_entry_overflow"] == 1
+    assert r["metrics"]["max_entry_overflow_bps"] == pytest.approx(
+        tr["entry_overflow_bps"].iloc[0])
+
+
+def test_clamping_moves_the_fill_back_inside_but_keeps_the_observation():
+    """钳制打开 ⇒ 成交价回到区间内；但**越界幅度仍要记下来**（观测不能丢）。"""
+    bars = [{"date": d.strftime("%Y-%m-%d"), "open": 100.0, "high": 100.0,
+             "low": 99.0, "close": 100.0, "volume": 1_000_000.0}
+            for d in pd.bdate_range("2024-01-01", periods=25)]
+    panel = mk_panel(bars)
+    r = simulate({**BASE, "atr_slip_scale": 1.0, "clamp_entry_to_bar": True},
+                 mk_signal("2024-01-01", atr_pct=0.05), panel,
+                 start="2024-01-01", end="2024-02-28", cost_bps_roundtrip=0.0)
+    t = r["trades"].iloc[0]
+    assert t["entry_price"] <= 100.0 + 1e-9, "钳制后成交价不得高于当日最高价"
+    assert t["entry_overflow_bps"] > 0, "被钳掉的幅度仍要记录（否则观测就消失了）"
+
+
+def test_default_is_no_clamp_and_changes_nothing():
+    """默认不钳制（保留滑点）—— 不声明这个键时交易列表与从前逐位一致。"""
+    bars = [{"date": d.strftime("%Y-%m-%d"), "open": 100.0, "high": 100.0,
+             "low": 99.0, "close": 100.0, "volume": 1_000_000.0}
+            for d in pd.bdate_range("2024-01-01", periods=25)]
+    a = simulate({**BASE, "atr_slip_scale": 1.0}, mk_signal("2024-01-01", atr_pct=0.05),
+                 mk_panel(bars), start="2024-01-01", end="2024-02-28", cost_bps_roundtrip=0.0)
+    b = simulate({**BASE, "atr_slip_scale": 1.0, "clamp_entry_to_bar": False},
+                 mk_signal("2024-01-01", atr_pct=0.05), mk_panel(bars),
+                 start="2024-01-01", end="2024-02-28", cost_bps_roundtrip=0.0)
+    from research.broker import trade_fingerprint
+    assert trade_fingerprint(a["trades"]) == trade_fingerprint(b["trades"])
+
+
+def test_no_overflow_when_the_bar_is_wide():
+    """宽幅 bar（high 远高于开盘）⇒ 滑点顶不出去 ⇒ 越界幅度必须是 0。"""
+    panel = mk_panel(flat_days(25))
+    r = simulate({**BASE, "atr_slip_scale": 1.0}, mk_signal("2024-01-01", atr_pct=0.02),
+                 panel, start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    assert r["metrics"]["n_entry_overflow"] >= 0
+    if len(r["trades"]):
+        assert r["trades"]["entry_overflow_bps"].max() >= 0

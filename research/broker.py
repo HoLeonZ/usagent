@@ -55,6 +55,9 @@ TRADE_COLS = [
     # 声明风险改写成另一个值（12m preset 第二仓从声明 5% 权益掉到 ~0.6%），
     # 使"单笔风险预算"变成记账副作用。记下来之后这条路径是可审计的。
     "sizing_cap",
+    # entry_overflow_bps = 入场价高于**当日 bar 最高价**的幅度（bp）。>0 表示记录里的
+    # 成交价在物理上不存在（滑点/价差加成把它顶出了当日振幅）。审计 E7。
+    "entry_overflow_bps",
     # risk_frac = 该笔的计划风险 / 入场时的权益。声明值与实际值并排可读。
     "risk_frac",
     # volume_cap = 入场当日由 §4(a) 量能上限算出的**可成交股数上限**。
@@ -144,6 +147,7 @@ class Position:
     # 最终压住股数的那个约束（见 TRADE_COLS 里的说明）。
     sizing_cap: str = "policy"
     volume_cap: int = 0
+    entry_overflow_bps: float = 0.0
     # 入场时的权益 —— "计划风险占权益多少"的分母。用入场时刻的值，
     # 而不是事后某一天的权益（否则这个数会随时间漂移，无法回答"我当时冒了多大风险"）。
     equity_at_entry: float = float("nan")
@@ -314,6 +318,7 @@ def simulate(
     if max_pair_corr is not None and not (-1.0 <= float(max_pair_corr) <= 1.0):
         raise BrokerError(f"max_pair_corr ∈ [-1,1]，得到 {max_pair_corr!r}")
     max_pair_corr = None if max_pair_corr is None else float(max_pair_corr)
+    clamp_entry_to_bar = bool(spec["clamp_entry_to_bar"])
 
     if max_positions < 1:
         raise BrokerError(f"max_positions 必须 >= 1,得到 {max_positions}")
@@ -415,6 +420,8 @@ def simulate(
     stats_stale_days = 0
     # §4(b) 部分成交（出场侧卖不完）的次数。入场侧的对应量是 sizing_cap="volume_cap"。
     partial_exits = 0
+    # 入场价越出当日 bar 区间的笔数（审计 E7）
+    stats_entry_overflow = 0
 
     def mark_to_market(day: pd.Timestamp) -> float:
         """equity = cash + Σ qty × close。这是唯一正确的口径(见模块 docstring)。
@@ -533,6 +540,7 @@ def simulate(
             # 计划风险:入场时即固定(止损宽度 × 股数),与最终出场无关。
             # 部分成交时按**卖出的股数**取比例 —— 否则一笔半仓出场的 R 会被系统性放大。
             "volume_cap": int(pos.volume_cap),
+            "entry_overflow_bps": float(pos.entry_overflow_bps),
             "sl_penetration": (float("nan") if sl_penetration is None
                                else float(sl_penetration)),
             "sl_width": pos.sl_width, "tp_width": pos.tp_width,
@@ -710,6 +718,16 @@ def simulate(
                 half_spread = (spread_mod.half_spread_rate(sym_spread)
                                if spread_model != "none" else 0.0)
                 entry_px = o * (1.0 + slip) * (1.0 + half_spread)
+                # E7：滑点/价差加成可能把成交价顶出当日 bar 的 [low, high] —— 那是
+                # **物理上不存在**的成交价，而它会同时把止损/止盈的锚点往上挪。
+                # 先把越界幅度**记下来**（默认不钳制，见上面那段取舍说明），
+                # 想钳制就显式声明 `clamp_entry_to_bar`（代价：窄 bar 上滑点被抹平）。
+                overflow_bps = 0.0
+                if h_entry > 0 and entry_px > h_entry:
+                    overflow_bps = (entry_px - h_entry) / h_entry * 1e4
+                    stats_entry_overflow += 1
+                    if clamp_entry_to_bar:
+                        entry_px = h_entry
 
                 # ---- 组合层上限（D1/D3）----
                 # 顺序施加，并**记下最后压住它的那个约束**。为什么必须记：
@@ -755,6 +773,7 @@ def simulate(
                     symbol=sym, entry_date=day, entry_price=entry_px, size=qty,
                     sizing_cap=cap_by, equity_at_entry=equity_at_open,
                     half_spread=half_spread, volume_cap=int(volume_cap),
+                    entry_overflow_bps=overflow_bps,
                     sl_price=entry_px * (1.0 - sl_w),
                     tp_price=entry_px * (1.0 + tp_w),
                     atr_pct=sym_atr, sl_width=sl_w, tp_width=tp_w,
@@ -861,6 +880,13 @@ def simulate(
     metrics["stale_position_days"] = int(stats_stale_days)
     metrics["n_blocked_by_corr"] = int(stats_blocked_corr)
     metrics["n_partial_exits"] = int(partial_exits)
+    metrics["n_entry_overflow"] = int(stats_entry_overflow)
+    if len(trades_df):
+        # ⚠️ 这里必须用 trades_df（DataFrame）；simulate 里的 `trades` 是**list**
+        # —— 我第一版写成 trades.columns，44 个用例当场报 'list' object has no attribute。
+        _ov = trades_df["entry_overflow_bps"].astype(float)
+        metrics["max_entry_overflow_bps"] = float(_ov.max())
+        metrics["median_entry_overflow_bps"] = float(_ov.median())
     metrics["pct_position_days_stale"] = (stats_stale_days / pos_days) if pos_days else 0.0
     # 判据只有一条：窗口结束时账本里还剩不剩仓位。
     # 剩 ⇒ 权益口径含未实现浮盈、而交易口径只覆盖已平仓 ⇒ 两组数不同源。

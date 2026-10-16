@@ -61,6 +61,10 @@ OPTIONAL_KEYS: tuple[str, ...] = (
     # 见 broker.py 的说明：不平仓会让"权益口径的头条收益"与"交易口径的 E[R]"
     # 落在两个不同的样本上。
     "liquidate_at_end",
+    # 入场价是否钳制到当日 bar 区间内（审计 E7）。默认 False = 保留滑点（见 broker 里
+    # 那段"已知建模简化"的取舍说明）；打开则把"不可能的成交价"消掉，代价是窄幅 bar 上
+    # 滑点被抹平。**两种都可用，但必须显式选**，而不是默默留着不可能的价格。
+    "clamp_entry_to_bar",
     # ---- 成本口径（2026-10-17 审计 E1）----
     # "none"（默认）| "corwin_schultz"。默认 none 只为不改动既有数字，
     # 不是因为它更对：不建模价差等于把**尺寸无关**的那一半成本当成零。
@@ -84,7 +88,9 @@ DEFAULTS: dict[str, object] = {
     # 默认清算：它让头条收益与 E[R]/胜率/盈亏比落在**同一个样本**上，
     # 而且方向保守（多付一次出场成本）。不想要就显式写 False。
     "liquidate_at_end": True,
+    "clamp_entry_to_bar": False,
     "sl_overshoot": 0.0,
+    "clamp_entry_to_bar": False,
 }
 
 # 指标价轴是**引擎约定,不是 preset 旋钮**:CLAUDE.md §3(b) 规定数学指标必须用
@@ -129,6 +135,9 @@ SPEC_LABELS: dict[str, tuple[str, "callable"]] = {
     "max_weight": ("单名上限", lambda v: ("**未设**" if v is None else f"{float(v):.0%} 权益")),
     "max_heat": ("组合热风险上限", lambda v: ("**未设**" if v is None else f"{float(v):.0%} 权益")),
     "max_drawdown_halt": ("回撤停机", lambda v: ("**未设**" if v is None else f"{float(v):.0%}")),
+    "clamp_entry_to_bar": ("入场价钳制",
+                           lambda v: "钳到 bar 区间内（滑点在窄 bar 上被抹平）" if v
+                           else "不钳制（保留滑点，可能报出高于 bar 高点的价）"),
     "max_pair_corr": ("组合内相关性上限",
                       lambda v: ("**未设**" if v is None else f"两两 ≤ {float(v):.2f}")),
     "atr_sl_mult": ("止损宽度", lambda v: "—" if v is None else f"{float(v):g}×ATR"),

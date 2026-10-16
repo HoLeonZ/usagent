@@ -165,6 +165,14 @@ def run(args) -> dict:
         print("归因: " + FM.describe(_att))
         print("      ⚠️ 无价值/规模因子（无基本面数据、市值快照非 PIT）——覆盖范围到此为止")
 
+    # 入场价越界（E7）：滑点/价差把成交价顶出当日 bar 区间 ⇒ 记录里出现物理上不存在的
+    # 价格。**默认不钳制**（钳制会在窄 bar 上把滑点整体抹平），但读者必须知道有多少笔。
+    _nov = res["metrics"].get("n_entry_overflow", 0)
+    if _nov:
+        print(f"入场价越界(物理上不存在的成交价): {_nov}/{len(tr)} 笔, 最大 "
+              f"{res['metrics']['max_entry_overflow_bps']:.0f}bp —— 默认不钳制（保留滑点）；"
+              f"要钳制请显式声明 clamp_entry_to_bar")
+
     # 容量余量（D5/E4）："这套策略能装多少钱"此前在库里和报告里都没有读数。
     _hr = res["metrics"].get("capacity_headroom_min")
     if _hr is not None and np.isfinite(_hr):
