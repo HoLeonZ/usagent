@@ -41,22 +41,24 @@ usagent/
 
 ## 环境
 
-用 base 的 Python 3.14.6（`yfinance 1.7.0`）。**不是** `tradingagents` conda env（那边 yfinance 是 1.5.2 且缺依赖）。
-
 ```bash
-PY=/opt/homebrew/Caskroom/miniconda/base/bin/python
-$PY -c "import yfinance,pandas; print(yfinance.__version__, pandas.__version__)"
-# 期望：1.7.0 3.0.5
+# 解释器**不写死某一台机器的路径**（审计 G2：文档曾把 /opt/homebrew/... 当环境契约，
+# 而那台机器上的路径在本机早就失效了）。依赖版本钉在 requirements.txt。
+python3 -m pip install -r requirements.txt
+PY=${PY:-python3}
+$PY -c "import yfinance, pandas; print(yfinance.__version__, pandas.__version__)"
+# 期望：1.7.0 3.0.5（版本必须与 requirements.txt 一致 —— §0 的"同输入⇒同输出"
+# 在没有依赖锁定时做不到，而数字变了会被误读成策略的问题）
 ```
 
-不需要装任何东西。落盘用 SQLite（Python 内置），**没有用 parquet 因为这台机器没装 pyarrow**。
+落盘用 SQLite（Python 内置），**不用 parquet**（不引额外依赖）。
 
 ---
 
 ## 首次运行
 
 ```bash
-cd /Users/holeon/code/usagent
+cd <仓库根>
 
 # 1) 3 年日线全量回补（596 只约 35 分钟；每只 ~3-5s，这是 Yahoo 的固有速度）
 $PY -u src/download_ohlcv.py --universe oi100
@@ -87,7 +89,7 @@ bash src/run_daily.sh
 ```bash
 crontab -e
 # 北京 10:00，周一至周五（机器时区须为北京）
-0 10 * * 1-5  cd /Users/holeon/code/usagent && bash src/run_daily.sh >> logs/daily.log 2>&1
+0 10 * * 1-5  cd <仓库根> && bash src/run_daily.sh >> logs/daily.log 2>&1
 ```
 
 ### ⚠️ 运行时刻是这套东西唯一真正会「做错」的地方

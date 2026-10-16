@@ -20,11 +20,13 @@
 #
 # 用法：
 #   bash src/run_daily.sh
-#   crontab（机器时区需为北京）:  0 10 * * 1-5  cd /Users/holeon/code/usagent && bash src/run_daily.sh >> logs/daily.log 2>&1
+#   crontab（机器时区需为北京）:  0 10 * * 1-5  cd <仓库根> && bash src/run_daily.sh >> logs/daily.log 2>&1
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
-PY=/opt/homebrew/Caskroom/miniconda/base/bin/python
+# 解释器**不写死某一台机器的路径**（审计 G2）：可用 PY=... 覆盖。
+# 依赖版本见 requirements.txt（§0：同输入⇒同输出，版本不钉就做不到）。
+PY="${PY:-python3}"
 mkdir -p logs
 STAMP=$(date "+%Y-%m-%d %H:%M:%S%z")
 

@@ -15,8 +15,10 @@
 ## 复现
 
 ```bash
-cd /Users/holeon/code/usagent
-PY=/opt/homebrew/Caskroom/miniconda/base/bin/python
+cd <仓库根>
+# 解释器：本项目不假设某一台机器的路径。用 `PY=python3`（或你自己的 venv 解释器），
+# 依赖版本见 requirements.txt。
+PY=${PY:-python3}
 
 # 0) 取数。data/*.db 不入库 —— 不先跑这一步,下面每条命令都会
 #    sqlite3.OperationalError: no such table: ohlcv。
@@ -116,7 +118,9 @@ gap 跳过止损按开盘价成交;成交量上限 `Bar_Volume × 10%`,超出 IO
 把 596 只收窄成人能过目的候选。**但它同时在测量自己。**
 
 ```bash
-PY=/opt/homebrew/Caskroom/miniconda/base/bin/python
+# 解释器：本项目不假设某一台机器的路径。用 `PY=python3`（或你自己的 venv 解释器），
+# 依赖版本见 requirements.txt。
+PY=${PY:-python3}
 
 # 1) 先看各层条件到底有没有携带信息(先做这个)
 $PY -m research.screen --measure
@@ -186,7 +190,9 @@ $PY -m research.screen --measure --horizon 5     # 换持有期
 ## 按预注册协议挖 preset(`wfv_search.py`)
 
 ```bash
-PY=/opt/homebrew/Caskroom/miniconda/base/bin/python
+# 解释器：本项目不假设某一台机器的路径。用 `PY=python3`（或你自己的 venv 解释器），
+# 依赖版本见 requirements.txt。
+PY=${PY:-python3}
 $PY -m research.wfv_search --run      # 协议、网格、折窗、判据都在模块 docstring 里(跑之前定稿)
 ```
 
@@ -251,7 +257,9 @@ n_trials = 138;零对照从**策略自己的机会集**抽;最后留一段**全�
 就换别的策略思想,直到战胜它当前的最佳结果为止。
 
 ```bash
-PY=/opt/homebrew/Caskroom/miniconda/base/bin/python
+# 解释器：本项目不假设某一台机器的路径。用 `PY=python3`（或你自己的 venv 解释器），
+# 依赖版本见 requirements.txt。
+PY=${PY:-python3}
 $PY -m research.family_search --run            # 一次跑完所有族,输出裁决表(纯读本地数据)
 $PY tools/parse_family_logs.py logs/*.log      # 把日志拼成一张表
 ```
