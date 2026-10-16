@@ -56,6 +56,14 @@ MODES = (MODE_MEMBERSHIP, MODE_LIQUIDITY, MODE_ALL)
 JUMP_RATIO = 2.0
 JUMP_TOLERANCE = 0.01
 
+# 「此刻可交易」的第二个条件：**连续性**。实测（2026-10-17）池内有 10 只标的
+# 在自身历史里缺一半以上的交易日（SHAZ 276/750、DAIC 399/750 一类）—— 它们近期
+# 成交额够大（所以进了 ADV 门槛），但**不是每个交易日都有成交**。
+# 这类名字的问题不是数据坏，而是"你以为能交易，其实那天根本没有盘口"：
+# 引擎在无 bar 的日子里按陈价重估、持仓天数照走（审计 A3）。
+# 判据：截至 T 的 lookback 个**全局交易日**里，该标的有 bar 的比例 ≥ min_coverage。
+DEFAULT_MIN_COVERAGE = 0.9
+
 DEFAULT_LOOKBACK = 60
 DEFAULT_MIN_DOLLAR_VOLUME = 3e7
 
@@ -80,6 +88,7 @@ class UniverseSpec:
     path: str | None = None            # membership 模式的区间表路径
     min_price: float | None = None     # 可选的因果价格下限（用 close(T)）
     note: str = ""
+    min_coverage: float = DEFAULT_MIN_COVERAGE
     extra: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -87,6 +96,8 @@ class UniverseSpec:
             raise UniverseError(f"universe.mode 必须是 {MODES} 之一，得到 {self.mode!r}")
         if self.mode == MODE_MEMBERSHIP and not self.path:
             raise UniverseError("membership 模式必须给 path（成分区间表）")
+        if not (0.0 < float(self.min_coverage) <= 1.0):
+            raise UniverseError(f"min_coverage ∈ (0,1]，得到 {self.min_coverage}")
         if self.mode == MODE_LIQUIDITY:
             if self.lookback < 2:
                 raise UniverseError(f"lookback 至少 2 个交易日，得到 {self.lookback}")
@@ -114,7 +125,8 @@ def parse(spec: dict | str | None) -> UniverseSpec:
         return UniverseSpec(mode=MODE_ALL, note=f"静态名单 {spec}")
     if not isinstance(spec, dict):
         raise UniverseError(f"universe 必须是 dict/str/None，得到 {type(spec).__name__}")
-    known = {"mode", "min_dollar_volume", "lookback", "path", "min_price", "note"}
+    known = {"mode", "min_dollar_volume", "lookback", "path", "min_price", "note",
+             "min_coverage"}
     unknown = sorted(set(spec) - known)
     if unknown:
         raise UniverseError(
@@ -129,7 +141,7 @@ def describe(spec: UniverseSpec) -> str:
         return f"PIT 成分区间表 {spec.path}"
     if spec.mode == MODE_LIQUIDITY:
         out = (f"PIT 流动性池:截至 T 的 {spec.lookback} 日滚动成交额 "
-               f"≥ ${spec.min_dollar_volume:,.0f}")
+               f"≥ ${spec.min_dollar_volume:,.0f} 且在窗口内出勤率 ≥ {spec.min_coverage:.0%}")
         if spec.min_price is not None:
             out += f",且 close(T) ≥ ${spec.min_price:g}"
         return out
@@ -203,6 +215,8 @@ def eligibility(panel: pd.DataFrame, spec: UniverseSpec,
         adv = g.transform(lambda s: s.rolling(spec.lookback,
                                               min_periods=spec.lookback).mean())
         ok = (adv >= spec.min_dollar_volume).reindex(panel.index)
+        # 成交额够大 **且** 那天真的在交易（见 DEFAULT_MIN_COVERAGE 的实测说明）
+        ok &= continuity_ok(panel, spec.lookback, spec.min_coverage)
 
     else:  # membership
         mem = membership if membership is not None else load_membership(spec.path)
@@ -254,6 +268,29 @@ def untrustworthy_jumps(panel: pd.DataFrame) -> pd.Series:
         inv = np.where((ratio > 0) & np.isfinite(ratio), 1.0 / ratio, np.nan)
     flag = ((sp <= 0) & (near_int(ratio) | near_int(inv)))
     return pd.Series(flag, index=ordered.index).reindex(panel.index).fillna(False)
+
+
+def continuity_ok(panel: pd.DataFrame, lookback: int,
+                  min_coverage: float = DEFAULT_MIN_COVERAGE) -> pd.Series:
+    """逐行：该标的在**截至 T 的 lookback 个全局交易日**里的出勤率 ≥ min_coverage。
+
+    为什么要按**全局交易日**而不是行数：面板里只有"有 bar 的行"，按行数算永远满勤。
+    缺勤只能对着交易日历数出来（这正是 A3 里"引擎按陈价重估"的那段日子）。
+    因果：窗口右端就是 T。
+    """
+    if panel.empty or "amount" not in panel.columns:
+        return pd.Series(False, index=panel.index)
+    axis = pd.Index(sorted(panel["date"].unique()))
+    pos = pd.Series(range(len(axis)), index=axis)
+    idx = panel["date"].map(pos).to_numpy()
+    ok = pd.Series(False, index=panel.index)
+    need = min_coverage * lookback
+    for _sym, sub in panel.groupby("symbol", sort=False):
+        s1 = np.zeros(len(axis), dtype=float)
+        s1[idx[sub.index.to_numpy()]] = 1.0
+        cnt = pd.Series(s1).rolling(lookback, min_periods=lookback).sum().to_numpy()
+        ok.iloc[sub.index.to_numpy()] = cnt[idx[sub.index.to_numpy()]] >= need
+    return ok
 
 
 def require_eligible_mask(df: pd.DataFrame) -> pd.Series:

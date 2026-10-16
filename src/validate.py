@@ -128,6 +128,26 @@ def main() -> int:
         check("无「不该有数据」的日期（周末/休市）", not unexpected,
               f"多余 {len(unexpected)} 天" + (f"（例：{unexpected[:4]}）" if unexpected else ""))
 
+        # ── 序列尾部截断（审计 A3）──
+        # 此前"某只票的数据在窗口中间就断了"在 validate 里**完全隐形**：缺口检查只看
+        # 每只标的自己的 [首日,末日] 区间内部。而尾部截断的后果正好落在回测上 ——
+        # 引擎在无 bar 时按最近一次收盘无限期重估，持仓天数照走，于是那段权益是"陈价"。
+        # 实测（2026-10-17 全量）：2921/3028 无尾缺，池内**没有**一只缺 ≥5 天 ⇒ 今天不咬合，
+        # 但判据必须在（下一份数据可能就咬合了）。
+        tails = con.execute(
+            "SELECT symbol, MAX(date) m FROM ohlcv GROUP BY symbol").fetchall()
+        last_panel = date.fromisoformat(d1)
+        cut = {}
+        for sym, m in tails:
+            gap = len(expected_sessions(date.fromisoformat(m) + timedelta(days=1), last_panel))
+            if gap >= 5:
+                cut[sym] = gap
+        c_in, c_out, _ = _split_pool(list(cut), pool, set())
+        check("池内无序列尾部截断（缺 ≥5 个交易日）", c_in == 0,
+              f"池内 {c_in} 只 / 池外 {c_out} 只"
+              + (f"（例：{sorted(((s, g) for s, g in cut.items() if s in pool), key=lambda x: -x[1])[:4]}）"
+                 if c_in else ""))
+
         # ── 取数源：同一标的不得混源（审计 G9）──
         # 两个源的价格口径相同但**事件来源不同**（Yahoo 给显式 dividends/splits，
         # 备用源是从 (a,c) 反解的）。混在同一条序列里，两个口径会无痕地拼在一起 ——

@@ -130,3 +130,25 @@ def test_extra_non_session_date_is_flagged(tmp_path, monkeypatch):
     validate.CHECKS.clear()
     validate.main()
     assert not _checks()["无「不该有数据」的日期（周末/休市）"][0]
+
+
+def test_truncated_tail_is_detected_for_in_pool_names(tmp_path, monkeypatch):
+    """序列在窗口中间就断了 ⇒ 引擎会按陈价无限期重估那段权益（审计 A3）。
+
+    此前这类标的在 validate 里**完全隐形**（缺口检查只看每只票自己的区间内部）。
+    这里用流动性池内的名字构造截断（池外的不判失败，避免误报噪声）。
+    """
+    n = len(RECENT)
+    basis = {s: [100.0 + i * 0.1 for i in range(n)] for s in ("AAA", "BBB")}
+    db_path = _seed(tmp_path, monkeypatch, basis=basis)
+    with db.session(db_path) as con:
+        # AAA 从倒数第 10 个交易日之后就没有数据了（尾部截断），且给它足够成交量进池
+        con.execute("UPDATE ohlcv SET volume=5e6 WHERE symbol='AAA'")
+        con.execute("DELETE FROM ohlcv WHERE symbol='AAA' AND date >= ?",
+                    (RECENT[-10].isoformat(),))
+    validate.CHECKS.clear()
+    validate.main()
+    got = _checks()
+    ok, detail = got["池内无序列尾部截断（缺 ≥5 个交易日）"]
+    assert not ok, detail
+    assert "AAA" in detail

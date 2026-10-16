@@ -121,3 +121,28 @@ def test_e_r_sees_the_end_of_window_trade():
     st = M.tail_stats(r["trades"])
     assert st["n"] == 1
     assert np.isfinite(st["expectancy_r"])
+
+
+# ---------------------------------------------------------------- 陈旧重估读数（A3）
+
+def test_stale_position_days_are_counted_mid_holding():
+    """持仓期内出现无 bar 的日子（停牌）⇒ 那些日子权益是按**陈价**重估的，必须可读。
+
+    审计 A3：此前这件事没有任何读数，于是「这只票到底停了多久」只能靠人肉看数据。
+    """
+    dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2024-01-01", periods=30)]
+    keep = [d for i, d in enumerate(dates) if not (5 <= i <= 9)]      # AAA 中间停 5 天
+    bars = [{"date": d, "symbol": "AAA"} for d in keep]
+    bars += [{"date": d, "symbol": "BBB"} for d in dates]
+    r = simulate(OPEN_FOREVER, mk_signal("2024-01-01"), mk_panel(bars),
+                 start="2024-01-01", end="2024-02-15", cost_bps_roundtrip=None)
+    m = r["metrics"]
+    assert m["stale_position_days"] == 5, "停牌 5 个交易日应被记成 5 个持仓-日"
+    assert 0 < m["pct_position_days_stale"] < 0.3
+    assert (r["equity"]["equity"] > 0).all(), "陈价重估不得产生非正权益"
+
+
+def test_no_stale_days_when_every_bar_is_present():
+    r = run(OPEN_FOREVER, flat(30))
+    assert r["metrics"]["stale_position_days"] == 0
+    assert r["metrics"]["pct_position_days_stale"] == 0.0

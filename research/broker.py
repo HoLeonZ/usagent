@@ -361,6 +361,10 @@ def simulate(
     stats_halted_days = 0
     # 窗口末尾因"当日无 bar"而**无法**清算的仓位个数（见步骤 3b 的注释）。
     stats_unliquidated = 0
+    # 持仓**当日无 bar** 的次数（停牌/退市/数据中断）。审计 A3：这些日子权益是按
+    # "最近一次已知收盘"重估的（陈价），此前没有任何读数 —— 于是"这只票到底停了多久"
+    # 只能靠人肉看数据。累计位-日与占比进指标。
+    stats_stale_days = 0
 
     def mark_to_market(day: pd.Timestamp) -> float:
         """equity = cash + Σ qty × close。这是唯一正确的口径(见模块 docstring)。
@@ -507,6 +511,7 @@ def simulate(
                 pos.sl_price = max(pos.sl_price, pos.high_water - pos.trail_width)
             k = per_sym.get(sym, {}).get(day)
             if k is None:                      # 当日无数据 → 无法成交,顺延
+                stats_stale_days += 1          # 该持仓这一天是按陈价重估的（A3）
                 continue
             # 现金分红显式入账(§3(c) Event-Sourced Corporate Actions)。位置放在步骤 1
             # 的**开头**,领息资格以「开盘时在场」为准,两个边界因此都对:
@@ -762,6 +767,10 @@ def simulate(
     # 显式暴露"样本是否对齐"：只有全部仓位都在窗口末尾被真实清算时，
     # 权益口径的头条与交易口径的 E[R] 才落在同一个样本上。
     metrics["n_unliquidated"] = int(stats_unliquidated)
+    # 陈旧重估占"持仓-日"的比例：>0 才说明有停牌/退市真的进了回测。
+    pos_days = int(equity["n_pos"].sum())
+    metrics["stale_position_days"] = int(stats_stale_days)
+    metrics["pct_position_days_stale"] = (stats_stale_days / pos_days) if pos_days else 0.0
     # 判据只有一条：窗口结束时账本里还剩不剩仓位。
     # 剩 ⇒ 权益口径含未实现浮盈、而交易口径只覆盖已平仓 ⇒ 两组数不同源。
     metrics["samples_aligned"] = bool(equity["n_pos"].iloc[-1] == 0)

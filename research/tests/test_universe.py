@@ -188,3 +188,55 @@ def test_attach_warns_loudly_for_all_mode(caplog):
         U.attach(_panel({"AAA": [1e9] * 5}), None)
     assert any("幸存者/前视偏差" in r.message for r in caplog.records), \
         "沿用最差口径必须出声，不能静默"
+
+
+# ---------------------------------------------------------------- 连续性（A3）
+
+def test_continuity_requires_showing_up_on_most_sessions():
+    """出勤率是"此刻可交易"的一部分：一个月里只交易 10 天的名字，不该进机会集。
+
+    实测（2026-10-17）池内有 10 只标的在自身历史里缺一半以上的交易日，它们近期
+    成交额够大所以过了 ADV 门槛，但**不是每个交易日都有成交** —— 引擎会在无 bar 的
+    日子里按陈价重估、持仓天数照走（审计 A3）。
+    """
+    axis = pd.bdate_range("2024-01-01", periods=30)
+    rows = []
+    for i, d in enumerate(axis):
+        rows.append(("A", d, 1e9))
+        if i % 3 == 0:
+            rows.append(("B", d, 1e9))          # B 每 3 天才有 1 天有 bar
+    panel = pd.DataFrame(rows, columns=["symbol", "date", "amount"])
+    panel["raw_close"] = panel["close"] = 10.0
+    panel["splits"] = 0.0
+    ok = U.continuity_ok(panel, 10, 0.9)
+    assert ok[panel["symbol"] == "A"].any(), "每天都有 bar 的名字应当合格"
+    assert not ok[panel["symbol"] == "B"].any(), "三缺二的名字不该合格"
+
+
+def test_continuity_counts_against_the_global_axis_not_row_count():
+    """按行数算出勤永远是满勤 —— 必须对着**全局交易日**数。"""
+    rows = [("A", d, 1e9) for d in pd.bdate_range("2024-01-01", periods=20)]
+    rows += [("B", d, 1e9) for d in pd.bdate_range("2024-01-01", periods=5)]
+    panel = pd.DataFrame(rows, columns=["symbol", "date", "amount"])
+    panel["raw_close"] = panel["close"] = 10.0
+    panel["splits"] = 0.0
+    ok = U.continuity_ok(panel, 10, 0.9)
+    assert not ok[panel["symbol"] == "B"].any(), \
+        "B 只有 5 根 bar（对它自己而言是'满勤'），但对着全局轴只有 25% 出勤"
+
+
+def test_liquidity_eligibility_requires_both_adv_and_continuity():
+    axis = pd.bdate_range("2024-01-01", periods=30)
+    rows = [("A", d, 1e9) for d in axis] + [("B", d, 1e9) for d in axis[::3]]
+    panel = pd.DataFrame(rows, columns=["symbol", "date", "amount"])
+    panel["raw_close"] = panel["close"] = 10.0
+    panel["splits"] = 0.0
+    spec = U.parse({"mode": "liquidity", "lookback": 10, "min_dollar_volume": 0.0})
+    ok = U.eligibility(panel, spec)
+    assert ok[panel["symbol"] == "A"].sum() > 0
+    assert ok[panel["symbol"] == "B"].sum() == 0, "成交额够大但不出勤 ⇒ 仍不合格"
+
+
+def test_describe_mentions_the_coverage_requirement():
+    d = U.describe(U.parse({"mode": "liquidity"}))
+    assert "出勤率" in d
