@@ -231,6 +231,42 @@ def two_sided_p(t: float) -> float:
     return 2.0 * (1.0 - _norm_cdf(abs(float(t))))
 
 
+def null_prob_at_least(k: int, n: int, p: float = 0.5) -> float:
+    """零假设下"n 次里至少 k 次为真"的概率（精确二项上尾）。
+
+    用途（审计 B6）：本仓库的判据里有一条是"4 折里 ≥3 折为正"，另一条是
+    "4 折里 ≥3 折打赢随机中位"。**在毫无边缘的情况下**，这两条各自也有
+    5/16 = 31.25% 的概率为真 —— 也就是说它们不是 α=5% 的证据标准。
+    报告必须把这个数写出来，否则"四条同时满足"会被读成一件比它更强的事。
+    """
+    if n < 0 or k < 0:
+        raise ValueError("k/n 必须非负")
+    if k > n:
+        return 0.0
+    return float(sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i)
+                     for i in range(k, n + 1)))
+
+
+def judgement_null_rates(n_folds: int) -> dict:
+    """四条预注册判据在**零边缘**下的假阳性率（各折独立、p=0.5 的零假设）。
+
+    ⚠️ 独立性是**近似**：同一份行情里的折窗并不独立，四条判据之间也不独立
+    （比如池化 CAGR 与"逐折为正"高度相关）。所以这里给的是**数量级**，
+    不是精确的族错误率；它的用处是让人在读到"四条同时满足"时知道该拿什么当真值。
+
+    ⚠️ 还有一个**反直觉但正确**的性质：判据③④ 用的是**固定次数**（≥3 折），
+    于是折数越多它们越松 —— P(≥3|n=4)=31.2%、P(≥3|n=6)=65.6%。
+    "多切几折更严格"是错的；合格的做法是用**比例**（如 ≥75% 的折）或固定 α。
+    """
+    third = null_prob_at_least(3, n_folds)          # ≥3/4 折为正 / 打赢随机中位
+    rates = {"① 池化测试窗 CAGR > 基准线": 0.5,
+             "② 连续净值 CAGR > 基准线": 0.5,
+             f"③ {n_folds} 折里 ≥3 折为正": third,
+             f"④ {n_folds} 折里 ≥3 折赢随机中位": third}
+    joint = 0.5 * 0.5 * third * third
+    return {"rates": rates, "joint": joint, "n_folds": n_folds, "independent": False}
+
+
 def benjamini_hochberg(pvals, q: float = 0.05) -> dict:
     """BH 步进法控制**错误发现率**（FDR）—— 多因子扫描的正确工具。
 

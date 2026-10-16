@@ -217,6 +217,33 @@ def _fmt(tag: str, i: dict) -> str:
             f"成交 {i['n_trades']:3d}  空信号窗 {i['n_no_signals']}/{i['n_windows']}")
 
 
+def c1_on_common_windows(f_by: list, b_by: list, bar_pooled: float
+                         ) -> tuple[bool, str]:
+    """判据① 的取值：**只在共同窗口集上比**，集合不同就退回共同窗重算并出声。
+
+    为什么（审计 B5）：本族的 `mean_cagr` 只在**它有信号的那些窗**上取均值，基准线同理。
+    两批样本不一样时，"均值比均值"比的就不只是策略 —— 一个只在 2 个窗出信号的族，
+    可能在另外 2 个基准线亏钱的窗里根本没参与过。集合不同 ⇒ 退回交集重算。
+    纯函数，便于单独测（内联在裁决循环里的话没法测）。
+    """
+    n = max(len(f_by), len(b_by))
+    f = list(f_by) + [None] * (n - len(f_by))
+    b = list(b_by) + [None] * (n - len(b_by))
+    common = [i for i in range(n) if f[i] is not None and b[i] is not None]
+    only_f = [i for i in range(n) if f[i] is not None and b[i] is None]
+    only_b = [i for i in range(n) if f[i] is None and b[i] is not None]
+    if not (only_f or only_b):
+        return bool(np.mean(f) > float(bar_pooled)), ""
+    if not common:
+        return False, "⚠️ 与基准线**没有一个共同窗** ⇒ ①无法判定（按不通过处理）"
+    m_f = float(np.mean([f[i] for i in common]))
+    m_b = float(np.mean([b[i] for i in common]))
+    note = (f"  ⚠️ 与基准线的有效窗口集不同（本族独有 {len(only_f)} 窗 / 基准独有 "
+            f"{len(only_b)} 窗）⇒ ①改用**共同 {len(common)} 窗**重算："
+            f"本族 {m_f*100:+.2f}% vs 基准 {m_b*100:+.2f}%")
+    return bool(m_f > m_b), note
+
+
 def report_family(ind, reg, family_id: str, train, test, *,
                   lo: str, hi: str) -> dict:
     name = (F.MASK[family_id].__doc__ or "").strip().splitlines()[0]
@@ -352,6 +379,17 @@ def main(argv=None) -> int:
     # ---- 最终裁决
     print("\n" + "=" * 100)
     print(f"裁决(四条判据;基准线:池化测试窗 {bar_pooled*100:+.2f}% / 连续净值 {bar_cont*100:+.2f}%)")
+    # 判据的**零边缘假阳性率**（审计 B6）：不写清楚，"四条同时满足"会被读成
+    # 一件比它更强的事 —— 其中两条各自都有 5/16 的概率在毫无边缘时为真。
+    _nr = metrics.judgement_null_rates(len(test))
+    print("  判据的零边缘假阳性率（各折独立近似，仅给数量级）:")
+    for _k, _v in _nr["rates"].items():
+        print(f"    {_k:<28s} ≈ {_v*100:.1f}%")
+    print(f"    ⇒ 四条**同时**为真 ≈ {_nr['joint']*100:.1f}%"
+          f"（独立近似；实际因判据间相关而不同）—— 这不是 α=5% 的证据标准")
+    print("    ⚠️ ③④ 用的是**固定次数**（≥3 折）⇒ 折数越多越松"
+          "（P(≥3|4 折)=31.2% vs P(≥3|6 折)=65.6%）。要收紧就该改成**比例**或固定 α，"
+          "而不是「多切几折」—— 那是反方向。")
     print("=" * 100)
     for r in results:
         if r.get("verdict") == "no_signals":
@@ -362,7 +400,11 @@ def main(argv=None) -> int:
         n_eff = sum(1 for c in te["cagrs_by_window"] if c is not None)
         pos = sum(1 for c in te["cagrs"] if c > 0)
         won_null = sum(1 for p in r["null_pcts"] if p >= 50)
-        c1 = te["mean_cagr"] > bar_pooled
+        # ① 必须在**共同窗口集**上比（审计 B5）：本族的 mean_cagr 只在它有信号的那些窗上取均值，
+        # 基准线同理 —— 两批样本不一样时，"均值比均值"比的就不只是策略。
+        # 集合不同 ⇒ 退回共同窗重算，并把这件事说出来。
+        c1, note = c1_on_common_windows(te["cagrs_by_window"], upb_te["cagrs_by_window"],
+                                        bar_pooled)
         c2 = cont["cagr"] > bar_cont
         c3 = (n_eff >= 3) and (pos >= 3)
         c4 = won_null >= 3
@@ -373,6 +415,8 @@ def main(argv=None) -> int:
               f"| ①{_tick(c1)} ②{_tick(c2)} ③{pos}/{n_eff} ④{won_null}/{len(r['null_pcts'])} "
               f"(p90 {r['win90']}/{len(r['null_pcts'])})"
               f"\n               → {verdict}  DSR {r['dsr']['deflated_sharpe']:.3f}")
+        if note:
+            print(note)
     print("\n归因说明(§5(e) 要求报超额,但两种口径都要读懂):")
     print("  * 所有族与基准线跑的是**同一套 sizing**(risk 1% / mp 2)⇒ 敞口在同一个量级")
     print("    (实测线 7.4%),所以**原始 CAGR 的比较本身就是敞口匹配的** —— 这是预注册 ①② 的口径。")
