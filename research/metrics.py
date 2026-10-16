@@ -219,6 +219,53 @@ def bonferroni_t_threshold(family_size: int, alpha: float = 0.05) -> float:
     return _norm_ppf(1.0 - alpha / (2.0 * family_size))
 
 
+def two_sided_p(t: float) -> float:
+    """正态近似的双侧 p 值。
+
+    ⚠️ 是**近似**：本项目的期数常在 6~36 之间，严格该用 t 分布。这里用正态是
+    沿用本仓库既有的近似（`_norm_ppf` 那套），并在报告里把族规模与判据一起写出来 ——
+    近似不是问题，"不校正族错误率就下判词"才是（审计 B4）。
+    """
+    if not math.isfinite(float(t)):
+        return float("nan")
+    return 2.0 * (1.0 - _norm_cdf(abs(float(t))))
+
+
+def benjamini_hochberg(pvals, q: float = 0.05) -> dict:
+    """BH 步进法控制**错误发现率**（FDR）—— 多因子扫描的正确工具。
+
+    为什么不能只用 Bonferroni（审计 B4）:本仓库只有 screen.py 落了 Bonferroni，
+    而因子探针一次要比较十几个因子 × 两侧 × 多个分位。Bonferroni 在最坏情况下
+    控制 FWER、代价是功效极低（k=1614 时门槛 4.17，什么都过不了）；因子研究里
+    通行做法是控制 FDR（Harvey-Liu-Zhu 那类工作用的就是"提高门槛 + 看整体"）。
+    两者都给，读者才知道"点比较的显著"在族规模下还剩多少。
+
+    NaN 的 p 值（不可检验，如期数不足）**不参与排序、也不判为拒绝** —— 当作缺失，
+    不给它们"通过"的假象。
+    """
+    if not (0.0 < float(q) < 1.0):
+        raise ValueError(f"q 必须在 (0,1)，得到 {q}")
+    p = np.asarray(list(pvals), dtype=float)
+    ok = np.isfinite(p)
+    m = int(ok.sum())
+    out = {"q": float(q), "n": m, "n_rejected": 0, "crit_p": float("nan"),
+           "rejected": [False] * int(p.size)}
+    if m == 0:
+        return out
+    order = np.argsort(p[ok], kind="mergesort")
+    ps = p[ok][order]
+    thresh = float(q) * (np.arange(1, m + 1) / m)
+    below = ps <= thresh
+    if not below.any():
+        return out
+    k = int(np.max(np.nonzero(below)[0]) + 1)
+    rej = np.zeros(int(p.size), dtype=bool)
+    rej[np.nonzero(ok)[0][order[:k]]] = True
+    out.update({"n_rejected": k, "crit_p": float(ps[k - 1]),
+                "rejected": rej.tolist()})
+    return out
+
+
 def sharpe_significance_pvalue(observed_sharpe: float, n_returns: int,
                                trading_days_per_year: int = TRADING_DAYS) -> float:
     """年化 Sharpe 的显著性 p 值（**双侧**意义上的一次比较）。
