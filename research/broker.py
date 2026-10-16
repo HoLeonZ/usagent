@@ -57,6 +57,10 @@ TRADE_COLS = [
     "sizing_cap",
     # risk_frac = 该笔的计划风险 / 入场时的权益。声明值与实际值并排可读。
     "risk_frac",
+    # sl_penetration = 触发止损时"bar 的最低点比止损价低多少"（相对止损价）。
+    # 它衡量的是**这条假定有多要紧**：我们按触发价成交，而当日实际到过更低的位置。
+    # 只在盘中止损（sl）上有意义；跳空（sl_gap）按开盘价成交，谈不上"穿价"。
+    "sl_penetration",
     # spread_cost = 本笔因跨越买卖价差付出的钱（入场侧 + 出场侧）。
     # 它体现在成交价里、不在 fees 里，所以必须单独记一列 —— 否则"成本"这一栏
     # 只显示规费（占建模成本的两成上下），读者会以为滑点/价差不存在。
@@ -275,6 +279,9 @@ def simulate(
     if max_dd_halt is not None and not (0.0 < float(max_dd_halt) < 1.0):
         raise BrokerError(f"max_drawdown_halt ∈ (0,1)，得到 {max_dd_halt!r}")
     liquidate_at_end = bool(spec["liquidate_at_end"])
+    sl_overshoot = float(spec["sl_overshoot"])
+    if not (0.0 <= sl_overshoot <= 1.0):
+        raise BrokerError(f"sl_overshoot ∈ [0,1]，得到 {sl_overshoot!r}")
     spread_model = spec["spread_model"]
     if spread_model not in ("none", "corwin_schultz"):
         raise BrokerError(
@@ -369,7 +376,8 @@ def simulate(
 
     def close_position(pos: Position, day: pd.Timestamp, px: float, reason: str,
                        *, bar_lo: float | None = None, bar_hi: float | None = None,
-                       bar_vol: float | None = None) -> None:
+                       bar_vol: float | None = None,
+                       sl_penetration: float | None = None) -> None:
         """平仓。`px` 是**触发价**,本函数负责把它变成成交价。
 
         三条纪律:
@@ -442,6 +450,8 @@ def simulate(
             # 计划风险:入场时即固定(止损宽度 × 股数),与最终出场无关。
             # E[R] = net_pnl / risk_amount —— 分母必须是计划风险,不能是事后结果
             # (hiagent tail_objective 的原话)。
+            "sl_penetration": (float("nan") if sl_penetration is None
+                               else float(sl_penetration)),
             "sl_width": pos.sl_width, "tp_width": pos.tp_width,
             "risk_amount": pos.sl_width * pos.entry_price * pos.size,
             "spread_cost": spread_cost,
@@ -518,12 +528,19 @@ def simulate(
 
             hit_sl = low_ <= pos.sl_price
             hit_tp = h >= pos.tp_price
+            # 盘中触发止损的**成交触发价**：sl_price 之下按 θ 向当日最低点靠。
+            # θ=0 ⇒ 就是 sl_price（既有行为）。穿透深度同时被记进交易列表，
+            # 于是"这条假定值多少"是可读的，而不是只能被相信。
+            pen = (pos.sl_price - low_) / pos.sl_price if pos.sl_price > 0 else 0.0
+            sl_fill_at = pos.sl_price - sl_overshoot * max(0.0, pos.sl_price - low_)
             if hit_sl and hit_tp:
                 # 盘中盲区:两根阈值同 bar 触及 → 按最坏情况(CLAUDE.md §4)
-                close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=v)
+                close_position(pos, day, sl_fill_at, "sl", bar_lo=low_, bar_hi=h, bar_vol=v,
+                               sl_penetration=pen)
                 continue
             if hit_sl:
-                close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=v)
+                close_position(pos, day, sl_fill_at, "sl", bar_lo=low_, bar_hi=h, bar_vol=v,
+                               sl_penetration=pen)
                 continue
             if hit_tp:
                 close_position(pos, day, pos.tp_price, "tp", bar_lo=low_, bar_hi=h, bar_vol=v)
@@ -659,9 +676,13 @@ def simulate(
                 elif h >= pos.tp_price and o >= pos.tp_price:
                     close_position(pos, day, o, "tp_gap", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
                 elif low_ <= pos.sl_price and h >= pos.tp_price:
-                    close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
+                    close_position(pos, day, pos.sl_price - sl_overshoot * max(0.0, pos.sl_price - low_),
+                                   "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol,
+                                   sl_penetration=(pos.sl_price - low_) / pos.sl_price)
                 elif low_ <= pos.sl_price:
-                    close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
+                    close_position(pos, day, pos.sl_price - sl_overshoot * max(0.0, pos.sl_price - low_),
+                                   "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol,
+                                   sl_penetration=(pos.sl_price - low_) / pos.sl_price)
                 elif h >= pos.tp_price:
                     close_position(pos, day, pos.tp_price, "tp", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
 
@@ -783,6 +804,16 @@ def _window_metrics(equity: pd.DataFrame, trades: pd.DataFrame, *, max_hold: int
 
     # 「声明风险 vs 实际风险」的可审计性（D3）：有多少笔的股数其实是被
     # 量能/单名权重/heat/现金压下来的（即 declaration 与 realized 不一致）。
+    # 止损穿价的分布（E2）：这是「按触发价成交」这条假定的**代价读数**。
+    # 只统计盘中止损（sl）：跳空（sl_gap）按开盘价成交，谈不上"穿价"。
+    if "sl_penetration" in trades.columns:
+        sl = trades.loc[trades["exit_reason"] == "sl", "sl_penetration"].dropna()
+        out["median_sl_penetration_bps"] = (float(sl.median()) * 1e4 if len(sl)
+                                            else float("nan"))
+        out["p90_sl_penetration_bps"] = (float(sl.quantile(0.9)) * 1e4 if len(sl)
+                                         else float("nan"))
+        out["n_sl"] = int(len(sl))
+
     if "sizing_cap" in trades.columns:
         capped = trades["sizing_cap"] != "policy"
         out["capped_trades"] = int(capped.sum())
