@@ -91,6 +91,10 @@ def run(args) -> dict:
     # 否则改 preset 的成本假设不会反映到 CLI 数字上(审计实测过的静默分叉)。
     eff_cost = float(preset["cost_bps_roundtrip"] if args.cost_bps is None
                      else args.cost_bps)
+    # 价差口径同理：CLI 覆盖优先，否则取 preset 声明。做成 CLI 旋钮是为了让
+    # **成本敏感性**可复现地跑（§0）—— 审计发现此前它只是一个人肉改 preset 的操作。
+    eff_spread = preset["spread_model"] if args.spread_model is None else args.spread_model
+    preset = {**preset, "spread_model": eff_spread}
     _, ind, reg = _build(args)
     # 预热边界**由数据算出**,不写死常量。此前是 FIRST_SIGNAL_FLOOR = "2024-04-09",
     # 而它恰好等于「当前这一份数据」的第 121 根 K 线 —— 换一份数据(窗口起点漂移)后
@@ -118,7 +122,8 @@ def run(args) -> dict:
         res["metrics"]["sharpe"], n_trials=preset["n_comparisons"],
         n_returns=len(eq))
 
-    print(f"\n=== {args.preset} | {lo} .. {hi} | cost {eff_cost}bp ===")
+    print(f"\n=== {args.preset} | {lo} .. {hi} | cost {eff_cost}bp | "
+          f"价差 {eff_spread} ===")
     print(f"信号 {len(sig)}  成交 {len(tr)}")
     print(f"总收益 {res['metrics']['total_return']*100:+.2f}%   CAGR {cg*100:+.2f}%"
           f"   基准等权 {bench_tot*100:+.2f}%   超额 {(res['metrics']['total_return']-bench_tot)*100:+.2f}pp")
@@ -139,6 +144,7 @@ def run(args) -> dict:
         print("⚠️  R 分布退化(几乎全部 ≈ −1.00):t 值被机械放大,本行 t 不可用于判显著性")
 
     out = {"preset": args.preset, "start": lo, "end": hi, "cost_bps": eff_cost,
+           "spread_model": eff_spread,
            # 交易列表指纹(§6):让 CLI 的输出可以被 golden 基线逐一核对
            "trades_sha256": trade_fingerprint(tr),
            # 数据 vintage:让每个被报告的数字可追溯到一份具体的数据快照。
@@ -196,6 +202,9 @@ def main() -> int:
     ap.add_argument("--end", default=None)
     # None ⇒ 用 preset 里的成本口径(§2(b):常数只在 core/costs.py 定义一次)。
     # 显式给值只用于成本敏感性分析。
+    ap.add_argument("--spread-model", default=None,
+                    choices=["none", "corwin_schultz"],
+                    help="价差口径(默认取 preset):成本模型里**尺寸无关**的那一半")
     ap.add_argument("--cost-bps", type=float, default=None,
                     help="覆盖 preset 的成本口径(bp);默认用 preset 里的值")
     ap.add_argument("--windows", action="store_true", help="额外输出逐窗口表")

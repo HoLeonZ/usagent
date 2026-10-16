@@ -46,6 +46,10 @@ OPTIONAL_KEYS: tuple[str, ...] = (
     "max_weight",          # 单名名义额 / 权益 上限
     "max_heat",            # 组合计划风险（Σ 止损宽度×价格×股数）/ 权益 上限
     "max_drawdown_halt",   # 自峰值回撤超过它 ⇒ 停止开新仓（停机开关）
+    # ---- 成本口径（2026-10-17 审计 E1）----
+    # "none"（默认）| "corwin_schultz"。默认 none 只为不改动既有数字，
+    # 不是因为它更对：不建模价差等于把**尺寸无关**的那一半成本当成零。
+    "spread_model",
 )
 
 ENGINE_KEYS: tuple[str, ...] = REQUIRED_KEYS + OPTIONAL_KEYS
@@ -60,6 +64,7 @@ DEFAULTS: dict[str, object] = {
     "max_weight": None,
     "max_heat": None,
     "max_drawdown_halt": None,
+    "spread_model": "none",
 }
 
 # 指标价轴是**引擎约定,不是 preset 旋钮**:CLAUDE.md §3(b) 规定数学指标必须用

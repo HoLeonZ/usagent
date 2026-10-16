@@ -101,6 +101,9 @@ PRESETS: dict[str, dict] = {
         "intraday_tiebreak": "sl_first",
         "max_volume_participation": costs.MAX_VOLUME_PARTICIPATION,
         "cost_bps_roundtrip": costs.COST_BPS_ROUNDTRIP,   # 美股无印花税;IBKR+SECTAF
+    # 价差是**尺寸无关**的那一半成本，此前完全没建模（审计 E1）。
+    # 用 Corwin-Schultz 从日线 high/low 估计（逐日、因果、系统性低估 ⇒ 是下限）。
+    "spread_model": "corwin_schultz",
         # 执行滑点(§4(c) 要求它必须是 f(ATR, 参与率),不得为零、不得为平坦费率):
         #     slip = scale × 信号日 atr_pct × sqrt(该单股数 / 本 bar 成交量)
         # 这是标准平方根冲击律。scale=1.0 取 Almgren 类经验区间 [0.5, 1] 的**保守端**
@@ -271,6 +274,9 @@ PRESETS["us_uptrend_pullback_12m_target"] = {
     "intraday_tiebreak": "sl_first",
     "max_volume_participation": costs.MAX_VOLUME_PARTICIPATION,
     "cost_bps_roundtrip": costs.COST_BPS_ROUNDTRIP,
+    # 价差是**尺寸无关**的那一半成本，此前完全没建模（审计 E1）。
+    # 用 Corwin-Schultz 从日线 high/low 估计（逐日、因果、系统性低估 ⇒ 是下限）。
+    "spread_model": "corwin_schultz",
     # 与 v1 同一条滑点律(f(ATR, 参与率),平方根冲击,scale=1.0 取经验区间保守端)。
     # 实测(2026-10-15 重测,本 preset 15 笔):**入场**参与率中位 0.103%(最大 0.32%)、
     # 信号日 atr_pct 中位 3.73% ⇒ 入场滑点中位 0.111%/边;出场参与率中位 0.048%
@@ -387,6 +393,9 @@ PRESETS["us_uptrend_pullback_wfv"] = {
     "intraday_tiebreak": "sl_first",
     "max_volume_participation": costs.MAX_VOLUME_PARTICIPATION,
     "cost_bps_roundtrip": costs.COST_BPS_ROUNDTRIP,
+    # 价差是**尺寸无关**的那一半成本，此前完全没建模（审计 E1）。
+    # 用 Corwin-Schultz 从日线 high/low 估计（逐日、因果、系统性低估 ⇒ 是下限）。
+    "spread_model": "corwin_schultz",
     "atr_slip_scale": costs.ATR_SLIP_SCALE,   # 入场与出场两侧都建模(§4(c))
     # ---- 仓位:sizing 是**预注册写定**的,不是搜出来的 -------------------
     "position_sizing": "risk_budget",
@@ -524,6 +533,9 @@ PRESETS["us_reversal_dip_v1"] = {
     "intraday_tiebreak": "sl_first",
     "max_volume_participation": costs.MAX_VOLUME_PARTICIPATION,
     "cost_bps_roundtrip": costs.COST_BPS_ROUNDTRIP,
+    # 价差是**尺寸无关**的那一半成本，此前完全没建模（审计 E1）。
+    # 用 Corwin-Schultz 从日线 high/low 估计（逐日、因果、系统性低估 ⇒ 是下限）。
+    "spread_model": "corwin_schultz",
     "atr_slip_scale": costs.ATR_SLIP_SCALE,
     # ---- 仓位:与基准线**完全一致**的 sizing(否则杠杆会被误读成边缘)----
     "position_sizing": "risk_budget",

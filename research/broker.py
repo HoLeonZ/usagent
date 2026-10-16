@@ -32,6 +32,7 @@ import pandas as pd
 import weakref
 
 from core import costs
+from core import spread as spread_mod
 from core.preset_contract import resolve
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,10 @@ TRADE_COLS = [
     "sizing_cap",
     # risk_frac = 该笔的计划风险 / 入场时的权益。声明值与实际值并排可读。
     "risk_frac",
+    # spread_cost = 本笔因跨越买卖价差付出的钱（入场侧 + 出场侧）。
+    # 它体现在成交价里、不在 fees 里，所以必须单独记一列 —— 否则"成本"这一栏
+    # 只显示规费（占建模成本的两成上下），读者会以为滑点/价差不存在。
+    "spread_cost",
 ]
 
 VALID_TIEBREAK = ("sl_first",)
@@ -126,6 +131,9 @@ class Position:
     # 入场时的权益 —— "计划风险占权益多少"的分母。用入场时刻的值，
     # 而不是事后某一天的权益（否则这个数会随时间漂移，无法回答"我当时冒了多大风险"）。
     equity_at_entry: float = float("nan")
+    # 入场时（信号日）估到的**单边**价差费率。出场沿用同一个值：
+    # 决策时只能知道当时的估计，用出场当日的估计属于偷看未来。
+    half_spread: float = 0.0
 
 
 @dataclass
@@ -182,6 +190,12 @@ def _bar_index(panel: pd.DataFrame) -> tuple[dict[str, dict[str, int]], list[pd.
         sub = sub.sort_values("date")
         per_sym[sym] = {d: i for i, d in enumerate(sub["date"])}
         data[sym] = {c: sub[c].to_numpy(dtype=float) for c in cols}
+        # 买卖价差估计（Corwin-Schultz，逐日、因果）。用 **as-traded** high/low ——
+        # 价差是物理盘口属性，复权价会把它缩放成另一个量。与面板同生命周期缓存，
+        # 所以搜索里几千次模拟只算一次。
+        data[sym]["spread_bps"] = spread_mod.rolling_median(
+            spread_mod.corwin_schultz(sub["raw_high"].to_numpy(dtype=float),
+                                      sub["raw_low"].to_numpy(dtype=float)))
     return per_sym, days, data
 
 
@@ -259,6 +273,10 @@ def simulate(
             raise BrokerError(f"{_nm} ∈ (0,1]，得到 {_v!r}")
     if max_dd_halt is not None and not (0.0 < float(max_dd_halt) < 1.0):
         raise BrokerError(f"max_drawdown_halt ∈ (0,1)，得到 {max_dd_halt!r}")
+    spread_model = spec["spread_model"]
+    if spread_model not in ("none", "corwin_schultz"):
+        raise BrokerError(
+            f"spread_model 必须是 'none' 或 'corwin_schultz'，得到 {spread_model!r}")
     max_weight = None if max_weight is None else float(max_weight)
     max_heat = None if max_heat is None else float(max_heat)
     max_dd_halt = None if max_dd_halt is None else float(max_dd_halt)
@@ -378,6 +396,10 @@ def simulate(
                     f"此处 fail-fast 而不是给出一个足额的假成交({reason})"
                 )
         fill_px = px
+        # 卖出同样要跨价差：成交价再低半个价差（只在这笔建仓时估到的那个值）。
+        # 放在滑点之前是等价位置 —— 两者都是"成交比触发差"这件成本。
+        if pos.half_spread > 0:
+            fill_px = fill_px * (1.0 - pos.half_spread)
         if atr_slip_scale > 0:
             ok = (bar_vol is not None and np.isfinite(bar_vol) and bar_vol > 0
                   and np.isfinite(pos.atr_pct) and pos.atr_pct > 0)
@@ -394,6 +416,10 @@ def simulate(
         entry_fee = entry_notional * cost_half
         gross = (fill_px - pos.entry_price) * pos.size
         fees = entry_fee + exit_fee
+        # 价差成本单独记账：入场侧付在更高的买入价上，出场侧付在更低的卖出价上。
+        # 它已经体现在 gross 里，这里只是把它**显式化**供归因（不重复计费）。
+        spread_cost = pos.half_spread * pos.entry_price * pos.size \
+            + pos.half_spread * fill_px * pos.size
         # 分红是这笔交易的**已实现收入**(§3(c)),必须进净盈亏。
         net = gross + pos.dividends - fees
         cost_basis = entry_notional + entry_fee
@@ -414,6 +440,7 @@ def simulate(
             # (hiagent tail_objective 的原话)。
             "sl_width": pos.sl_width, "tp_width": pos.tp_width,
             "risk_amount": pos.sl_width * pos.entry_price * pos.size,
+            "spread_cost": spread_cost,
             "sizing_cap": pos.sizing_cap,
             "risk_frac": ((pos.sl_width * pos.entry_price * pos.size)
                           / pos.equity_at_entry if pos.equity_at_entry > 0
@@ -556,7 +583,12 @@ def simulate(
                 #    (high==open 时滑点归零),那是用一个更大的错误换一个小错误。
                 #    另一侧的 gap 修复(见开仓当日的 §4(f) 分支)保证了**触发型**成交
                 #    (止损/止盈/跳空)永远落在 bar 区间内 —— 那才是会产生「不存在的成交」的一侧。
-                entry_px = o * (1.0 + slip)
+                # 买入要跨价差：从买方角度看，开盘价之上再付半个价差。
+                # 用**信号日**（≤T）的估计 —— 用成交当日的估计属于偷看未来。
+                sym_spread = data[sym]["spread_bps"][k - 1] if k >= 1 else float("nan")
+                half_spread = (spread_mod.half_spread_rate(sym_spread)
+                               if spread_model != "none" else 0.0)
+                entry_px = o * (1.0 + slip) * (1.0 + half_spread)
 
                 # ---- 组合层上限（D1/D3）----
                 # 顺序施加，并**记下最后压住它的那个约束**。为什么必须记：
@@ -601,6 +633,7 @@ def simulate(
                 book.positions[sym] = Position(
                     symbol=sym, entry_date=day, entry_price=entry_px, size=qty,
                     sizing_cap=cap_by, equity_at_entry=equity_at_open,
+                    half_spread=half_spread,
                     sl_price=entry_px * (1.0 - sl_w),
                     tp_price=entry_px * (1.0 + tp_w),
                     atr_pct=sym_atr, sl_width=sl_w, tp_width=tp_w,

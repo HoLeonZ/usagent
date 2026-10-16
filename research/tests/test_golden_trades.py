@@ -87,7 +87,10 @@ def test_golden_harness_reproduces_the_cli(real_chain):
     assert case.get("is_cli_default"), "CASES[0] 必须标注它等于 CLI 默认窗口"
     default = run_baseline.run(argparse.Namespace(
         preset=case["preset"], start=case["start"], end=case["end"],
-        cost_bps=float(G.preset_cost(case["preset"])), windows=False,
+        cost_bps=float(G.preset_cost(case["preset"])),
+        # 手工搭的 Namespace 必须与 CLI 的字段集一致：缺一个字段就等于
+        # 用另一套成本口径跑同一份 preset —— 正是 §6 要消灭的"两个入口分叉"。
+        spread_model=None, windows=False,
         avoid_earnings=False))
 
     cur = G.run_case(case, panel, ind)
@@ -151,7 +154,7 @@ def _cli_run(monkeypatch, case, **over):
     monkeypatch.setitem(presets.PRESETS, case["preset"], p)
     return run_baseline.run(argparse.Namespace(
         preset=case["preset"], start=case["start"], end=case["end"],
-        cost_bps=None, windows=False, avoid_earnings=False))
+        cost_bps=None, spread_model=None, windows=False, avoid_earnings=False))
 
 
 def test_cli_honours_the_preset_cost(real_chain, monkeypatch):
@@ -203,7 +206,7 @@ def test_cli_default_window_start_is_derived_from_the_data(real_chain):
     panel, ind = real_chain
     out = run_baseline.run(argparse.Namespace(
         preset="us_uptrend_pullback_v1", start=None, end=None,
-        cost_bps=None, windows=False, avoid_earnings=False))
+        cost_bps=None, spread_model=None, windows=False, avoid_earnings=False))
 
     assert out["start"] == str(panel_mod.first_signal_date(ind).date())
     # 还要把「CASES[0] 就是 CLI 默认窗口」这件事真正连起来 —— 旧版只断言了
