@@ -41,8 +41,17 @@ logger = logging.getLogger("family_search")
 #      这里的常数只作自检 —— 实测重算值必须与它们吻合)。
 UPB = {"signal": {"min_dist_high252": -0.1, "max_stoch_k": 70.0},
        "exit": {"sl_mult": 2.0, "tp_mult": 3.0, "max_hold": 10}}
-TARGET_POOLED_TEST = 0.1419        # 记录值(pooled test mean CAGR)
-TARGET_CONTINUOUS = 0.0815         # 记录值(连续净值 CAGR)
+# 记录值（**自检用**：本文件会用同一条代码路径重算，实测值必须与它们吻合）。
+# ⚠️ 2026-10-17 口径大修后**重算过**：取池换成 PIT 流动性池（去掉幸存者/前视）、
+#    加上价差成本、组合层风险上限、窗口末尾清算之后，这条基准线**由正转负**：
+#        池化测试窗 +14.19% → -7.71%   连续净值 +8.15% → -4.57%
+#        且**逐折全负**（旧口径下是正的）。
+#    含义：10 个族要"战胜"的这条线本身已经是个亏钱策略了 ——
+#    「战胜 uptrend-pullback」在旧口径下是一个**实质**主张，在新口径下要弱得多
+#    （打败一条负的线不等于创造价值；真正的判据是曝光匹配那一条）。
+#    这条常数只是**自检**：口径一变它就该跟着变，变了要说明原因（§6）。
+TARGET_POOLED_TEST = -0.077061
+TARGET_CONTINUOUS = -0.045735
 
 EXIT_GRID = W.EXIT_GRID            # 与上轮同一个退出网格
 SIZE_FIXED = W.SIZE_FIXED          # risk 1% / mp 2
@@ -367,7 +376,9 @@ def main(argv=None) -> int:
           f"{(upb_cont['cagr']-upb_cont['bench'])*100:+.2f}pp(连续)。")
     if abs(upb_te["mean_cagr"] - TARGET_POOLED_TEST) > 0.02:
         print(f"  ⚠️ 重算的池化测试窗 {upb_te['mean_cagr']*100:+.2f}% 与记录值 "
-              f"{TARGET_POOLED_TEST*100:+.2f}% 差得超过 2pp —— 先查基准线,再比其它族")
+              f"{TARGET_POOLED_TEST*100:+.2f}% 差得超过 2pp。"
+              f"\n     若你确实改了口径/取池/成本：更新 TARGET_* 并说明成因（§6）；"
+              f"\n     若不知道为什么会变：**先查基准线**，再拿它去比其它族。")
     bar_pooled, bar_cont = upb_te["mean_cagr"], upb_cont["cagr"]
     print("\n  判据用的是**同窗口同口径**的比较(§5):池化测试窗与连续净值。"
           "\n  参考:该家族在任何窗口上的最高数是 12m_target 在 2024-10-14..2025-10-14 上的"
