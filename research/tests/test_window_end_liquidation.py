@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -146,3 +148,63 @@ def test_no_stale_days_when_every_bar_is_present():
     r = run(OPEN_FOREVER, flat(30))
     assert r["metrics"]["stale_position_days"] == 0
     assert r["metrics"]["pct_position_days_stale"] == 0.0
+
+
+# ---------------------------------------------------------------- 双报 Sharpe 口径（B7）
+
+def _oscillating_bars(n: int = 30) -> list[dict]:
+    """价格上下摆动的**自洽** bar。
+
+    ⚠️ 只给 close 而让 high/low 取默认值会造出 `close ∉ [low, high]` 的不自洽 bar，
+    引擎会（正确地）拒绝在上面成交 —— 实测就是这么被 BrokerError 拦住的，
+    也正是数据层那道 OHLC 闸门存在的理由。
+    """
+    out = []
+    for i, d in enumerate(pd.bdate_range("2024-01-01", periods=n)):
+        c = 100.0 + (1.0 if i % 2 else -1.0)
+        out.append({"date": d.strftime("%Y-%m-%d"), "open": c,
+                    "high": c + 0.5, "low": c - 0.5, "close": c})
+    return out
+
+
+def _half_invested_run() -> dict:
+    """前半段在场（价格在动）、后半段空仓（收益恒为 0）的一次回测。"""
+    bars = _oscillating_bars()
+    return simulate({**BASE, "sl_pct": 0.90, "tp_pct": 9.0, "max_hold": 12},
+                    mk_signal("2024-01-01"), mk_panel(bars),
+                    start="2024-01-01", end="2024-03-01", cost_bps_roundtrip=None)
+
+
+def test_flat_days_change_the_sharpe_convention():
+    """低敞口策略上「含空仓日」与「只在场日」会差很多 —— 只报一个会被读成另一个。
+
+    审计 B7：DSR 用的那条收益序列把空仓日（收益恰为 0）算了进去。对"作为一个账户"
+    这是对的，但它与"信号在它真在场时有多好"是两个问题，必须并排可见。
+    """
+    m = _half_invested_run()["metrics"]
+    assert 0 < m["n_days_invested"] < m["days"], "这条用例必须真的有空仓日"
+    assert np.isfinite(m["sharpe"]) and np.isfinite(m["sharpe_invested"])
+    assert abs(m["sharpe"] - m["sharpe_invested"]) > 1e-6, \
+        f"有空仓日时两个口径必须给出不同的数：{m['sharpe']} vs {m['sharpe_invested']}"
+
+
+def test_fully_invested_conventions_nearly_coincide():
+    """基本上一直满仓 ⇒ 两个口径应当几乎相等（反证上一条不是"随手加了个字段"）。
+
+    留一点容差：入场日与窗口首日这两个边界上必然有"有权益但零敞口"的日子。
+    """
+    m = simulate(OPEN_FOREVER, mk_signal("2024-01-01"), mk_panel(_oscillating_bars()),
+                 start="2024-01-01", end="2024-03-01", cost_bps_roundtrip=None)["metrics"]
+    assert m["n_days_invested"] >= m["days"] - 2
+    # 用**绝对差**而不是相对差：策略的日均收益接近 0 时，相对差会被小分母放大，
+    # 而两个口径实际只差一个"边界空仓日"。
+    assert abs(m["sharpe"] - m["sharpe_invested"]) < 1.0, \
+        f"基本满仓时两个口径不该差这么多：{m['sharpe']} vs {m['sharpe_invested']}"
+
+
+def test_dsr_is_fed_the_all_days_series():
+    """DSR 必须吃**含空仓日**那条序列（策略作为账户的收益流），并在报告里说明。"""
+    src = (Path(__file__).resolve().parents[2] / "research" / "run_baseline.py").read_text()
+    assert "deflated_sharpe_from_returns(\n        sret" in src, \
+        "DSR 的输入变了 —— 必须显式用 sret（含空仓日）并同步改注释"
+    assert "含空仓日" in src and "只在场日" in src, "报告必须并排说明两个口径"

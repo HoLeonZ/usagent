@@ -148,6 +148,13 @@ def run(args) -> dict:
               f"自相关 {dsr['autocorr_lag1']:+.3f},k={preset['n_comparisons']}) "
               f"= {dsr['deflated_sharpe']:.3f}  (p={dsr['dsr_p_value']:.3f})")
 
+    # 双报 Sharpe 口径（B7）：低敞口策略上，"含空仓日"与"只在场日"会差很多。
+    _si = res["metrics"].get("sharpe_invested")
+    if _si is not None and np.isfinite(_si):
+        print(f"Sharpe 口径: 含空仓日 {res['metrics']['sharpe']:+.2f} | "
+              f"只在场日 {_si:+.2f}（在场 {res['metrics']['n_days_invested']} 天 / "
+              f"{res['metrics']['days']}）—— DSR 用的是**含空仓日**那条序列")
+
     # 容量余量（D5/E4）："这套策略能装多少钱"此前在库里和报告里都没有读数。
     _hr = res["metrics"].get("capacity_headroom_min")
     if _hr is not None and np.isfinite(_hr):

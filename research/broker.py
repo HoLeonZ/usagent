@@ -792,6 +792,14 @@ def _window_metrics(equity: pd.DataFrame, trades: pd.DataFrame, *, max_hold: int
     ret = equity["equity"].pct_change().dropna().to_numpy(dtype=float)
     total_return = e[-1] / e[0] - 1.0
     sharpe = metrics.annualized_sharpe(ret, metrics.TRADING_DAYS)
+    # ⚠️ 口径双报（审计 B7）：`sharpe` 把**空仓日**（收益恰好为 0）也算进去 ——
+    # 那是"这个策略作为一个账户"的真实收益流，也是 DSR 应当用的序列；
+    # 而 `sharpe_invested` 只用**在场日**，回答的是另一个问题：
+    # "它的信号在它真在场时有多好"。本仓库的策略敞口常低到个位数百分比，
+    # 两者会差很多；只报一个就会被读成另一个。
+    expo = equity["exposure"].to_numpy(dtype=float)[1:]
+    ret_inv = ret[expo > 0] if len(expo) == len(ret) else ret
+    sharpe_invested = metrics.annualized_sharpe(ret_inv, metrics.TRADING_DAYS)
     peak = np.maximum.accumulate(e)
     max_dd = float(np.min(e / peak - 1.0))
 
@@ -799,6 +807,8 @@ def _window_metrics(equity: pd.DataFrame, trades: pd.DataFrame, *, max_hold: int
         "start": equity["date"].iloc[0], "end": equity["date"].iloc[-1],
         "trades": int(len(trades)), "total_return": float(total_return),
         "sharpe": float(sharpe), "max_dd": max_dd,
+        "sharpe_invested": float(sharpe_invested),
+        "n_days_invested": int((expo > 0).sum()) if len(expo) == len(ret) else int(len(ret)),
         "avg_exposure": float(equity["exposure"].mean()),
         "days": int(len(equity)),
         # ---- 组合层风险的观测值（D1/D2）----
