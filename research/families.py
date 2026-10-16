@@ -29,6 +29,24 @@ logger = logging.getLogger(__name__)
 MIN_AMOUNT60 = signals.V21_SIGNAL_PARAMS["min_amount"]
 MIN_PRICE = 1.0          # 价格下限:低于 $1 的票在美股里有额外的交易机制噪声(应声股/退市)
 
+
+def above_price_floor(ind: pd.DataFrame) -> pd.Series:
+    """价格下限判据 —— **必须落在 as-traded 价轴（`raw_close`）上**。
+
+    为什么（审计 A4）：`MIN_PRICE` 是**绝对美元数**，而 `close` 是**分红回补价**
+    （`series.daily(adjust="total")`）。回补因子在 T 日包含了 **T 之后**的所有分红，
+    所以「T 日价格 ≥ $1」这件事会变成"未来分红的函数"——与 panel.py 已经修掉的
+    `amount` 是**同一类未来函数**（那边实测 740 个就绪格的判定被翻转）。
+    同一行的流动性门槛（`amount60`）本来就是 raw 轴，这里此前不一致。
+
+    `raw_close` 缺列时**抛错**而不是退回复权轴：静默退化正是这条缺陷的成因。
+    """
+    if "raw_close" not in ind.columns:
+        raise ValueError(
+            "价格下限必须用 as-traded 价（raw_close），但面板里没有这一列 —— "
+            "请用 panel.load_full_panel() 载入；不许回退到复权价（那是未来函数，审计 A4）")
+    return ind["raw_close"] >= MIN_PRICE
+
 # ---------------------------------------------------------------- 新增指标(最多 2 个/族)
 # 全部因果:只用 ≤T 的数据。
 
@@ -150,7 +168,7 @@ def _mask_short_reversal(ind: pd.DataFrame, p: dict) -> pd.Series:
         #    dd120 的预热与评测起点重合,零额外样本成本;语义仍是「相对自身历史便宜」。
         & (ind["dd120"] <= -float(p["min_drawdown"]))
         & (ind["ss_lo120"] >= float(p.get("min_off_low") or 0.0))
-        & (ind["close"] >= MIN_PRICE)
+        & above_price_floor(ind)
         & (ind["amount60"] >= MIN_AMOUNT60)
         & ind["ret5"].notna() & ind["dd120"].notna()
         & ind["ss_lo120"].notna() & ind["amount60"].notna()
@@ -250,7 +268,7 @@ def _mask_state_flip(ind: pd.DataFrame, p: dict) -> pd.Series:
     与 uptrend-pullback 的区别:它的 F 条件是**许可门**(门开了规则照旧,只是允许交易);
     本族把状态升级成**语义门**(同一个值在不同状态下含义相反,规则本身变了)。
     """
-    base = ind["close"] >= MIN_PRICE
+    base = above_price_floor(ind)
     base &= ind["amount60"] >= MIN_AMOUNT60
     base &= ind["atr_pct"].notna() & ind["ret1"].notna()
 
@@ -353,7 +371,7 @@ def _mask_long_horizon(ind: pd.DataFrame, p: dict) -> pd.Series:
 
 def _mask_sf_stress(ind: pd.DataFrame, p: dict) -> pd.Series:
     """状态臂 A:**恐慌态**的放量杀跌(系统性、被强制)。语义翻转的一半。"""
-    base = (ind["close"] >= MIN_PRICE) & (ind["amount60"] >= MIN_AMOUNT60)
+    base = above_price_floor(ind) & (ind["amount60"] >= MIN_AMOUNT60)
     stress = (ind["mkt_vol20"] >= float(p["v_stress"])) & (ind["ew_index"] < ind["ew_ma"])
     a = (stress
          & (ind["ret1"] <= -float(p["ret1_max"]))
@@ -370,7 +388,7 @@ def _mask_sf_calm(ind: pd.DataFrame, p: dict) -> pd.Series:
 
     与臂 A 的区别就是两处符号:vol_ratio 要**低**(缩量)、残差要**显著为负**(跌是它自己造成的)。
     """
-    base = (ind["close"] >= MIN_PRICE) & (ind["amount60"] >= MIN_AMOUNT60)
+    base = above_price_floor(ind) & (ind["amount60"] >= MIN_AMOUNT60)
     calm = (ind["ew_index"] > ind["ew_ma"]) & (ind["breadth_sm"] >= 0.50)
     b = (calm
          & (ind["ret1"] <= -float(p["ret1_max"]))
@@ -398,7 +416,7 @@ def _mask_idio(ind: pd.DataFrame, p: dict) -> pd.Series:
     (有人真的在重新配置)与市场同向(系统性因子)。这是与 uptrend-pullback **不同的一笔钱**。
     """
     mode = p.get("mode", "idio")
-    m = ((ind["close"] >= MIN_PRICE) & (ind["amount60"] >= MIN_AMOUNT60)
+    m = (above_price_floor(ind) & (ind["amount60"] >= MIN_AMOUNT60)
          & ind["atr_pct"].notna() & ind["ret1"].notna() & ind["mkt_ret1"].notna())
     # A 个股自己跌
     m &= (ind["ret1"] <= -float(p["ret1_max"]))

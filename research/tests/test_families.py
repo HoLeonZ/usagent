@@ -71,3 +71,40 @@ def test_regime_dependent_families_insist_on_the_regime_frame(ind):
 def test_unknown_family_raises(ind):
     with pytest.raises(KeyError, match="未知策略族"):
         F.select(ind, "nope", {}, *_window(ind))
+
+
+# ---------------------------------------------------------------- 价格下限的价轴（A4）
+
+def test_price_floor_uses_the_as_traded_axis(ind):
+    """`MIN_PRICE` 是**绝对美元数** ⇒ 必须比 as-traded 价（`raw_close`）。
+
+    审计 A4：此前比的是 `close` —— 那是**分红回补价**，其回补因子在 T 日包含了 T 之后
+    的所有分红，所以"T 日价格 ≥ $1"会变成未来分红的函数（与 panel.py 已修掉的 `amount`
+    是同一类未来函数）。实测（真数据）：1,301 个标的×日期（0.066%）被**错误排除**，
+    涉及 177 只标的；反向（错误纳入）0 行 —— 复权把历史价压低了，所以此前更严。
+    """
+    d = ind.copy()
+    day = d["date"].iloc[200]
+    d.loc[d.index[200], ["close", "raw_close"]] = [0.50, 1.20]   # 复权后 <$1，实际 ≥$1
+    d.loc[d.index[300], ["close", "raw_close"]] = [1.50, 0.80]   # 复权后 ≥$1，实际 <$1
+    floor = F.above_price_floor(d)
+    assert bool(floor.iloc[200]) is True, "实际价 ≥$1 就不该被价格下限挡掉"
+    assert bool(floor.iloc[300]) is False, "实际价 <$1 就该被挡掉（不许看复权价）"
+    assert day is not None
+
+
+def test_price_floor_fails_fast_without_the_raw_axis():
+    """缺 `raw_close` 必须抛错 —— 静默退化回复权轴正是这条缺陷的成因。"""
+    import pandas as pd
+    bad = pd.DataFrame({"close": [1.5], "date": [pd.Timestamp("2024-01-02")]})
+    with pytest.raises(ValueError, match="raw_close"):
+        F.above_price_floor(bad)
+
+
+def test_no_family_compares_the_floor_against_the_adjusted_axis():
+    """源码级护栏：不许再出现 `ind["close"] >= MIN_PRICE` 这种写法。"""
+    from pathlib import Path
+    src = (Path(F.__file__)).read_text(encoding="utf-8")
+    assert 'ind["close"] >= MIN_PRICE' not in src, \
+        "价格下限又比回复权价了 —— 那是未来函数（审计 A4）"
+    assert src.count("above_price_floor(ind)") >= 5, "五处调用点都应当走同一个 helper"
