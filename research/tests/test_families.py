@@ -108,3 +108,41 @@ def test_no_family_compares_the_floor_against_the_adjusted_axis():
     assert 'ind["close"] >= MIN_PRICE' not in src, \
         "价格下限又比回复权价了 —— 那是未来函数（审计 A4）"
     assert src.count("above_price_floor(ind)") >= 5, "五处调用点都应当走同一个 helper"
+
+
+# ---------------------------------------------------------------- 预注册网格（F1）
+
+def test_control_arms_are_searched_with_the_same_intensity():
+    """方向对照臂与正题的网格必须**同样大**（审计 F1）。
+
+    此前 `str` 是 96 组而它的唯一方向对照臂 `str_inv` 只有 6 组（差 16 倍），
+    `cap` 48 vs `cap_inv` 12（差 4 倍）。于是"方向有意义"这条结论里混进了
+    "搜得更狠的那一侧更容易撞上好参数"这个混淆项 —— 搜得多的那边赢了，
+    你不知道是方向对，还是搜索空间大。
+    """
+    assert F.CONTROL_ARM, "至少要声明一个方向对照臂"
+    for primary, control in F.CONTROL_ARM.items():
+        assert F.grid_size(primary) == F.grid_size(control), (
+            f"{primary}({F.grid_size(primary)}) 与对照臂 {control}"
+            f"({F.grid_size(control)}) 的搜索强度不同 ⇒ A/B 不再只差方向")
+
+
+def test_control_arm_axes_mirror_the_primary():
+    """不只是总数相等：**每个轴上的取值个数**也要一一对应（否则是另一种不对称）。"""
+    for primary, control in F.CONTROL_ARM.items():
+        a = [len(v) for v in F.GRIDS[primary].values()]
+        b = [len(v) for v in F.GRIDS[control].values()]
+        assert a == b, f"{primary} 的轴长 {a} 与 {control} 的 {b} 不对应"
+
+
+def test_declared_grid_cap_equals_reality():
+    """声明过的上限必须等于实际最大值 —— 否则又是一次"声明与事实不符"（F1 的成因）。"""
+    real = max(F.grid_size(f) for f in F.GRIDS)
+    assert F.GRID_CAP == real, f"GRID_CAP={F.GRID_CAP} 但实际最大是 {real}"
+    assert all(F.grid_size(f) <= F.GRID_CAP for f in F.GRIDS), \
+        "有族的网格超过了声明上限 —— 要涨上限就明说（并计入 n_trials）"
+
+
+def test_new_families_all_have_a_grid():
+    for fid in F.NEW_FAMILIES:
+        assert F.grid_size(fid) >= 4, f"{fid} 的网格太小，不足以说明什么"
