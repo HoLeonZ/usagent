@@ -5,7 +5,7 @@
 case=us_uptrend_pullback_wfv
 preset=us_uptrend_pullback_wfv
 window=2024-04-09..2026-10-14
-vintage=rows=1968713;symbols=3028;from=2023-10-17;to=2026-10-16
+vintage=rows=1968713;symbols=3028;from=2023-10-17;to=2026-10-16;prices=50175b0a3083d6aef1c056d19c7dd51a
 n_trades=69
 trades_sha256=cdca9be636ef6b02db4b814003a7b4b1e70e01780cf3b2d093bb2f5d55ac8c70
 equity_sha256=352609cf734a6d7e0b1962bc74bbfbd522e30daa8ebb152de9d23f16272d8fba

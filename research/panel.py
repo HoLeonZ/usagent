@@ -24,6 +24,7 @@ import logging
 import sqlite3
 from collections.abc import Iterable
 
+import numpy as np
 import pandas as pd
 
 import series
@@ -160,14 +161,44 @@ def load_panel_for_preset(preset: dict, *, adjust: str = "total") -> pd.DataFram
     return load_full_panel(adjust=adjust, universe=preset.get("universe"))
 
 
+def price_digest(panel: pd.DataFrame) -> str:
+    """**价格内容**指纹 —— 让「数据换了」与「逻辑变了」可归因（审计 A6）。
+
+    为什么必须有：`data_vintage` 此前只有行数/标的数/起止日。厂商**重述**价格时
+    （拆股后的整段回补、错价更正）行数往往一字不变 ⇒ 指纹也一字不变 ⇒ 此时 golden
+    变红会被**归因成"逻辑变了"**，而真正的原因在下游（我在本仓库实测过这一幕：
+    全量重下之后旧的 `data_vintage` 描述不出一丝价格差异）。
+
+    取 (symbol, date, as-traded close, volume) 的规范序列化后 sha256：
+      * 用 **as-traded** 价：它才是执行与记账的物理量（复权价是派生量）；
+      * 按 (symbol, date) 稳定排序后再哈希 ⇒ 与面板的行序无关；
+      * 分块 update，避免为 197 万行构造一个上百 MB 的临时字符串。
+
+    它不是加密用途，是**变更检测**：32 位十六进制足够。
+    """
+    import hashlib
+    need = ["symbol", "date", "raw_close", "volume"]
+    miss = [c for c in need if c not in panel.columns]
+    if miss:
+        raise PanelError(f"price_digest 需要 {need}，缺 {miss}")
+    sub = panel[need].sort_values(["symbol", "date"], kind="mergesort")
+    h = hashlib.sha256(f"n={len(sub)};".encode())
+    hashed = pd.util.hash_pandas_object(sub, index=False).to_numpy()
+    for chunk in np.array_split(hashed, 512):
+        h.update(chunk.tobytes())
+    return h.hexdigest()[:32]
+
+
 def data_vintage(panel: pd.DataFrame) -> str:
-    """数据 vintage 指纹:行数 / 标的数 / 起止日。不含任何收益信息(§7)。
+    """数据 vintage 指纹:行数 / 标的数 / 起止日 / **价格内容摘要**。不含任何收益信息(§7)。
 
     被 run_baseline 的结果 JSON 与 golden 基线共用 —— 没有它,「当前代码 + 一条命令」
     复现不出任何历史数字,因为 data/*.db 本身不入库(§0/§7)。
+    价格摘要见 `price_digest`（审计 A6：只有计数时，"数据换了"与"逻辑变了"分不开）。
     """
     return (f"rows={len(panel)};symbols={panel['symbol'].nunique()};"
-            f"from={panel['date'].min():%Y-%m-%d};to={panel['date'].max():%Y-%m-%d}")
+            f"from={panel['date'].min():%Y-%m-%d};to={panel['date'].max():%Y-%m-%d};"
+            f"prices={price_digest(panel)}")
 
 
 def first_signal_date(panel: pd.DataFrame) -> pd.Timestamp:

@@ -6,7 +6,7 @@ case=fixture_uptrend_pullback_v1
 preset=us_uptrend_pullback_v1
 start=2024-01-01
 end=2025-01-01
-vintage=rows=12480;symbols=24;from=2023-01-02;to=2024-12-27
+vintage=rows=12480;symbols=24;from=2023-01-02;to=2024-12-27;prices=33a593f54611e3bb4925fb7b0cfe3935
 n_trades=3
 trades_sha256=9e5e1921201ecebe4db0ff49b81cf7578f83d911ff39e6d1d8ef83d9b26d3fbd
 equity_sha256=3c7e0c0a9dcd195344c841fe1e62357705af0409e4883c541ca033eebcfce76e
