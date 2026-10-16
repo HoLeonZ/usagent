@@ -113,7 +113,10 @@
       （**含空信号那条早返回**）；stage 表与 walk-forward 表都出现超额列。
       ⚠️ **没有**把搜索判据从绝对 CAGR 改成超额 —— 改判据是一次新搜索，要单独计
       n_trials，属于研究决策而不是代码修复。
-- [ ] **C4** 超额只有 CAGR 之差：无因子回归、无跟踪误差/IR。
+- [x] **C4** 风格因子归因（`010c504`）：`factor_model.py` 用面板自造
+      market/mom/lowvol 代理 + **HAC 标准误**回归 + 跟踪误差/IR；`run_baseline --attribution`。
+      实测 reversal_dip 的 alpha t=+0.27（与 0 不可区分）而 lowvol β t=−2.88（显著）、
+      IR −1.04 ⇒ "超额"的来源被说清楚了。⚠️ 无价值/规模因子（数据不可得），已写进输出。
 - [x] **C5** 窗口末尾清算（`3c7f0c4`）：`liquidate_at_end` 默认 True；停牌/无 bar 的
       仓位按准则 §1 **不造成交**，留作未平仓并显式报 `samples_aligned=False`。
       端到端实测恒等式"末值权益 == 初始 + Σ已实现净盈亏"偏差 0.000000。
