@@ -20,6 +20,7 @@ import pandas as pd
 import yfinance as yf
 
 import db
+import vendor_stockanalysis as vendor_sa
 import yfutil
 from config import (BACKOFF_BASE, BATCH_SIZE, HISTORY_YEARS, RESTATE_MIN_REL_DIFF,
                     history_start, load_universe)
@@ -164,12 +165,30 @@ def write_symbol(con, sym: str, df: pd.DataFrame, now: str, run_id: str
     return n, drift
 
 
+# 取数源。两源的**价格口径相同**（都已拆股复权、未分红复权），差别在事件来源：
+#   yahoo          —— Close + 显式的 dividends/splits 两列（本库原来的唯一路径）
+#   stockanalysis  —— Close + 由 (a,c) **反解**的分红；拆股事件不可观测（见该模块 docstring）
+# 限流语义两源共用（vendor 抛的也是 yfutil.RateLimited），所以上游的
+# "限流不拆批 / 中止本轮"决策路径对两个源完全一致。
+SOURCE_YAHOO = "yahoo"
+SOURCE_SA = "stockanalysis"
+SOURCE = SOURCE_YAHOO          # 由 main() 按 --source 覆盖
+
+
+def _source_probe() -> bool:
+    """当前源的探针。两源的探针语义一致：只回答"服务现在通不通"。"""
+    return vendor_sa.probe() if SOURCE == SOURCE_SA else yfutil.probe()
+
+
 def _fetch_batch(batch: list[str], start: date, end: date) -> pd.DataFrame:
     """一批标的的原始下载。
 
-    必须经 `yfutil.download`（= 全局节流 + 指数退避 + 429 分类）—— 见 yfutil.download
+    Yahoo 侧必须经 `yfutil.download`（= 全局节流 + 指数退避 + 429 分类）—— 见 yfutil.download
     的 docstring：曾经这里的路径绕过了整个限流守卫，把限流伪装成「这些标的没有数据」。
+    备用源侧同样带节流与退避（vendor_stockanalysis._get），并抛同一种 RateLimited。
     """
+    if SOURCE == SOURCE_SA:
+        return vendor_sa.fetch_batch(batch, start, end)[0]
     return yfutil.download(
         batch, start=start.isoformat(), end=end.isoformat(),
         auto_adjust=False, actions=True, progress=False,
@@ -229,7 +248,7 @@ def _fetch_resilient(batch: list[str], start: date, end: date
         frames = _frames_from_batch(raw, batch) if raw is not None else []
         if frames or bad:
             return raw, bad
-        if not yfutil.probe():
+        if not _source_probe():
             if attempt >= THROTTLE_RETRIES:
                 raise RateLimited(
                     f"整批 {len(batch)} 只无数据且探针连续 {attempt + 1} 次失败 —— "
@@ -336,9 +355,15 @@ def main() -> int:
     ap.add_argument("--as-of", type=date.fromisoformat, default=None,
                     metavar="YYYY-MM-DD",
                     help="钉住数据窗口的右端(默认为今天);用于复现一份既有 vintage")
+    ap.add_argument("--source", default=SOURCE_YAHOO,
+                    choices=[SOURCE_YAHOO, SOURCE_SA],
+                    help="取数源（两源价格口径相同，事件来源不同；见 download_ohlcv 头注释）")
     ap.add_argument("--recent", type=int, default=None, metavar="DAYS",
                     help="增量模式：只拉最近 N 天（每日任务用，约 1 分钟）")
     a = ap.parse_args()
+    global SOURCE
+    SOURCE = a.source
+    log.info("取数源：%s", SOURCE)
     try:
         stats = download(a.universe, a.limit, not a.no_skip, recent_days=a.recent,
                          as_of=a.as_of)
