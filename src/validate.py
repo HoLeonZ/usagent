@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import sys
+from datetime import date, timedelta
 
 import pandas as pd
 
 import db
 from config import COLLECT_OPTIONS, load_universe
+from trading_calendar import expected_sessions, last_session_on_or_before
 
 CHECKS: list[tuple[str, bool, str]] = []
 
@@ -51,12 +53,13 @@ def main() -> int:
         # 每只标的的行数：要区分「真的缺数据」和「本来就晚上市」。
         # 做法是拿每只标的自己的 [首日, 末日] 区间里应有几个交易日来比，而不是跟
         # 全期行数比 —— 后者会把 IPO 新股误判为缺口。
-        cal = {r[0] for r in con.execute("SELECT DISTINCT date FROM ohlcv")}
         rows = con.execute(
             "SELECT symbol, COUNT(*) c, MIN(date) a, MAX(date) b FROM ohlcv GROUP BY symbol").fetchall()
         gappy = []
         for s, c, a, b in rows:
-            expected = sum(1 for d in cal if a <= d <= b)
+            # 期望值取自**独立**的交易所日历，不取自库里出现过的日期。
+            # 旧写法（拿 DISTINCT date 当日历）是自指的：全市场都缺的那一天对它是隐形的。
+            expected = len(expected_sessions(date.fromisoformat(a), date.fromisoformat(b)))
             if expected and c < expected * 0.9:
                 gappy.append((s, c, expected))
         gappy.sort(key=lambda x: x[1] / x[2])
@@ -66,6 +69,51 @@ def main() -> int:
         starts = sorted(r[2] for r in rows)
         late = sum(1 for s in starts if s > d0)
         print(f"     其中 {late} 只首次上市晚于窗口起点（正常）")
+
+        # ── 新鲜度：用独立日历判「这库到底更新了没有」──
+        # 动机（2026-10-17 审计）：取数失败此前会被吞成 exit 0（run_daily 只看 exit code），
+        # 于是「数据已更新」与「数据一个月没动」在运维层不可区分。新鲜度是唯一能
+        # 分辨两者的判据，而它必须由**外部日历**给出（不能问 ohlcv「你新不新」）。
+        today = date.today()
+        last_expected = last_session_on_or_before(today)
+        stale = expected_sessions(date.fromisoformat(d1) + timedelta(days=1), last_expected)
+        # 容差 1 个交易日：每日任务在北京 10:00 跑（= 美东前一日 21:00~22:00），
+        # 此时「今天」这个美东交易日尚未收盘，最新一根 bar 自然对应上一交易日。
+        check("数据新鲜（缺的交易日 ≤ 1）", len(stale) <= 1,
+              f"最新 {d1}；其后应有 {len(stale)} 个交易日"
+              + (f"（{stale[0]} … {stale[-1]}）" if stale else ""))
+
+        # ── 全市场缺口：非自指的完整性检查 ──
+        # 逐个「应有交易日」数有几只标的有数据；显著低于中位数 ⇒ 那天整批没落盘。
+        per_day = dict(con.execute("SELECT date, COUNT(DISTINCT symbol) FROM ohlcv GROUP BY date").fetchall())
+        sess = expected_sessions(date.fromisoformat(d0), date.fromisoformat(d1))
+        counts = [per_day.get(s.isoformat(), 0) for s in sess]
+        if counts:
+            med = sorted(counts)[len(counts) // 2]
+            holes = [(s.isoformat(), per_day.get(s.isoformat(), 0))
+                     for s in sess if med and per_day.get(s.isoformat(), 0) < med * 0.5]
+            check("无全市场缺口（不该有 data 的日子）", not holes,
+                  f"疑似缺口 {len(holes)} 天" + (f"（例：{holes[:4]}）" if holes else ""))
+        unexpected = sorted(set(per_day) - {s.isoformat() for s in sess})
+        check("无「不该有数据」的日期（周末/休市）", not unexpected,
+              f"多余 {len(unexpected)} 天" + (f"（例：{unexpected[:4]}）" if unexpected else ""))
+
+        # ── 疑似基数断层：厂商重述遗留（增量刷新时代的病灶）──
+        # 判据：单日倍数**恰好**接近一个整数 ≥2（容差 1%，且当天没有拆股事件）。
+        # 真实行情的暴涨暴跌几乎不会精确等于整数倍，而"厂商按 k:1 重述整段历史、
+        # 增量刷新只重写了窗口内那一天"必然精确等于整数倍。
+        breaks = con.execute("""
+            WITH s AS (
+              SELECT symbol, date, close, COALESCE(splits,0) AS sp,
+                     LAG(close) OVER (PARTITION BY symbol ORDER BY date) AS prev
+              FROM ohlcv)
+            SELECT symbol, date, prev, close FROM s
+            WHERE prev > 0 AND close > 0 AND sp = 0 AND (
+              (close/prev >= 1.98 AND ABS(close/prev - ROUND(close/prev)) / ROUND(close/prev) < 0.01)
+              OR (prev/close >= 1.98 AND ABS(prev/close - ROUND(prev/close)) / ROUND(prev/close) < 0.01))
+            ORDER BY symbol, date""").fetchall()
+        check("无疑似价格基数断层", not breaks,
+              f"疑似 {len(breaks)} 处" + (f"（例：{[(s, d) for s, d, _, _ in breaks[:4]]}）" if breaks else ""))
 
         # 覆盖率
         cov = {r[0] for r in con.execute(
