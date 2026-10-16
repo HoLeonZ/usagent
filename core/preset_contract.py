@@ -40,6 +40,12 @@ OPTIONAL_KEYS: tuple[str, ...] = (
     "atr_sl_mult", "atr_tp_mult",
     "sl_pct", "tp_pct",
     "trailing_sl",
+    # ---- 组合层风险（2026-10-17 审计 D1/D2，机构风控的核心）----
+    # 三者都是「不设 = 关闭」，但**不设必须被看见**：引擎会在报告里输出
+    # 实际观测到的单名权重峰值与组合 heat，所以"没设上限"不会变成一个隐形事实。
+    "max_weight",          # 单名名义额 / 权益 上限
+    "max_heat",            # 组合计划风险（Σ 止损宽度×价格×股数）/ 权益 上限
+    "max_drawdown_halt",   # 自峰值回撤超过它 ⇒ 停止开新仓（停机开关）
 )
 
 ENGINE_KEYS: tuple[str, ...] = REQUIRED_KEYS + OPTIONAL_KEYS
@@ -49,6 +55,11 @@ DEFAULTS: dict[str, object] = {
     "initial_cash": costs.INITIAL_CASH,
     "max_volume_participation": costs.MAX_VOLUME_PARTICIPATION,
     "trailing_sl": False,
+    # 组合层风控默认**关闭**：缺省关闭是为了不改动既有 preset 的行为，
+    # 不是因为"没有上限更好"。观测值（单名权重峰值/heat）无论如何都会输出。
+    "max_weight": None,
+    "max_heat": None,
+    "max_drawdown_halt": None,
 }
 
 # 指标价轴是**引擎约定,不是 preset 旋钮**:CLAUDE.md §3(b) 规定数学指标必须用

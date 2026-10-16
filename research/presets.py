@@ -45,6 +45,26 @@ from core import costs
 from research import universe as mod_universe
 from core.preset_contract import validate
 
+
+# ---------------------------------------------------------------- 组合层风险上限
+#
+# 审计 D1/D2：修之前引擎**没有**组合层风险概念（只有"数仓位个数"），且唯一的尺寸
+# 规则会被现金闸门静默改写。这三个键是**政策声明，不是拟合参数** —— 值的来源是
+# "一个 1~3 只持仓的股票组合能承受多少同时在场的风险"，不是网格搜索的结果。
+# 改动它们等于改风险政策：要单独记 n_trials，并说明理由。
+RISK_LIMITS: dict[str, object] = {
+    # 单名名义额 ≤ 权益的 50%：两只票的账本里，任何一只都不该占掉全部。
+    "max_weight": 0.50,
+    # 组合热风险（Σ 各仓止损宽度×入场价×股数）≤ 权益的 8%：
+    # 即"若当天全部同时止损，权益最多掉 8%"。这是组合层的硬约束，
+    # 与单笔 risk_per_trade 无关 —— 后者只是每笔的预算。
+    "max_heat": 0.08,
+    # 自权益峰值回撤 20% ⇒ 停止开新仓（停机开关）。恢复需要权益自己回到阈值之上，
+    # 也就是"先止血、再谈要不要继续"。
+    "max_drawdown_halt": 0.20,
+}
+
+
 # v33_long_reverse_v21 的原始信号参数,**一个都没改**(基线的意义就在于此)
 V21_SIGNAL_PARAMS: dict[str, object] = {
     "min_down_streak": 3,
@@ -105,6 +125,7 @@ PRESETS: dict[str, dict] = {
         "position_fraction": 1.0,
         "risk_per_trade": DEFAULT_RISK_PER_TRADE,
         "max_positions": 1,
+        **RISK_LIMITS,                     # 组合层风险政策（见上方 RISK_LIMITS）
         # ⚠️ 偏离 hiagent §2「All-In Sizing Policy」。该政策与「窄止损」耦合:
         #    §2 原话 "Tail risk is managed entirely by exit logic (TP/SL), never by
         #    reserving cash at entry" 只在止损很窄时成立。A 股 2.1% 止损下 all-in
@@ -262,6 +283,7 @@ PRESETS["us_uptrend_pullback_12m_target"] = {
     "position_fraction": 1.0,
     "risk_per_trade": 0.05,          # <= 这一个是 CAGR 的真正来源(1% -> 5% 杠杆)
     "max_positions": 2,
+    **RISK_LIMITS,                     # 组合层风险政策（见上方 RISK_LIMITS）
     "atr_sl_mult": 1.5,
     "atr_tp_mult": 6.0,
     "max_hold": 18,
@@ -371,6 +393,7 @@ PRESETS["us_uptrend_pullback_wfv"] = {
     "position_fraction": 1.0,
     "risk_per_trade": 0.01,          # 预注册 1%:让选参不被杠杆主导
     "max_positions": 2,
+    **RISK_LIMITS,                     # 组合层风险政策（见上方 RISK_LIMITS）
     # ---- 退出几何:WFV 训练窗选出 --------------------------------------
     "atr_sl_mult": 2.0,              # 旧 target preset 是 1.5(网格角点)
     "atr_tp_mult": 3.0,              # 旧的是 6.0 —— 18 天持有期内几乎不可达
@@ -507,6 +530,7 @@ PRESETS["us_reversal_dip_v1"] = {
     "position_fraction": 1.0,
     "risk_per_trade": 0.01,
     "max_positions": 2,
+    **RISK_LIMITS,                     # 组合层风险政策（见上方 RISK_LIMITS）
     # ---- 退出:WFV 训练窗选出 -------------------------------------------------
     "atr_sl_mult": 1.0,
     "atr_tp_mult": 4.0,

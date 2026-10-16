@@ -48,6 +48,13 @@ TRADE_COLS = [
     # 每笔的**计划风险**宽度与金额。hiagent 的 tail_objective 用固定 sl_pct 推 R,
     # 但 ATR 归一化后每笔的止损宽度不同,所以必须逐笔记录,否则 E[R] 算不出来。
     "sl_width", "tp_width", "risk_amount",
+    # sizing_cap = 最终决定股数的那个约束（policy / volume_cap / max_weight /
+    # max_heat / cash）。2026-10-17 审计 D3：现金闸门曾在**无日志**的情况下把
+    # 声明风险改写成另一个值（12m preset 第二仓从声明 5% 权益掉到 ~0.6%），
+    # 使"单笔风险预算"变成记账副作用。记下来之后这条路径是可审计的。
+    "sizing_cap",
+    # risk_frac = 该笔的计划风险 / 入场时的权益。声明值与实际值并排可读。
+    "risk_frac",
 ]
 
 VALID_TIEBREAK = ("sl_first",)
@@ -114,6 +121,11 @@ class Position:
     # 截至**前一交易日**的最高 high。只用 ≤D-1 的数据决定 D 日的止损位 ——
     # 若用 D 日自身的 high 抬高止损再拿 D 日的 low 去触发,就是同 bar 前视。
     high_water: float = float("nan")
+    # 最终压住股数的那个约束（见 TRADE_COLS 里的说明）。
+    sizing_cap: str = "policy"
+    # 入场时的权益 —— "计划风险占权益多少"的分母。用入场时刻的值，
+    # 而不是事后某一天的权益（否则这个数会随时间漂移，无法回答"我当时冒了多大风险"）。
+    equity_at_entry: float = float("nan")
 
 
 @dataclass
@@ -236,6 +248,21 @@ def simulate(
     # VERI +25.0% 最后全部亏着出场 —— 固定价位止损 + 不可达 TP = 只止损不止盈。
     trailing_sl = bool(spec["trailing_sl"])
 
+    # 组合层风险预算（2026-10-17 审计 D1/D2）。三者都是"不设 = 关闭"，
+    # 但引擎无论如何都会**输出观测值**（单名权重峰值、组合 heat）——
+    # 没设上限这件事不许是隐形的。
+    max_weight = spec["max_weight"]
+    max_heat = spec["max_heat"]
+    max_dd_halt = spec["max_drawdown_halt"]
+    for _nm, _v in (("max_weight", max_weight), ("max_heat", max_heat)):
+        if _v is not None and not (0.0 < float(_v) <= 1.0):
+            raise BrokerError(f"{_nm} ∈ (0,1]，得到 {_v!r}")
+    if max_dd_halt is not None and not (0.0 < float(max_dd_halt) < 1.0):
+        raise BrokerError(f"max_drawdown_halt ∈ (0,1)，得到 {max_dd_halt!r}")
+    max_weight = None if max_weight is None else float(max_weight)
+    max_heat = None if max_heat is None else float(max_heat)
+    max_dd_halt = None if max_dd_halt is None else float(max_dd_halt)
+
     if max_positions < 1:
         raise BrokerError(f"max_positions 必须 >= 1,得到 {max_positions}")
     if not (0 < position_fraction <= 1.0):
@@ -290,6 +317,15 @@ def simulate(
     day_pos = {d: i for i, d in enumerate(days)}
     # 上一交易日收盘的权益 —— 当日入场的风险预算只能用它(见步骤 0 的快照)。
     prev_equity = initial_cash
+    # 组合层风险的状态（D1/D2）：
+    #   planned_risk(pos) = 入场时即固定的计划风险；它是 heat 与 E[R] 共同的分子，
+    #   所以只能有一个定义（此处），不能在别处再写一遍。
+    #   peak_equity 是**已实现路径**的权益峰值，停机判定只用 ≤ 上一收盘的信息。
+    def planned_risk(pos: Position) -> float:
+        return pos.sl_width * pos.entry_price * pos.size
+
+    peak_equity = initial_cash
+    stats_halted_days = 0
 
     def mark_to_market(day: pd.Timestamp) -> float:
         """equity = cash + Σ qty × close。这是唯一正确的口径(见模块 docstring)。
@@ -378,6 +414,10 @@ def simulate(
             # (hiagent tail_objective 的原话)。
             "sl_width": pos.sl_width, "tp_width": pos.tp_width,
             "risk_amount": pos.sl_width * pos.entry_price * pos.size,
+            "sizing_cap": pos.sizing_cap,
+            "risk_frac": ((pos.sl_width * pos.entry_price * pos.size)
+                          / pos.equity_at_entry if pos.equity_at_entry > 0
+                          else float("nan")),
         })
         del book.positions[pos.symbol]
 
@@ -395,6 +435,20 @@ def simulate(
         slots_at_open = max_positions - len(held_at_open)
         spent_today = 0.0
         filled_today = 0
+
+        # ---- 组合层风险快照（D1/D2）----
+        # heat = Σ 计划风险（入场时固定的 止损宽度×入场价×股数）。它衡量的是
+        # "若同时全部止损，权益会掉多少" —— 机构里这是组合层的第一约束，
+        # 而本引擎此前**完全没有**这个概念（只有 max_positions 数个数）。
+        # 与现金/仓位槽一样取**上一交易日收盘**的快照（§2(d) 结算隔离）。
+        heat_at_open = sum(planned_risk(book.positions[s_]) for s_ in held_at_open)
+        heat_used = heat_at_open
+        # 停机开关（D2）：按**上一交易日收盘**权益判回撤，当日盘中回撤最早也要等到
+        # 收盘才进入下一日的判定 —— 不偷看当日盘中最低点。
+        halted_today = (max_dd_halt is not None
+                        and equity_at_open <= peak_equity * (1.0 - max_dd_halt))
+        if halted_today:
+            stats_halted_days += 1
 
         # ---------- 1) 持仓:开盘 gap → 盘中 SL/TP ----------
         for sym in list(book.positions):
@@ -447,7 +501,7 @@ def simulate(
         # ---------- 2) 入场:前一交易日(T)的信号在今日(T+1)开盘成交 ----------
         # 预算与容量都取自步骤 0 的快照,不读当日的出场所得与释放的槽位(§2(d))。
         prev_idx = day_pos[day] - 1
-        if prev_idx >= 0:
+        if prev_idx >= 0 and not halted_today:
             sig_day = days[prev_idx]
             cash_avail = cash_at_open
             for sig in pending.get(sig_day, []):
@@ -504,9 +558,30 @@ def simulate(
                 #    (止损/止盈/跳空)永远落在 bar 区间内 —— 那才是会产生「不存在的成交」的一侧。
                 entry_px = o * (1.0 + slip)
 
-                # 现金闸门(两种口径都要):风险预算可能算出一个买不起的股数
-                qty = min(target_qty(entry_px), cap,
-                          int(np.floor(cash_avail / (entry_px * (1.0 + cost_half)))))
+                # ---- 组合层上限（D1/D3）----
+                # 顺序施加，并**记下最后压住它的那个约束**。为什么必须记：
+                # 此前这里只有一句 min(..., 现金闸门)，于是"声明 5% 权益的单笔风险"
+                # 会被静默改写成 0.6%（实测 12m preset 第二仓），而报告里看不出来。
+                # 记录之后，"声明风险 vs 实际风险"在交易列表里逐笔可查。
+                qty = target_qty(entry_px)
+                cap_by = "policy"
+                volume_cap = cap
+                if qty > volume_cap:
+                    qty, cap_by = volume_cap, "volume_cap"
+                if max_weight is not None:
+                    w_cap = int(np.floor(
+                        max_weight * equity_at_open / (entry_px * (1.0 + cost_half))))
+                    if qty > w_cap:
+                        qty, cap_by = w_cap, "max_weight"
+                if max_heat is not None:
+                    # 剩余风险额度：heat 上限 - 已用（上一收盘持仓 + 今日已建仓）
+                    room = max_heat * equity_at_open - heat_used
+                    h_cap = int(np.floor(room / (sl_w * entry_px))) if room > 0 else 0
+                    if qty > h_cap:
+                        qty, cap_by = h_cap, "max_heat"
+                cash_cap = int(np.floor(cash_avail / (entry_px * (1.0 + cost_half))))
+                if qty > cash_cap:
+                    qty, cap_by = cash_cap, "cash"
                 if qty <= 0:
                     continue
 
@@ -521,8 +596,11 @@ def simulate(
                         f"{day.date()} 入场 {sym} 后现金为负({book.cash:.6f})—— "
                         f"闸门漏了,物理上不可能"
                     )
+                # 建仓后立即占用风险额度：同日后续信号的 heat 判定要看得见它。
+                heat_used += sl_w * entry_px * qty
                 book.positions[sym] = Position(
                     symbol=sym, entry_date=day, entry_price=entry_px, size=qty,
+                    sizing_cap=cap_by, equity_at_entry=equity_at_open,
                     sl_price=entry_px * (1.0 - sl_w),
                     tp_price=entry_px * (1.0 + tp_w),
                     atr_pct=sym_atr, sl_width=sl_w, tp_width=tp_w,
@@ -568,9 +646,23 @@ def simulate(
 
         eq_today = mark_to_market(day)
         prev_equity = eq_today            # 供**下一交易日**的入场定预算(§2(d) 快照)
+        peak_equity = max(peak_equity, eq_today)
+        # 组合层风险的**逐日观测值**：不设上限时它们是唯一的可见性来源，
+        # 设了上限时它们是事后复核（上限有没有真的生效）。
+        open_risk = sum(planned_risk(p) for p in book.positions.values())
+        notional = {}
+        for p in book.positions.values():
+            k = per_sym.get(p.symbol, {}).get(day)
+            px = (data[p.symbol]["raw_close"][k] if k is not None
+                  else p.entry_price)
+            notional[p.symbol] = p.size * px
         equity_rows.append({"date": day, "equity": eq_today,
                             "cash": book.cash, "n_pos": len(book.positions),
-                            "exposure": (eq_today - book.cash) / eq_today})
+                            "exposure": (eq_today - book.cash) / eq_today,
+                            "heat": open_risk / eq_today if eq_today > 0 else float("nan"),
+                            "top_weight": (max(notional.values()) / eq_today
+                                           if notional and eq_today > 0 else 0.0),
+                            "halted": bool(halted_today)})
 
     equity = pd.DataFrame(equity_rows)
     trades_df = pd.DataFrame(trades, columns=TRADE_COLS)
@@ -603,11 +695,31 @@ def _window_metrics(equity: pd.DataFrame, trades: pd.DataFrame, *, max_hold: int
         "sharpe": float(sharpe), "max_dd": max_dd,
         "avg_exposure": float(equity["exposure"].mean()),
         "days": int(len(equity)),
+        # ---- 组合层风险的观测值（D1/D2）----
+        # 这三项让"组合层有没有失控"变成可读的量，而不是靠人肉推演：
+        #   peak_heat        单日同时在场仓位的计划风险峰值（占权益）
+        #   peak_name_weight 单名名义额峰值（占权益）
+        #   pct_days_halted  停机开关生效的交易日占比（未声明上限时为 0）
+        "peak_heat": (float(equity["heat"].max())
+                      if "heat" in equity.columns else float("nan")),
+        "peak_name_weight": (float(equity["top_weight"].max())
+                             if "top_weight" in equity.columns else float("nan")),
+        "pct_days_halted": (float(equity["halted"].mean())
+                            if "halted" in equity.columns else 0.0),
     }
     if trades.empty:
         out.update({"win_rate": float("nan"), "avg_hold_days": float("nan"),
                     "tp_count": 0, "sl_count": 0, "time_count": 0})
         return out
+
+    # 「声明风险 vs 实际风险」的可审计性（D3）：有多少笔的股数其实是被
+    # 量能/单名权重/heat/现金压下来的（即 declaration 与 realized 不一致）。
+    if "sizing_cap" in trades.columns:
+        capped = trades["sizing_cap"] != "policy"
+        out["capped_trades"] = int(capped.sum())
+        out["capped_share"] = float(capped.mean())
+        if "risk_frac" in trades.columns:
+            out["max_risk_frac"] = float(trades["risk_frac"].max())
 
     wins = trades["net_pnl"] > 0
     reasons = trades["exit_reason"]
