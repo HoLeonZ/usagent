@@ -273,6 +273,7 @@ def simulate(
             raise BrokerError(f"{_nm} ∈ (0,1]，得到 {_v!r}")
     if max_dd_halt is not None and not (0.0 < float(max_dd_halt) < 1.0):
         raise BrokerError(f"max_drawdown_halt ∈ (0,1)，得到 {max_dd_halt!r}")
+    liquidate_at_end = bool(spec["liquidate_at_end"])
     spread_model = spec["spread_model"]
     if spread_model not in ("none", "corwin_schultz"):
         raise BrokerError(
@@ -344,6 +345,8 @@ def simulate(
 
     peak_equity = initial_cash
     stats_halted_days = 0
+    # 窗口末尾因"当日无 bar"而**无法**清算的仓位个数（见步骤 3b 的注释）。
+    stats_unliquidated = 0
 
     def mark_to_market(day: pd.Timestamp) -> float:
         """equity = cash + Σ qty × close。这是唯一正确的口径(见模块 docstring)。
@@ -677,6 +680,30 @@ def simulate(
                                bar_hi=data[sym]["raw_high"][k],
                                bar_vol=data[sym]["volume"][k])
 
+        # ---------- 3b) 窗口末尾清算（C5）----------
+        # 为什么必须清算：不清算时，**头条收益/Sharpe/maxDD 来自权益曲线（含未实现
+        # 浮盈）**，而 **E[R]/胜率/盈亏比只覆盖已平仓成交** —— 同一份报告里的两组数
+        # 落在两个不同的样本上，且窗口末尾刚好浮盈时会系统性地抬高头条。
+        # 这里按最后一根收盘价成交（正常收出场成本），于是两组数同源；
+        # 代价是"本会继续持有的仓位也付了一次出场成本"，方向保守。
+        if liquidate_at_end and day == axis[-1] and book.positions:
+            exit_day = axis[-1]
+            for sym in list(book.positions):
+                k2 = per_sym.get(sym, {}).get(exit_day)
+                if k2 is None:
+                    # ⚠️ 当日没有该标的的 bar（停牌/退市/数据中断）⇒ **不得**造一个成交。
+                    # 准则 §1 的原文:Suspended names are marked at the last raw_close
+                    # and **MUST NOT generate fills** until trading resumes。
+                    # 所以这里什么都不做，把它留作未平仓，并由 `_window_metrics` 把
+                    # "仍有未平仓 ⇒ 两个样本未对齐"**显式报出来** —— 而不是假装清算干净。
+                    stats_unliquidated += 1
+                    continue
+                pos = book.positions[sym]
+                close_position(pos, exit_day, data[sym]["raw_close"][k2], "eod",
+                               bar_lo=data[sym]["raw_low"][k2],
+                               bar_hi=data[sym]["raw_high"][k2],
+                               bar_vol=data[sym]["volume"][k2])
+
         eq_today = mark_to_market(day)
         prev_equity = eq_today            # 供**下一交易日**的入场定预算(§2(d) 快照)
         peak_equity = max(peak_equity, eq_today)
@@ -703,6 +730,12 @@ def simulate(
         trades_df = trades_df.sort_values("entry_date").reset_index(drop=True)
 
     metrics = _window_metrics(equity, trades_df, max_hold=max_hold)
+    # 显式暴露"样本是否对齐"：只有全部仓位都在窗口末尾被真实清算时，
+    # 权益口径的头条与交易口径的 E[R] 才落在同一个样本上。
+    metrics["n_unliquidated"] = int(stats_unliquidated)
+    # 判据只有一条：窗口结束时账本里还剩不剩仓位。
+    # 剩 ⇒ 权益口径含未实现浮盈、而交易口径只覆盖已平仓 ⇒ 两组数不同源。
+    metrics["samples_aligned"] = bool(equity["n_pos"].iloc[-1] == 0)
     return {"trades": trades_df, "equity": equity, "metrics": metrics}
 
 

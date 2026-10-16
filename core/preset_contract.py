@@ -46,6 +46,11 @@ OPTIONAL_KEYS: tuple[str, ...] = (
     "max_weight",          # 单名名义额 / 权益 上限
     "max_heat",            # 组合计划风险（Σ 止损宽度×价格×股数）/ 权益 上限
     "max_drawdown_halt",   # 自峰值回撤超过它 ⇒ 停止开新仓（停机开关）
+    # ---- 评价口径（2026-10-17 审计 C5）----
+    # 窗口末尾是否按最后一根收盘价清算未平仓仓位（True/False）。
+    # 见 broker.py 的说明：不平仓会让"权益口径的头条收益"与"交易口径的 E[R]"
+    # 落在两个不同的样本上。
+    "liquidate_at_end",
     # ---- 成本口径（2026-10-17 审计 E1）----
     # "none"（默认）| "corwin_schultz"。默认 none 只为不改动既有数字，
     # 不是因为它更对：不建模价差等于把**尺寸无关**的那一半成本当成零。
@@ -65,6 +70,9 @@ DEFAULTS: dict[str, object] = {
     "max_heat": None,
     "max_drawdown_halt": None,
     "spread_model": "none",
+    # 默认清算：它让头条收益与 E[R]/胜率/盈亏比落在**同一个样本**上，
+    # 而且方向保守（多付一次出场成本）。不想要就显式写 False。
+    "liquidate_at_end": True,
 }
 
 # 指标价轴是**引擎约定,不是 preset 旋钮**:CLAUDE.md §3(b) 规定数学指标必须用

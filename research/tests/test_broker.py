@@ -612,11 +612,16 @@ def test_proceeds_are_usable_the_next_trading_day():
                  cost_bps_roundtrip=0.0)
     tr = r["trades"]
     eq = r["equity"].set_index("date")
-    assert list(tr["symbol"]) == ["AAA"], "AAA 应在 d2 止损出场"
+    # AAA 在 d2 止损出场；BBB 在 01-03 出信号、01-04 建仓后一直持有到窗口末尾，
+    # 因此在最后一天按 C5 收盘清算（reason=eod）。
+    assert list(tr["symbol"]) == ["AAA", "BBB"]
+    assert tr.iloc[0]["exit_reason"].startswith("sl")
+    assert tr.iloc[1]["exit_reason"] == "eod"
     exit_day = tr.iloc[0]["exit_date"]
     after = eq.loc[eq.index > exit_day]
     assert len(after) > 0
-    assert (after["n_pos"] == 1).all(), "出场后应能开新仓 —— 隔日复用被误堵"
+    assert after["n_pos"].iloc[0] == 1, "出场后应能开新仓 —— 隔日复用被误堵"
+    assert after["n_pos"].iloc[-1] == 0, "窗口末尾必须清算（C5）"
 
 
 def test_entry_capacity_reads_the_previous_close_not_the_current_bar():
