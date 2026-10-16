@@ -46,7 +46,7 @@ import numpy as np
 import pandas as pd
 
 from core import costs
-from research import families as F, indicators, metrics, panel as mod_panel
+from research import families as F, holdout as mod_holdout, indicators, metrics, panel as mod_panel
 
 logger = logging.getLogger("factor_probe")
 
@@ -265,11 +265,27 @@ def main(argv=None) -> int:
     ap.add_argument("--mid", default="2025-10-14",
                     help="判据②的切分线:预注册的搜索期/holdout 分界")
     ap.add_argument("--hi", default="2026-10-14")
+    ap.add_argument("--force-holdout", default=None, metavar="REASON",
+                    help="[mid,hi) 这半段是 holdout,已被消费过时须显式声明理由")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     if not a.run:
         ap.print_help()
         return 0
+
+    # 判据②把窗口在 [mid, hi) 处切开，而后半段**就是 holdout** —— 在这里出结论
+    # 等于消费它，所以先过台账（2026-10-17 审计 B1）。默认拒绝二次消费。
+    try:
+        prior = mod_holdout.consume(
+            a.mid, a.hi, script="factor_probe",
+            tag="gate_scan" if a.gate_scan else "stability",
+            force_reason=a.force_holdout)
+    except mod_holdout.HoldoutBurned as exc:
+        print(f"\n[holdout 台账] 拒绝继续:\n{exc}\n")
+        return 2
+    if prior:
+        print(f"⚠️ 后半段 {a.mid}..{a.hi} 此前已被 claim 消费 {prior} 次 ⇒ "
+              f"本次的两半比较**不是样本外**。理由已记入台账：{a.force_holdout}\n")
 
     ind = F.add_family_indicators(indicators.compute_all(mod_panel.load_full_panel()))
     cb = costs.COST_BPS_ROUNDTRIP

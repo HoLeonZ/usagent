@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 
 from research import broker, indicators, presets, regime as regime_mod, signals
+from research import holdout as mod_holdout
 from research.broker import TRADE_LOCK_COLS, trade_fingerprint
 from research.panel import data_vintage, load_full_panel
 
@@ -136,7 +137,14 @@ def run_preset(case: dict, panel: pd.DataFrame,
 
 
 def run_case(case: dict, panel: pd.DataFrame, ind: pd.DataFrame) -> dict:
-    """跑完整链路并返回指纹。"""
+    """跑完整链路并返回指纹。
+
+    台账登记为 `kind="lock"`（2026-10-17 审计 B1）：本用例会读到 holdout 窗口，
+    但**重跑一次行为锁不是拿 holdout 出结论**，所以只登记、不烧窗口。
+    台账因此能回答"这段窗口被谁读过几次"，而不会把护栏本身算成一次研究迭代。
+    """
+    mod_holdout.consume(case["start"], case["end"], script="golden_baseline",
+                        tag=case["name"], kind=mod_holdout.KIND_LOCK)
     res, _ = run_preset(case, panel, ind)
     return {
         "vintage": data_vintage(panel),
