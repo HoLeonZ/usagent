@@ -183,6 +183,11 @@ def write_symbol(con, sym: str, df: pd.DataFrame, now: str, run_id: str
         d0, old, new = drift[0]
         db.log(con, run_id, now, "ohlcv", sym, "restated",
                f"{len(drift)} 个重叠日期的 close 变了,例 {d0} {old:.4f}->{new:.4f}")
+        # **全部**变动日期进审计表（审计 A7）：ohlcv 是 INSERT OR REPLACE，旧值会被
+        # 直接覆盖，事后无从复现；fetch_log 里那条只含**首个**日期，不够回滚也不够审计。
+        db.log_restatements(con, [
+            (sym, d, ov, nv, now, SOURCE, "vendor restatement on incremental refresh")
+            for d, ov, nv in drift])
     return n, drift
 
 
@@ -363,6 +368,10 @@ def download(universe_name: str, limit: int | None, skip_covered: bool,
 
     stats["rows"] = total
     stats["repaired_ohlc"] = _REPAIRED["ohlc"]
+    # 每次取数记一行 vintage 台账（审计 A6/A7）："我用的是哪一版数据"从此可审计，
+    # 而 golden 基线里的 vintage 串也能与它对上。
+    with db.session() as _con:
+        stats["vintage"] = db.log_vintage(_con, now, note=f"source={SOURCE}")
     if _REPAIRED["ohlc"]:
         log.warning("修复 %d 行不自洽的 OHLC（close 落在 [low, high] 之外，已把区间"
                     "撑开到包含 close）—— vendor 最后一根 bar 的收盘与 high/low 不同源",

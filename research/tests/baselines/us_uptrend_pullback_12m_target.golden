@@ -5,7 +5,7 @@
 case=us_uptrend_pullback_12m_target
 preset=us_uptrend_pullback_12m_target
 window=2025-10-14..2026-10-14
-vintage=rows=1968713;symbols=3028;from=2023-10-17;to=2026-10-16;prices=50175b0a3083d6aef1c056d19c7dd51a
+vintage=rows=1968713;symbols=3028;from=2023-10-17;to=2026-10-16;prices=6f9fb0d6abffb1be6631fff137aaa8eb
 n_trades=18
 trades_sha256=6ab77c97ec930f314e5ed0782a2cc4110bcf45e681c24a26dadf32f432c543a3
 equity_sha256=88ffe80ab24c441623c65277b88bf17280c03a8248e9918243a35f5c1f840fed

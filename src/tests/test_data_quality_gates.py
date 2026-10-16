@@ -204,3 +204,69 @@ def test_pool_split_counts_in_and_out(tmp_path, monkeypatch):
         # 池为空时按全部判（第三项 True）—— 否则检查会静默通过
         assert validate_mod._split_pool(["BIG", "TINY"], set(), set()) == (2, 0, True)
 
+
+
+# ---------------------------------------------------------------- 重述审计与 vintage 台账（A7）
+
+def test_restatement_log_keeps_the_old_values(tmp_path, monkeypatch):
+    """`ohlcv` 是 INSERT OR REPLACE ⇒ 旧值被直接覆盖；审计表必须把**全部**变动留下。
+
+    此前唯一痕迹是 fetch_log 里一条只含**首个**变动日期的文字 —— 既不够审计，
+    也不够回滚（你不知道另外几十个日期被改成了什么）。
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init()
+    with db.session() as con:
+        con.execute("INSERT INTO ohlcv (symbol,date,close,volume,fetched_at,source) "
+                    "VALUES ('AAA','2024-01-02',100.0,1e6,'t','x')")
+        db.log_restatements(con, [("AAA", "2024-01-02", 100.0, 10.0, "now", "sa", "重述"),
+                                  ("AAA", "2024-01-03", 101.0, 10.1, "now", "sa", "重述")])
+        hist = db.restatement_history(con, "AAA")
+    assert len(hist) == 2, "每个变动日期都要有一行（不只是第一个）"
+    assert hist[0][2] == 100.0 and hist[0][3] == 10.0, "旧值必须留下，否则无从回滚"
+    assert all(r[5] == "sa" for r in hist), "要记来源"
+
+
+def test_restatement_log_is_append_only_multiplicity_is_information(tmp_path, monkeypatch):
+    """同一 (symbol,date) 被重述两次 ⇒ **两行**（没有主键冲突）。"""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init()
+    with db.session() as con:
+        for old, new in ((100.0, 10.0), (10.0, 20.0)):
+            db.log_restatements(con, [("AAA", "2024-01-02", old, new, "t", "sa", "重述")])
+        assert len(db.restatement_history(con, "AAA")) == 2
+
+
+def test_store_digest_matches_the_panel_digest(tmp_path, monkeypatch):
+    """**两份摘要实现必须一致**：落盘层（取数时记台账用）与面板层（golden 里用）。
+
+    两处各写一份的理由是"取数进程不该为了记一行台账去载入整张面板"；
+    代价是必须有一条测试把它们钉在一起，否则将来两边会各自漂移。
+    """
+    import numpy as np
+    import pandas as pd
+    from research import panel as P
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init()
+    rows = [("AAA", "2024-01-02", 1.5, 1e6), ("AAA", "2024-01-03", 1.6, 1.1e6),
+            ("BBB", "2024-01-02", 3.0, 2e6)]
+    with db.session() as con:
+        con.executemany("INSERT INTO ohlcv (symbol,date,close,volume,fetched_at,source) "
+                        "VALUES (?,?,?,?,'t','x')", rows)
+        store = db.store_price_digest(con)
+    df = pd.DataFrame(rows, columns=["symbol", "date", "raw_close", "volume"])
+    df["date"] = pd.to_datetime(df["date"])
+    assert store == P.price_digest(df), "两份摘要算的不是同一件事"
+
+
+def test_vintage_log_records_one_row_per_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
+    db.init()
+    with db.session() as con:
+        con.execute("INSERT INTO ohlcv (symbol,date,close,volume,fetched_at,source) "
+                    "VALUES ('AAA','2024-01-02',1.5,1e6,'t','x')")
+        a = db.log_vintage(con, "2026-01-01T00:00:00", note="source=sa")
+        b = db.log_vintage(con, "2026-01-02T00:00:00", note="source=sa")
+        n = con.execute("SELECT COUNT(*) FROM vintage_log").fetchone()[0]
+    assert n == 2 and a[4] == b[4], "数据没变 ⇒ 摘要相同，但每次运行都要留一行"
+    assert a[:4] == (1, 1, "2024-01-02", "2024-01-02")

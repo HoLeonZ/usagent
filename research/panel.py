@@ -176,17 +176,18 @@ def price_digest(panel: pd.DataFrame) -> str:
 
     它不是加密用途，是**变更检测**：32 位十六进制足够。
     """
-    import hashlib
+    import db as _db          # 延迟导入：与 load_full_panel 同样的理由
     need = ["symbol", "date", "raw_close", "volume"]
     miss = [c for c in need if c not in panel.columns]
     if miss:
         raise PanelError(f"price_digest 需要 {need}，缺 {miss}")
     sub = panel[need].sort_values(["symbol", "date"], kind="mergesort")
-    h = hashlib.sha256(f"n={len(sub)};".encode())
-    hashed = pd.util.hash_pandas_object(sub, index=False).to_numpy()
-    for chunk in np.array_split(hashed, 512):
-        h.update(chunk.tobytes())
-    return h.hexdigest()[:32]
+    # ⚠️ 规范序列化只有一份、在 db.price_digest_of 里（审计 A6/A7）：
+    # 我第一版在这里另写了一套哈希构造，结果同一份数据上两个摘要不相等 ——
+    # 测试当场发现。多写一份"看起来一样"的实现，必然漂移。
+    return _db.price_digest_of(
+        (r.symbol, r.date.strftime("%Y-%m-%d"), r.raw_close, r.volume)
+        for r in sub.itertuples(index=False))
 
 
 def data_vintage(panel: pd.DataFrame) -> str:

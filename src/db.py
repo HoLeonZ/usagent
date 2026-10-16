@@ -31,6 +31,36 @@ CREATE TABLE IF NOT EXISTS ohlcv (
 );
 CREATE INDEX IF NOT EXISTS ix_ohlcv_date ON ohlcv(date);
 
+-- ── 重述审计（审计 A7）────────────────────────────────────────────────────
+-- ohlcv 是 INSERT OR REPLACE：厂商重述某个历史价格时，旧值**被直接覆盖**。
+-- 于是"当时那份数据长什么样"事后无法复现，只有 fetch_log 里一条只含**首个**变动
+-- 日期的文字。这张表是**追加写、无主键冲突**的：同一 (symbol,date) 被重述多次就记多行，
+-- 因为"改动历史"本身是信息。有了它，旧值可查、改动可审计、必要时可回滚。
+CREATE TABLE IF NOT EXISTS ohlcv_restatement (
+    symbol      TEXT NOT NULL,
+    date        TEXT NOT NULL,
+    old_close   REAL,
+    new_close   REAL,
+    detected_at TEXT NOT NULL,
+    source      TEXT,
+    reason      TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_restatement_sym ON ohlcv_restatement(symbol, date);
+
+-- ── 数据 vintage 台账（审计 A6/A7）────────────────────────────────────────
+-- 每次取数记一行：行数/标的数/价格内容摘要。于是"我用的是哪一版数据"可审计，
+-- 而 golden 基线里的 vintage 串能与它对照。摘要算法与 research/panel.price_digest
+-- **同一套**（有测试钉住两者一致，防止将来各写一份）。
+CREATE TABLE IF NOT EXISTS vintage_log (
+    ts          TEXT NOT NULL,
+    rows        INTEGER NOT NULL,
+    symbols     INTEGER NOT NULL,
+    first_date  TEXT,
+    last_date   TEXT,
+    price_digest TEXT NOT NULL,
+    note        TEXT
+);
+
 CREATE TABLE IF NOT EXISTS option_chain (
     snapshot_date       TEXT NOT NULL,
     symbol              TEXT NOT NULL,
@@ -179,6 +209,70 @@ def refresh_coverage(con: sqlite3.Connection, kind: str, table: str,
         "INSERT OR REPLACE INTO coverage (kind, symbol, rows, first_date, last_date, updated_at) "
         "VALUES (?,?,?,?,?,?)",
         [(kind, s, n, a, b, now) for s, n, a, b in rows])
+
+
+def log_restatements(con: sqlite3.Connection, rows: Iterable[tuple]) -> int:
+    """追加写重述记录：[(symbol, date, old_close, new_close, detected_at, source, reason)]。"""
+    rows = list(rows)
+    if not rows:
+        return 0
+    con.executemany(
+        "INSERT INTO ohlcv_restatement (symbol,date,old_close,new_close,detected_at,"
+        "source,reason) VALUES (?,?,?,?,?,?,?)", rows)
+    return len(rows)
+
+
+def restatement_history(con: sqlite3.Connection, symbol: str | None = None) -> list[tuple]:
+    """按时间读重述历史（可选按标的过滤）—— 旧值可查、改动可审计。"""
+    if symbol is None:
+        return con.execute(
+            "SELECT symbol,date,old_close,new_close,detected_at,source,reason "
+            "FROM ohlcv_restatement ORDER BY detected_at, symbol, date").fetchall()
+    return con.execute(
+        "SELECT symbol,date,old_close,new_close,detected_at,source,reason "
+        "FROM ohlcv_restatement WHERE symbol=? ORDER BY detected_at, date",
+        (symbol,)).fetchall()
+
+
+def price_digest_of(rows: Iterable[tuple]) -> str:
+    """价格内容摘要的**唯一实现**（审计 A6/A7）。rows = [(symbol, date, close, volume)]。
+
+    为什么要"唯一"：需要它的地方有两个 —— 落盘层（取数时记 vintage 台账，不该为了
+    一行台账去载入整张面板）与面板层（golden 基线里的 vintage 串）。**两处各写一份
+    必然漂移**（我第一版就是这样，测试当场发现两个摘要在同一份数据上不相等）。
+    所以规范序列化只写在这里，两侧都调它。
+    """
+    import hashlib
+    rows = list(rows)
+    h = hashlib.sha256(f"n={len(rows)};".encode())
+    buf: list[str] = []
+    for sym, d, c, v in rows:
+        ca = "" if c is None else repr(float(c))
+        va = "" if v is None else repr(float(v))
+        buf.append(f"{sym}|{d}|{ca}|{va}")
+        if len(buf) >= 20000:
+            h.update(("\n".join(buf) + "\n").encode())
+            buf = []
+    if buf:
+        h.update(("\n".join(buf) + "\n").encode())
+    return h.hexdigest()[:32]
+
+
+def store_price_digest(con: sqlite3.Connection) -> str:
+    """当前库的价格内容摘要（调 `price_digest_of`，不另写一套）。"""
+    return price_digest_of(
+        con.execute("SELECT symbol, date, close, volume FROM ohlcv ORDER BY symbol, date"))
+
+
+def log_vintage(con: sqlite3.Connection, ts: str, *, note: str = "") -> tuple:
+    """把当前库的 vintage 记一行。返回 (rows, symbols, first, last, digest)。"""
+    rows, syms, d0, d1 = con.execute(
+        "SELECT COUNT(*), COUNT(DISTINCT symbol), MIN(date), MAX(date) FROM ohlcv").fetchone()
+    digest = store_price_digest(con)
+    con.execute("INSERT INTO vintage_log (ts,rows,symbols,first_date,last_date,"
+                "price_digest,note) VALUES (?,?,?,?,?,?,?)",
+                (ts, rows, syms, d0, d1, digest, note))
+    return (rows, syms, d0, d1, digest)
 
 
 def covered_symbols(con: sqlite3.Connection, kind: str, min_last: str) -> set[str]:
