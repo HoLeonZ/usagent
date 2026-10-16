@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from research.broker import BrokerError, simulate, trade_fingerprint
+from research.broker import BrokerError, simulate, trade_fingerprint  # noqa: F401
 from research.signals import ENTRY_COLS
 from research.tests.test_broker import BASE, mk_panel, mk_signal
 
@@ -117,3 +117,33 @@ def test_shallow_penetration_is_small():
     t = run(DEEP, low=94.5)["trades"].iloc[0]
     assert t["exit_reason"] == "sl"
     assert 0 < t["sl_penetration"] < 0.06
+
+
+# ---------------------------------------------------------------- 容量余量（E4/D5）
+
+def test_volume_cap_and_headroom_are_recorded():
+    """容量必须是**可读的数**：volume_cap = §4(a) 的量能上限，headroom = 上限/本单股数。"""
+    import math
+    r = run(DEEP)
+    tr, m = r["trades"], r["metrics"]
+    t = tr.iloc[0]
+    panel_vol = 1_000_000.0                     # mk_panel 的默认成交量
+    assert t["volume_cap"] == int(math.floor(panel_vol * 0.10))
+    assert m["capacity_headroom_min"] == pytest.approx(t["volume_cap"] / t["size"])
+    assert m["capacity_headroom_median"] > 1.0, "这笔用例是正常规模，不该被量能截断"
+
+
+def test_a_thin_bar_gets_volume_capped_and_reports_headroom_below_one():
+    """量能极小的 bar ⇒ 被 §4(a) 截断，且容量余量 < 1 —— 这正是"能装多少钱"的读数。"""
+    import pandas as pd
+    bars = [{"date": d.strftime("%Y-%m-%d"), "volume": 50.0}      # 一天只成交 50 股
+            for d in pd.bdate_range("2024-01-01", periods=30)]
+    panel = mk_panel(bars)
+    r = simulate(DEEP, mk_signal("2024-01-01"), panel, start="2024-01-01",
+                 end="2024-03-01", cost_bps_roundtrip=None)
+    tr, m = r["trades"], r["metrics"]
+    t = tr.iloc[0]
+    assert t["sizing_cap"] == "volume_cap"
+    assert t["size"] == 5                                        # floor(50 × 10%)
+    assert m["capacity_headroom_min"] == pytest.approx(1.0)
+    assert m["capacity_headroom_min"] < 1.01

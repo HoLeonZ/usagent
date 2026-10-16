@@ -57,6 +57,11 @@ TRADE_COLS = [
     "sizing_cap",
     # risk_frac = 该笔的计划风险 / 入场时的权益。声明值与实际值并排可读。
     "risk_frac",
+    # volume_cap = 入场当日由 §4(a) 量能上限算出的**可成交股数上限**。
+    # 它让"这套策略能装多少钱"变成可读的数：capacity_headroom = volume_cap / size，
+    # 即"在当前单笔规模上还能放大几倍才会撞到量能上限"。审计 E4/D5 之前，
+    # 库和报告里都没有任何量能/容量读数。
+    "volume_cap",
     # sl_penetration = 触发止损时"bar 的最低点比止损价低多少"（相对止损价）。
     # 它衡量的是**这条假定有多要紧**：我们按触发价成交，而当日实际到过更低的位置。
     # 只在盘中止损（sl）上有意义；跳空（sl_gap）按开盘价成交，谈不上"穿价"。
@@ -133,6 +138,7 @@ class Position:
     high_water: float = float("nan")
     # 最终压住股数的那个约束（见 TRADE_COLS 里的说明）。
     sizing_cap: str = "policy"
+    volume_cap: int = 0
     # 入场时的权益 —— "计划风险占权益多少"的分母。用入场时刻的值，
     # 而不是事后某一天的权益（否则这个数会随时间漂移，无法回答"我当时冒了多大风险"）。
     equity_at_entry: float = float("nan")
@@ -450,6 +456,7 @@ def simulate(
             # 计划风险:入场时即固定(止损宽度 × 股数),与最终出场无关。
             # E[R] = net_pnl / risk_amount —— 分母必须是计划风险,不能是事后结果
             # (hiagent tail_objective 的原话)。
+            "volume_cap": int(pos.volume_cap),
             "sl_penetration": (float("nan") if sl_penetration is None
                                else float(sl_penetration)),
             "sl_width": pos.sl_width, "tp_width": pos.tp_width,
@@ -654,7 +661,7 @@ def simulate(
                 book.positions[sym] = Position(
                     symbol=sym, entry_date=day, entry_price=entry_px, size=qty,
                     sizing_cap=cap_by, equity_at_entry=equity_at_open,
-                    half_spread=half_spread,
+                    half_spread=half_spread, volume_cap=int(volume_cap),
                     sl_price=entry_px * (1.0 - sl_w),
                     tp_price=entry_px * (1.0 + tp_w),
                     atr_pct=sym_atr, sl_width=sl_w, tp_width=tp_w,
@@ -804,6 +811,13 @@ def _window_metrics(equity: pd.DataFrame, trades: pd.DataFrame, *, max_hold: int
 
     # 「声明风险 vs 实际风险」的可审计性（D3）：有多少笔的股数其实是被
     # 量能/单名权重/heat/现金压下来的（即 declaration 与 realized 不一致）。
+    # 容量余量（D5/E4）：volume_cap/size = "当前单笔规模还能放大几倍才会撞到量能上限"。
+    # 这是"这套策略能装多少钱"唯一可读的答案；小于 1 表示已经被量能上限截断。
+    if "volume_cap" in trades.columns and (trades["size"] > 0).all():
+        hr = trades["volume_cap"].astype(float) / trades["size"].astype(float)
+        out["capacity_headroom_min"] = float(hr.min())
+        out["capacity_headroom_median"] = float(hr.median())
+
     # 止损穿价的分布（E2）：这是「按触发价成交」这条假定的**代价读数**。
     # 只统计盘中止损（sl）：跳空（sl_gap）按开盘价成交，谈不上"穿价"。
     if "sl_penetration" in trades.columns:

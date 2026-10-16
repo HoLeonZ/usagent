@@ -148,6 +148,14 @@ def run(args) -> dict:
               f"自相关 {dsr['autocorr_lag1']:+.3f},k={preset['n_comparisons']}) "
               f"= {dsr['deflated_sharpe']:.3f}  (p={dsr['dsr_p_value']:.3f})")
 
+    # 容量余量（D5/E4）："这套策略能装多少钱"此前在库里和报告里都没有读数。
+    _hr = res["metrics"].get("capacity_headroom_min")
+    if _hr is not None and np.isfinite(_hr):
+        print(f"容量余量: 最小 {_hr:,.0f}× / 中位 "
+              f"{res['metrics']['capacity_headroom_median']:,.0f}×"
+              f"（= 量能上限 ÷ 本单股数；<1 表示该笔已被 §4(a) 截断）"
+              f" ⇒ 当前资金规模下距量能上限还有 {_hr:,.0f} 倍空间")
+
     if ts["n"] and ts["n"] < 30:
         print(f"⚠️  样本仅 {ts['n']} 笔 —— 任何显著性结论都不可靠")
     if ts["n"] and _degenerate_r(tr):
