@@ -413,6 +413,8 @@ def simulate(
     # "最近一次已知收盘"重估的（陈价），此前没有任何读数 —— 于是"这只票到底停了多久"
     # 只能靠人肉看数据。累计位-日与占比进指标。
     stats_stale_days = 0
+    # §4(b) 部分成交（出场侧卖不完）的次数。入场侧的对应量是 sizing_cap="volume_cap"。
+    partial_exits = 0
 
     def mark_to_market(day: pd.Timestamp) -> float:
         """equity = cash + Σ qty × close。这是唯一正确的口径(见模块 docstring)。
@@ -435,7 +437,9 @@ def simulate(
     def close_position(pos: Position, day: pd.Timestamp, px: float, reason: str,
                        *, bar_lo: float | None = None, bar_hi: float | None = None,
                        bar_vol: float | None = None,
-                       sl_penetration: float | None = None) -> None:
+                       sl_penetration: float | None = None) -> bool:
+        """平仓。返回**是否真的成交了**（False = 这一根 bar 根本没法交易）。"""
+        nonlocal partial_exits          # §4(b) 部分成交计数（审计 E6）
         """平仓。`px` 是**触发价**,本函数负责把它变成成交价。
 
         三条纪律:
@@ -456,15 +460,32 @@ def simulate(
                     f"{pos.symbol} {day.date()} 触发价 {px:.6f} 落在该 bar 的 "
                     f"[{bar_lo}, {bar_hi}] 之外 —— 物理上不可能({reason})"
                 )
-        # §4(a) 量能上限:**与滑点无关**,是独立的一条要求。
+        # §4(a) 量能上限 + §4(b) **部分成交是合法状态**（审计 E6）。
+        #
+        # 此前的行为是**不对称**的：入场侧超量能就静默缩量（等于 IOC 撤单，现金留在账上），
+        # 出场侧却直接 fail-fast。而准则 §4(b) 说得很清楚:部分成交是合法状态,
+        # 未成交部分不许排队、也不许抛异常。出场侧的经营含义也不一样 ——
+        # 入场可以"decline"（少买点），出场**不能**（止损触发就是必须卖）。
+        # 所以出场侧的正确处置是:**卖掉能卖的，剩下的继续持有**，而不抛错。
+        # 零量 bar = 那天根本没有成交 ⇒ **不得造出成交**（与入场侧对称：
+        # 入场侧早有 `if not (o > 0) or not (bar_vol > 0): continue`）。
+        # 此前出场侧漏了这条：bar_vol=0 会让上面的量能上限分支整个被跳过，
+        # 于是"一根零量 bar"也能足额卖出 —— 实测用一条测试打出来的（E6 的邻居缺陷）。
+        if bar_vol is not None and (not np.isfinite(bar_vol) or bar_vol <= 0):
+            return False
+        exit_qty = pos.size
         if bar_vol is not None and np.isfinite(bar_vol) and bar_vol > 0:
             cap = int(np.floor(float(bar_vol) * max_participation))
             if pos.size > cap:
-                raise BrokerError(
-                    f"{pos.symbol} {day.date()} 要卖 {pos.size} 股 > 该 bar 量能上限 {cap} 股 —— "
-                    f"§4(a) 的 IOC 部分成交**未实现**(实测余量 24~127 倍,永不咬合);"
-                    f"此处 fail-fast 而不是给出一个足额的假成交({reason})"
-                )
+                if cap <= 0:
+                    # 这一根 bar 完全卖不动（停牌前的零量）—— 那不是"部分成交"，
+                    # 是物理上的"卖不掉"。这时**不造假的足额成交**，也不硬崩；
+                    # 由调用方按"当日无法出场"处理（顺延到下一根 bar）。
+                    raise BrokerError(
+                        f"{pos.symbol} {day.date()} 该 bar 量能上限为 0 股,"
+                        f"无法卖出任何一股（{reason}）—— 这不是部分成交,是卖不掉")
+                exit_qty = cap
+                partial_exits += 1
         fill_px = px
         # 卖出同样要跨价差：成交价再低半个价差（只在这笔建仓时估到的那个值）。
         # 放在滑点之前是等价位置 —— 两者都是"成交比触发差"这件成本。
@@ -480,46 +501,56 @@ def simulate(
                 )
             fill_px = px * (1.0 - atr_slip_scale * pos.atr_pct
                             * float(np.sqrt(pos.size / float(bar_vol))))
-        notional_exit = fill_px * pos.size
+        # ⚠️ 全部按 **exit_qty**（本次真正卖掉的股数）记账，而不是 pos.size ——
+        # 部分成交时剩下的股数继续持有（§4(b)），它们的分红与成本不能算进这一笔。
+        _frac = exit_qty / pos.size
+        div_out = pos.dividends * _frac
+        notional_exit = fill_px * exit_qty
         exit_fee = notional_exit * cost_half
-        entry_notional = pos.entry_price * pos.size
+        entry_notional = pos.entry_price * exit_qty
         entry_fee = entry_notional * cost_half
-        gross = (fill_px - pos.entry_price) * pos.size
+        gross = (fill_px - pos.entry_price) * exit_qty
         fees = entry_fee + exit_fee
         # 价差成本单独记账：入场侧付在更高的买入价上，出场侧付在更低的卖出价上。
         # 它已经体现在 gross 里，这里只是把它**显式化**供归因（不重复计费）。
-        spread_cost = pos.half_spread * pos.entry_price * pos.size \
-            + pos.half_spread * fill_px * pos.size
+        spread_cost = pos.half_spread * pos.entry_price * exit_qty \
+            + pos.half_spread * fill_px * exit_qty
         # 分红是这笔交易的**已实现收入**(§3(c)),必须进净盈亏。
-        net = gross + pos.dividends - fees
+        net = gross + div_out - fees
         cost_basis = entry_notional + entry_fee
         book.cash += notional_exit - exit_fee
         trades.append({
             "entry_date": pos.entry_date, "exit_date": day, "symbol": pos.symbol,
             "exit_reason": reason,
-            "entry_price": pos.entry_price, "exit_price": fill_px, "size": pos.size,
+            "entry_price": pos.entry_price, "exit_price": fill_px, "size": exit_qty,
             "exit_trigger": px,
             # bars_held 是**已走完**的 bar 数:入场当日盘中出场 → 0,持满 max_hold → max_hold。
             # 不要写 +1 —— 那会让 max_hold=18 的仓位报出 hold_days=19(实测踩过)。
             "hold_days": pos.bars_held,
-            "gross_pnl": gross, "dividends": pos.dividends, "fees": fees, "net_pnl": net,
+            "gross_pnl": gross, "dividends": div_out, "fees": fees, "net_pnl": net,
             "net_return": net / cost_basis if cost_basis > 0 else float("nan"),
             "atr_pct": pos.atr_pct,
             # 计划风险:入场时即固定(止损宽度 × 股数),与最终出场无关。
-            # E[R] = net_pnl / risk_amount —— 分母必须是计划风险,不能是事后结果
-            # (hiagent tail_objective 的原话)。
+            # 部分成交时按**卖出的股数**取比例 —— 否则一笔半仓出场的 R 会被系统性放大。
             "volume_cap": int(pos.volume_cap),
             "sl_penetration": (float("nan") if sl_penetration is None
                                else float(sl_penetration)),
             "sl_width": pos.sl_width, "tp_width": pos.tp_width,
-            "risk_amount": pos.sl_width * pos.entry_price * pos.size,
+            "risk_amount": pos.sl_width * pos.entry_price * exit_qty,
             "spread_cost": spread_cost,
             "sizing_cap": pos.sizing_cap,
-            "risk_frac": ((pos.sl_width * pos.entry_price * pos.size)
+            "risk_frac": ((pos.sl_width * pos.entry_price * exit_qty)
                           / pos.equity_at_entry if pos.equity_at_entry > 0
                           else float("nan")),
         })
+        if exit_qty < pos.size:
+            # §4(b)：剩下的继续持有 —— 不排队（下一次该出场时按当时的 bar 再判）、
+            # 也不抛异常。账本里剩下的股数连同它们未领的分红一起留下。
+            pos.size -= exit_qty
+            pos.dividends -= div_out
+            return True          # 部分成交：这次卖出成功，剩下的继续持有
         del book.positions[pos.symbol]
+        return True              # 全额成交
 
     for day in axis:
         # ---------- 0) 当日入场的账本快照(CLAUDE.md §2(d) Settlement Isolation)----------
@@ -790,10 +821,11 @@ def simulate(
                     stats_unliquidated += 1
                     continue
                 pos = book.positions[sym]
-                close_position(pos, exit_day, data[sym]["raw_close"][k2], "eod",
-                               bar_lo=data[sym]["raw_low"][k2],
-                               bar_hi=data[sym]["raw_high"][k2],
-                               bar_vol=data[sym]["volume"][k2])
+                if not close_position(pos, exit_day, data[sym]["raw_close"][k2], "eod",
+                                      bar_lo=data[sym]["raw_low"][k2],
+                                      bar_hi=data[sym]["raw_high"][k2],
+                                      bar_vol=data[sym]["volume"][k2]):
+                    stats_unliquidated += 1      # 零量 bar：没成交，仍算未清算
 
         eq_today = mark_to_market(day)
         prev_equity = eq_today            # 供**下一交易日**的入场定预算(§2(d) 快照)
@@ -828,6 +860,7 @@ def simulate(
     pos_days = int(equity["n_pos"].sum())
     metrics["stale_position_days"] = int(stats_stale_days)
     metrics["n_blocked_by_corr"] = int(stats_blocked_corr)
+    metrics["n_partial_exits"] = int(partial_exits)
     metrics["pct_position_days_stale"] = (stats_stale_days / pos_days) if pos_days else 0.0
     # 判据只有一条：窗口结束时账本里还剩不剩仓位。
     # 剩 ⇒ 权益口径含未实现浮盈、而交易口径只覆盖已平仓 ⇒ 两组数不同源。

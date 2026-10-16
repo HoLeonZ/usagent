@@ -893,13 +893,40 @@ def test_exit_trigger_must_be_inside_the_bar_even_with_slippage():
     assert t["exit_price"] <= FLAT
 
 
-def test_exit_over_the_volume_cap_fails_fast():
-    """出场量超过该 bar 的量能上限 ⇒ fail-fast,不静默按足额成交。
+def test_exit_over_the_volume_cap_partially_fills_and_keeps_the_rest():
+    """出场量超过该 bar 的量能上限 ⇒ **部分成交**，剩下的继续持有（审计 E6 / §4(b)）。
 
-    §4(a) 的 IOC-部分成交没有实现(实测 24~127 倍余量,永不咬合),所以这里把它变成
-    **显式边界**:一旦某个仓位真的大到卖不掉,立刻报错而不是给出一个假的足额成交。
+    准则 §4(b) 原文：部分成交是**合法状态**，未成交部分不许排队、也不许抛异常。
+    此前的实现是**不对称**的：入场侧超量就静默缩量（等于 IOC 撤单），出场侧却直接崩。
+    出场侧的经营含义不同 —— 入场可以"少买点"，出场（止损触发）是**必须卖**；
+    所以正确处置是"卖掉能卖的、剩下的继续持有"，而不是抛错。
     """
     panel = mk_panel(_sl_bars(exit_volume=5_000.0))     # 出场日 cap = 500 < size 1000
-    with pytest.raises(BrokerError, match="量能上限"):
-        simulate(BASE, mk_signal("2024-01-01"), panel,
+    r = simulate(BASE, mk_signal("2024-01-01"), panel,
                  start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    tr = r["trades"]
+    assert r["metrics"]["n_partial_exits"] >= 1
+    assert tr["size"].iloc[0] == 500, "只卖掉该 bar 能卖的量"
+    assert tr["size"].sum() <= 1000
+    # 剩下的必须还在账上（不是被丢掉，也不是被当成已出场）
+    assert r["equity"]["n_pos"].iloc[-1] >= 0
+    # 记账恒等式仍然成立（部分成交最容易在这里出错）
+    init = BASE["initial_cash"]
+    assert float(r["equity"]["equity"].iloc[-1]) == pytest.approx(
+        init + float(tr["net_pnl"].sum()), rel=1e-9)
+
+
+def test_a_zero_volume_bar_never_produces_a_fill():
+    """零量 bar ⇒ 那天根本没有成交 ⇒ **不得造出成交**（与入场侧对称）。
+
+    实测这条是 E6 的邻居缺陷：`bar_vol > 0` 的守卫会让量能上限分支整个被跳过，
+    于是"一根零量 bar"也能足额卖出。机构口径里这是不可能的行情 ——
+    要么数据有问题，要么那天没交易，两种情况下都不该凭空多出一笔成交。
+    """
+    panel = mk_panel(_sl_bars(exit_volume=0.0))
+    zero_days = set(panel.loc[panel["volume"] <= 0, "date"])
+    assert zero_days, "夹具里必须有零量 bar，否则这条测试是空的"
+    r = simulate(BASE, mk_signal("2024-01-01"), panel,
+                 start="2024-01-01", end="2024-02-10", cost_bps_roundtrip=0.0)
+    assert not (set(r["trades"]["exit_date"]) & zero_days), \
+        "零量 bar 上不该有任何成交（顺延到能成交的那一根，而不是凭空成交）"
