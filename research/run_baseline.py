@@ -20,7 +20,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from core.preset_contract import INDICATOR_PRICE_ADJUST
+from core.preset_contract import (INDICATOR_PRICE_ADJUST, describe_engine_spec,
+                                   spec_header)
 from research import broker, indicators, metrics, panel as panel_mod, presets, regime, signals
 from research.broker import trade_fingerprint
 from research.panel import data_vintage
@@ -124,8 +125,10 @@ def run(args) -> dict:
         sret.to_numpy(dtype=float), n_trials=preset["n_comparisons"],
         label=f"{args.preset} {lo}..{hi}")
 
-    print(f"\n=== {args.preset} | {lo} .. {hi} | cost {eff_cost}bp | "
-          f"价差 {eff_spread} ===")
+    print(f"\n=== {args.preset} | {lo} .. {hi} ===")
+    # 口径自报（审计 E5 及其同类）：数字是在什么成本/风险假设下产生的，必须由报告
+    # 自己说清 —— 否则读者只能去读 preset 源码，或者默认"没有价差、没有上限"。
+    print(f"生效口径: {spec_header(preset)}")
     print(f"信号 {len(sig)}  成交 {len(tr)}")
     print(f"总收益 {res['metrics']['total_return']*100:+.2f}%   CAGR {cg*100:+.2f}%"
           f"   基准等权 {bench_tot*100:+.2f}%   超额 {(res['metrics']['total_return']-bench_tot)*100:+.2f}pp")
@@ -152,6 +155,7 @@ def run(args) -> dict:
 
     out = {"preset": args.preset, "start": lo, "end": hi, "cost_bps": eff_cost,
            "spread_model": eff_spread,
+           "engine_spec": dict(describe_engine_spec(preset)),
            # 交易列表指纹(§6):让 CLI 的输出可以被 golden 基线逐一核对
            "trades_sha256": trade_fingerprint(tr),
            # 数据 vintage:让每个被报告的数字可追溯到一份具体的数据快照。

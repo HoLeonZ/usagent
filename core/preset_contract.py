@@ -103,6 +103,69 @@ METADATA_KEYS: frozenset[str] = frozenset({
 })
 
 
+# 每个引擎键在"口径头"里怎么显示（标签, 值格式化函数）。
+# ⚠️ 这张表必须**覆盖全部 ENGINE_KEYS** —— research/tests/test_contract.py 会断言
+# 这一点。加了一个新键却忘了写进这里，就等于又造出一个"报告里看不见的旋钮"，
+# 而那正是这一层要根除的东西（审计 E5：`atr_slip_scale=0` 可以合法地把两侧滑点
+# 静默关掉，读者从报告里看不出执行口径到底是什么）。
+SPEC_LABELS: dict[str, tuple[str, "callable"]] = {
+    "cost_bps_roundtrip": ("规费", lambda v: f"{float(v):g}bp 双边"),
+    "spread_model": ("价差", lambda v: "Corwin-Schultz 日线估计" if v == "corwin_schultz"
+                     else f"{v}（**未建模买卖价差**）"),
+    "atr_slip_scale": ("冲击滑点", lambda v: (f"{float(v):g}×ATR×√参与率"
+                        if float(v) > 0 else "**关闭**（两侧滑点均为 0）")),
+    "sl_overshoot": ("止损穿价", lambda v: (f"按触发价（θ=0，穿价仅记录）"
+                      if float(v) == 0 else f"θ={float(v):g} 向当日最低点靠")),
+    "max_volume_participation": ("量能上限", lambda v: f"单 bar {float(v):.0%}"),
+    "initial_cash": ("初始权益", lambda v: f"${float(v):,.0f}"),
+    "risk_per_trade": ("单笔风险预算", lambda v: ("—（走 position_fraction）"
+                        if v is None else f"{float(v):.2%} 权益")),
+    "position_fraction": ("单笔仓位", lambda v: f"{float(v):.0%} 可用现金"),
+    "max_positions": ("最大持仓", lambda v: f"{int(v)} 只"),
+    "max_weight": ("单名上限", lambda v: ("**未设**" if v is None else f"{float(v):.0%} 权益")),
+    "max_heat": ("组合热风险上限", lambda v: ("**未设**" if v is None else f"{float(v):.0%} 权益")),
+    "max_drawdown_halt": ("回撤停机", lambda v: ("**未设**" if v is None else f"{float(v):.0%}")),
+    "atr_sl_mult": ("止损宽度", lambda v: "—" if v is None else f"{float(v):g}×ATR"),
+    "atr_tp_mult": ("止盈宽度", lambda v: "—" if v is None else f"{float(v):g}×ATR"),
+    "sl_pct": ("止损宽度", lambda v: "—" if v is None else f"{float(v):.2%}"),
+    "tp_pct": ("止盈宽度", lambda v: "—" if v is None else f"{float(v):.2%}"),
+    "max_hold": ("最长持有", lambda v: f"{int(v)} 个交易日"),
+    "intraday_tiebreak": ("同 bar 双触发", lambda v: f"{v}（按最坏情况）"),
+    "trailing_sl": ("移动止损", lambda v: "开" if v else "关"),
+    "liquidate_at_end": ("窗口末尾", lambda v: ("按收盘清算（两组数同源）" if v
+                          else "**不清算**（头条含未实现、与 E[R] 不同源）")),
+}
+
+
+def describe_engine_spec(preset: dict) -> list[tuple[str, str]]:
+    """把生效的执行口径翻成 [(标签, 值)] —— **每个报告入口都打印同一份**。
+
+    存在的理由（审计 E5 及其同类）:报告只报数字，不报"这些数字是在什么成本/风险假设
+    下产生的"。读者要么去读 preset 源码，要么假设默认值 —— 而默认值恰好可能意味着
+    "价差没建模""滑点被关掉""组合层没有上限"。口径必须**自报**，而且只能有一份
+    （否则又是一次"两个入口两套口径"）。
+    """
+    spec = resolve(preset)
+    out: list[tuple[str, str]] = []
+    for k in ENGINE_KEYS:
+        if k not in SPEC_LABELS:
+            raise ValueError(f"引擎键 {k!r} 没有在 SPEC_LABELS 里登记 ⇒ 它会是报告里"
+                             f"看不见的旋钮。请补上标签与格式化。")
+        label, fmt = SPEC_LABELS[k]
+        v = spec.get(k)
+        if k in ("sl_pct", "tp_pct") and v is None:
+            continue                     # 与 atr_* 互斥，未用的那套不显示
+        if k in ("atr_sl_mult", "atr_tp_mult") and v is None:
+            continue
+        out.append((label, fmt(v)))
+    return out
+
+
+def spec_header(preset: dict) -> str:
+    """口径头的一行文本版（CLI 用；HTML 报告用 describe_engine_spec 自行排版）。"""
+    return " | ".join(f"{lab} {val}" for lab, val in describe_engine_spec(preset))
+
+
 def derived_position_sizing(preset: dict) -> str:
     """实际生效的仓位政策 —— 由**键**派生,不由声明字段决定。
 

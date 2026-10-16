@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from core.preset_contract import resolve
+from core.preset_contract import describe_engine_spec, resolve
 from research import (broker, indicators, metrics, panel as panel_mod, presets,
                       regime, signals)
 
@@ -391,6 +391,11 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     parts.append(f'<div class="sub">窗口 {e(summary["lo"])} → {e(summary["hi"])} ｜ '
                  f'成交 {len(trades)} 笔 ｜ {_slip},成本双边 '
                  f'{_spec["cost_bps_roundtrip"]:g}bp</div>')
+    # 口径自报（审计 E5 及其同类）：与 run_baseline / --json 用的是**同一个函数**，
+    # 所以两个入口不可能再各说一套。
+    _items = " ・ ".join(f"{e(lab)} <b>{e(val)}</b>"
+                         for lab, val in describe_engine_spec(_spec))
+    parts.append(f'<div class="sub" style="margin-top:-10px">生效口径：{_items}</div>')
     # 价格口径必须披露。2026-10-15 起是**双轨**(§3(b)):指标用复权价、成交与记账用
     # as-traded 价 —— 旧版这段写的是「回测用复权价是正确的」,在新语义下正好相反。
     parts.append('<div class="sub" style="margin-top:-10px;color:var(--warn)">'
