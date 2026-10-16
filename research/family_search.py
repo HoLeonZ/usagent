@@ -63,6 +63,7 @@ def pooled(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None,
     # ⚠️ 保留**按窗口对齐**的版本(None = 该窗无信号)。只留紧凑列表会让调用方
     #    (随机对照按窗口索引、基准取平均)错位 —— 实测在 lhr(3/4 窗无信号)上越界崩过。
     by_win: list[float | None] = []
+    per_win_rets: list[tuple[tuple[str, str], list[float]]] = []
     for lo, hi in windows_:
         sig = (F.select(ind, family_id, fparams or {}, lo, hi, reg=reg)
                if family_id is not None else None)
@@ -71,6 +72,8 @@ def pooled(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None,
         # (与 uptrend-pullback 用的同一把尺)。没有它,「买被打下去的票」在牛市里跑出的
         # 高 CAGR 会被误读成选股能力。
         bench.append(_bench_cagr(reg, lo, hi))
+        if r.get("daily_ret") is not None:
+            per_win_rets.append(((lo, hi), r["daily_ret"]))
         if r["cagr"] is None:
             no_sig += 1
             tcounts.append(0)
@@ -85,7 +88,8 @@ def pooled(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None,
         tcounts.append(r["trades"])
     out = {"n_windows": len(windows_), "n_no_signals": no_sig, "trades_per_window": tcounts,
            "n_trades": int(sum(tcounts)), "n_bench": len(bench),
-           "cagrs_by_window": by_win}
+           "cagrs_by_window": by_win,
+           "pooled_daily_ret": metrics.pool_windows_rets(per_win_rets)}
     if not cagrs:
         out.update({"mean_cagr": None, "worst_dd": None, "mean_dd": None,
                     "mean_sharpe": None, "mean_e_r": None, "cagrs": [],
@@ -280,10 +284,19 @@ def report_family(ind, reg, family_id: str, train, test, *,
     win90 = sum(1 for x in pcts if x >= 90)
     print(f"  随机对照:≥中位 {win50}/{len(pcts)} 窗   ≥p90 {win90}/{len(pcts)} 窗"
           f"(后者是**描述性**披露:合成复核指出按中位口径 ④ 形同虚设,但判据不事后退让)")
-    dsr = metrics.deflated_sharpe_ratio(te["mean_sharpe"], n_trials=max(N_TRIALS["n"], 1),
-                                        n_returns=max(2, te["n_trades"]))
-    print(f"  DSR(Sharpe {te['mean_sharpe']:+.2f}, k={N_TRIALS['n']}) = "
-          f"{dsr['deflated_sharpe']:.3f}")
+    # DSR 从**一条收益序列**算（审计 B3）：此前的口径是"逐窗 Sharpe 的均值 +
+    # 成交笔数当 T"，那不是任何一条序列的 DSR。拿不到可拼接序列就不报。
+    _rets = te.get("pooled_daily_ret")
+    if _rets:
+        dsr = metrics.deflated_sharpe_from_returns(
+            _rets, n_trials=max(N_TRIALS["n"], 1), label=f"{family_id} 测试期拼接")
+        print(f"  DSR({dsr['n_returns']} 个日收益,年化 Sharpe {dsr['observed_sharpe']:+.2f},"
+              f"偏度 {dsr['skewness']:+.2f},峰度 {dsr['kurtosis']:.1f},k={N_TRIALS['n']}) = "
+              f"{dsr['deflated_sharpe']:.3f}")
+    else:
+        dsr = {"deflated_sharpe": float("nan"), "n_trials": max(N_TRIALS["n"], 1),
+               "reason": "no_poolable_returns"}
+        print("  DSR：**不报** —— 无可拼接的收益序列（窗口重叠或全窗无信号）")
     return {"family_id": family_id, "family_params": fb, "exit": ex, "overlay": ov,
             "overlay_cont": ov_cont,
             "train": tr, "test": te, "continuous": cont, "null_pcts": pcts,

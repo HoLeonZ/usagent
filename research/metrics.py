@@ -17,10 +17,13 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 TRADING_DAYS = 252
 
@@ -218,10 +221,105 @@ def bonferroni_t_threshold(family_size: int, alpha: float = 0.05) -> float:
 
 def sharpe_significance_pvalue(observed_sharpe: float, n_returns: int,
                                trading_days_per_year: int = TRADING_DAYS) -> float:
+    """年化 Sharpe 的显著性 p 值（**双侧**意义上的一次比较）。
+
+    ⚠️ 单位一致性：传入的是**年化** Sharpe，而标准误是**逐期**的 1/√(T−1)，
+    所以必须先把它换算成逐期 Sharpe 再比 —— 这正是 DSR 那次踩过的坑
+    （见 deflated_sharpe_ratio 的注释）。先前的实现直接拿年化值去除逐期标准误，
+    会把 p 值系统性压低（等于凭空放大显著性）。
+    """
     if n_returns < 2:
         return float("nan")
+    sr_period = float(observed_sharpe) / math.sqrt(trading_days_per_year)
     se = 1.0 / math.sqrt(n_returns - 1)
-    return 1.0 - _norm_cdf(observed_sharpe / se)
+    return 1.0 - _norm_cdf(sr_period / se)
+
+
+# ---------------------------------------------------------------- 从收益序列出发的口径
+
+def annualized_sharpe(rets, periods_per_year: int = TRADING_DAYS) -> float:
+    """一条收益序列的年化 Sharpe（逐期均值/标准差 × √ppy）。"""
+    r = np.asarray(rets, dtype=float)
+    r = r[np.isfinite(r)]
+    if r.size < 2:
+        return float("nan")
+    sd = float(np.std(r, ddof=1))
+    if not (sd > 0):
+        return float("nan")
+    return float(np.mean(r) / sd * math.sqrt(periods_per_year))
+
+
+def pool_windows_rets(per_window: list[tuple[tuple[str, str], list[float]]]
+                      ) -> list[float] | None:
+    """把逐窗口的收益序列**拼接**成一条（用于在 pooled 口径上算 DSR）。
+
+    只在窗口**互不重叠**时才允许拼接：重叠窗口会把同一段行情算两次，
+    拼出来的"一条序列"比真实观测数长、自相关被人为抬高。不能拼就返回 None
+    （调用方据此**不报** DSR，而不是拿一个拼不出来的数去报）。
+
+    输入: [((lo, hi), [ret, ...]), ...]
+    """
+    ws = sorted(((str(a)[:10], str(b)[:10]), list(r)) for (a, b), r in per_window)
+    for i in range(len(ws) - 1):
+        if ws[i][0][1] > ws[i + 1][0][0]:
+            logger.warning("窗口 %s 与 %s 重叠 ⇒ 不拼接收益序列（不报 DSR）",
+                           ws[i][0], ws[i + 1][0])
+            return None
+    out: list[float] = []
+    for _, r in ws:
+        out.extend(float(x) for x in r)
+    return out
+
+
+def deflated_sharpe_from_returns(rets, n_trials: int, *,
+                                 periods_per_year: int = TRADING_DAYS,
+                                 label: str = "") -> dict:
+    """**从收益序列出发的 DSR —— 本项目唯一被认可的口径**。
+
+    为什么必须有这一层（2026-10-17 审计 B3）:`deflated_sharpe_ratio` 需要四个量
+    ——观测数 T、偏度、峰度、一阶自相关——而四个调用点各传各的：`run_baseline` 传
+    交易日数、`family_search`/`wfv_search` 传**成交笔数**、`factor_probe` 传**月数**，
+    且**没有任何一处**传过偏度/峰度（非正态修正恒为默认值 ⇒ 惰性）。
+    同一个函数在两个入口得到两种口径的数字，而这个数字是用来做判据的。
+
+    这里把所有派生量都从**同一条收益序列**算出来，调用方只能提供序列与试验次数，
+    于是"T 是什么"在类型层面就不再是一个可以各说各话的问题。
+
+    `periods_per_year` 与序列频率必须一致（日线 252、月线 12）——
+    传错的后果是 Sharpe 被换算错一次，而 DSR 恰好对此很敏感。
+    """
+    r = np.asarray(rets, dtype=float)
+    r = r[np.isfinite(r)]
+    n = int(r.size)
+    if n < 3:
+        return {"observed_sharpe": float("nan"), "expected_max_sharpe": float("nan"),
+                "deflated_sharpe": float("nan"), "dsr_p_value": float("nan"),
+                "n_returns": n, "n_trials": int(n_trials), "label": label,
+                "reason": "样本不足（<3 个收益观测）"}
+    mu = float(np.mean(r))
+    sd = float(np.std(r, ddof=1))
+    if not (sd > 0):
+        return {"observed_sharpe": float("nan"), "expected_max_sharpe": float("nan"),
+                "deflated_sharpe": float("nan"), "dsr_p_value": float("nan"),
+                "n_returns": n, "n_trials": int(n_trials), "label": label,
+                "reason": "收益序列方差为 0"}
+    z = (r - mu) / sd
+    skew = float(np.mean(z ** 3))
+    kurt = float(np.mean(z ** 4))                     # 非超额峰度：正态 = 3
+    if n > 2:
+        x, y = r[:-1], r[1:]
+        sx, sy = float(np.std(x, ddof=1)), float(np.std(y, ddof=1))
+        ac = (float(np.corrcoef(x, y)[0, 1]) if sx > 0 and sy > 0 else 0.0)
+    else:
+        ac = 0.0
+    out = deflated_sharpe_ratio(annualized_sharpe(r, periods_per_year),
+                               n_trials=n_trials, skewness=skew, kurtosis=kurt,
+                               autocorr_lag1=ac, n_returns=n,
+                               trading_days_per_year=periods_per_year)
+    out.update({"n_returns": n, "skewness": skew, "kurtosis": kurt,
+                "autocorr_lag1": ac, "periods_per_year": int(periods_per_year),
+                "label": label})
+    return out
 
 
 # ---------------------------------------------------------------- beta 归因

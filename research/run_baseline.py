@@ -118,9 +118,11 @@ def run(args) -> dict:
     bret = idx.pct_change().reindex(eq["date"]).dropna()
     ba = metrics.beta_attribution(sret, bret, eq.set_index("date")["exposure"])
 
-    dsr = metrics.deflated_sharpe_ratio(
-        res["metrics"]["sharpe"], n_trials=preset["n_comparisons"],
-        n_returns=len(eq))
+    # DSR 从**收益序列**算（审计 B3）：T/偏度/峰度/自相关全部由序列派生，
+    # 调用方只能给序列与试验次数 ⇒ "T 是什么"不再是一个可以各说各话的问题。
+    dsr = metrics.deflated_sharpe_from_returns(
+        sret.to_numpy(dtype=float), n_trials=preset["n_comparisons"],
+        label=f"{args.preset} {lo}..{hi}")
 
     print(f"\n=== {args.preset} | {lo} .. {hi} | cost {eff_cost}bp | "
           f"价差 {eff_spread} ===")
@@ -135,8 +137,13 @@ def run(args) -> dict:
           f"  max_hold {res['metrics']['time_count']}  平均持有 {res['metrics']['avg_hold_days']:.2f} 天")
     print(f"beta {ba['beta']:+.2f}  alpha年化 {ba['alpha_annual']*100:+.1f}% (t={ba['t_alpha']:+.2f})"
           f"  在场天数 {ba['pct_days_exposed']*100:.0f}%  在场日基准 {ba['bench_on_exposed_days']*100:+.1f}%")
-    print(f"DSR(obs Sharp {res['metrics']['sharpe']:.2f}, k={preset['n_comparisons']}) "
-          f"= {dsr['deflated_sharpe']:.3f}  (p={dsr['dsr_p_value']:.3f})")
+    if dsr.get("reason"):
+        print(f"DSR：**不报**（{dsr['reason']}）")
+    else:
+        print(f"DSR({dsr['n_returns']} 个日收益,年化 Sharpe {dsr['observed_sharpe']:+.2f},"
+              f"偏度 {dsr['skewness']:+.2f},峰度 {dsr['kurtosis']:.1f},"
+              f"自相关 {dsr['autocorr_lag1']:+.3f},k={preset['n_comparisons']}) "
+              f"= {dsr['deflated_sharpe']:.3f}  (p={dsr['dsr_p_value']:.3f})")
 
     if ts["n"] and ts["n"] < 30:
         print(f"⚠️  样本仅 {ts['n']} 笔 —— 任何显著性结论都不可靠")

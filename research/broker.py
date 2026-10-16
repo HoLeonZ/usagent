@@ -34,6 +34,7 @@ import weakref
 from core import costs
 from core import spread as spread_mod
 from core.preset_contract import resolve
+from research import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -747,11 +748,13 @@ def _window_metrics(equity: pd.DataFrame, trades: pd.DataFrame, *, max_hold: int
     if not np.all(np.isfinite(e)) or np.any(e <= 0):
         raise BrokerError("权益曲线含非有限值或非正值 —— 记账错了")
 
-    ret = equity["equity"].pct_change().fillna(0.0).to_numpy(dtype=float)
+    # Sharpe 只有一份定义（research.metrics.annualized_sharpe）—— 此前 broker 自己
+    # 又写了一遍（`pct_change().fillna(0)` + √252），与 DSR 里那条序列算出来的
+    # 不是同一个数（首日那个填出来的 0 让 n 差 1、均值被稀释）。同一份报告里
+    # 两个 Sharpe 并列是"同指标两口径"的老毛病，这里收成一处。
+    ret = equity["equity"].pct_change().dropna().to_numpy(dtype=float)
     total_return = e[-1] / e[0] - 1.0
-    std = float(np.std(ret, ddof=1)) if len(ret) > 1 else float("nan")
-    sharpe = (float(np.mean(ret)) / std * np.sqrt(252)
-              if std and np.isfinite(std) and std > 1e-12 else float("nan"))
+    sharpe = metrics.annualized_sharpe(ret, metrics.TRADING_DAYS)
     peak = np.maximum.accumulate(e)
     max_dd = float(np.min(e / peak - 1.0))
 

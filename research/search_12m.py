@@ -124,6 +124,8 @@ def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
 
     eq, tr = res["equity"], res["trades"]
     cagr = metrics.cagr(eq["equity"], eq["date"])
+    # 逐日收益（供 pooled 口径算 DSR：DSR 需要一条**收益序列**，而不是逐窗 Sharpe 的均值）
+    daily_ret = eq["equity"].pct_change().fillna(0.0).astype(float).tolist()
     ts = metrics.tail_stats(tr) if len(tr) else {"expectancy_r": float("nan")}
     return {
         "cagr": float(cagr), "trades": int(len(tr)),
@@ -135,6 +137,7 @@ def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
         "win": float(res["metrics"].get("win_rate", float("nan"))),
         "e_r": float(ts.get("expectancy_r", float("nan"))),
         "exposure": float(res["metrics"]["avg_exposure"]),
+        "daily_ret": daily_ret,
         "reason": "ok", "cfg": cfg,
     }
 

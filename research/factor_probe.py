@@ -384,11 +384,14 @@ def main(argv=None) -> int:
               f"|  最好的组合 {best[0]} 毛 {best[1]['gross']['cagr']*100:+.2f}%  "
               f"净 {best[1]['net']['cagr']*100:+.2f}%")
         try:
-            dsr = metrics.deflated_sharpe_ratio(best[1]["net"]["sharpe"],
-                                                n_trials=n_trials + 1614,
-                                                n_returns=max(2, best[1]["months"]))
-            print(f"【选择偏差】最好组合 Sharpe {best[1]['net']['sharpe']:+.2f},"
-                  f"k={n_trials + 1614}(含前几轮的 1614)⇒ DSR {dsr['deflated_sharpe']:.3f}")
+            # 月度净收益序列 ⇒ periods_per_year=12（此前把月频 Sharpe 除以 √252，
+            # 又把月数当 T —— 两处单位都不一致，审计 B3）
+            dsr = metrics.deflated_sharpe_from_returns(
+                best[1]["net_rets"], n_trials=n_trials + 1614, periods_per_year=12,
+                label="factor_probe 月度净收益")
+            print(f"【选择偏差】最好组合月频 Sharpe {dsr['observed_sharpe']:+.2f}"
+                  f"（{dsr['n_returns']} 个月）,k={n_trials + 1614}(含前几轮的 1614)"
+                  f"⇒ DSR {dsr['deflated_sharpe']:.3f}")
         except Exception as e:                                          # noqa: BLE001
             print(f"【选择偏差】DSR 跳过:{e}")
     print(f"\nn_trials = {n_trials}(本文件) + 1614(前几轮搜索)")
