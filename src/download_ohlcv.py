@@ -64,17 +64,27 @@ def _frames_from_batch(raw: pd.DataFrame, batch: list[str]) -> list[tuple[str, p
     return out
 
 
-# 物理上不可能的行计数（OHLC 自洽性）。落库前拦掉，而不是让它们污染面板。
-_IMPOSSIBLE = {"ohlc": 0}
+# OHLC 自洽性修复计数。见 _to_rows 的说明。
+_REPAIRED = {"ohlc": 0}
 
 
 def _to_rows(sym: str, df: pd.DataFrame, now: str, source: str) -> list[tuple]:
     """把一只标的的 DataFrame 转成待写入的行。
 
-    ⚠️ **物理上不可能的行不落库**（§0：宁可拒收，也不要往库里落不可能的价）。
-    实测：本数据源有 470 行满足 `close ∉ [low, high]`，且全部集中在**最后一根 bar**
-    （vendor 当日快照未定型/收盘口径不一致）。这类行一旦入库，会污染该日的
-    ret1/ATR/触发判定 —— 而它们在物理上根本不可能发生。
+    **OHLC 自洽性修复**（实测 2026-10-17）：全量下载后 470 行的 `close` 落在
+    [low, high] 之外，**全部集中在最后一根 bar**，两个方向都有（406 行 close<low、
+    64 行 close>high），幅度 ≤0.77%，而 `open` 从不越界 ⇒ 是 vendor **最后一根 bar 的
+    收盘字段与它自己的 high/low 不同源**（历史 bar 是"已结算"的一套，最新 bar 混了源）。
+
+    处置的取舍（两条路都比"原样入库"好，但只能选一条）：
+      * 拒收该行 ⇒ 丢掉一个**真实观测到的收盘价**，那只票在最后一天凭空少一根 bar；
+      * **把区间撑开到包含 close**（本实现）⇒ 保留真实收盘价，high/low 变成
+        "观测区间 ∪ {close}"，不凭空造任何价格水平；而且方向保守
+        （区间只会变宽 ⇒ 止损只会更容易触发，不会更难）。
+
+    所以取后者，并计数、打日志。之所以**不能原样入库**：`close ∉ [low, high]`
+    会让引擎里"触发价必须落在该 bar 区间内"的不变量直接 fail-fast（§0），
+    也就是把一条数据缺陷升级成回测崩溃。
     """
     df = df.rename(columns=FIELDS)
     if "close" not in df.columns:
@@ -85,11 +95,13 @@ def _to_rows(sym: str, df: pd.DataFrame, now: str, source: str) -> list[tuple]:
         d = ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10]
         o, h, lo, c = _f(r.get("open")), _f(r.get("high")), _f(r.get("low")), _f(r.get("close"))
         if None not in (o, h, lo, c) and (h < max(o, c) - 1e-4 or lo > min(o, c) + 1e-4):
-            _IMPOSSIBLE["ohlc"] += 1
-            continue                       # 不可能的 OHLC：拒收（走日志，不静默计数）
+            # 撑开区间以包含 close（含 open，虽然实测它从不越界）
+            h = max(h, o, c)
+            lo = min(lo, o, c)
+            _REPAIRED["ohlc"] += 1
         rows.append((
             sym, d,
-            _f(r.get("open")), _f(r.get("high")), _f(r.get("low")), _f(r.get("close")),
+            o, h, lo, c,
             _f(r.get("volume")), _f(r.get("dividends"), 0.0), _f(r.get("splits"), 0.0),
             now, source,
         ))
@@ -129,9 +141,6 @@ def restated_dates(stored: dict[str, float], fresh: dict[str, float],
     """重叠日期上「新取的 close」与「已落盘的 close」不一致 ⇒ 厂商重述过这段历史。
 
     返回 [(date, 旧值, 新值)]（按日期升序）。纯函数 —— 判定逻辑与 IO 分开，便于测试。
-
-    只比**重叠**日期：不在旧集合里的日期是无从谈起"变化"的新行；旧值为空或非正的行
-    也不参与（没有可比基准）。
     """
     out: list[tuple[str, float, float]] = []
     for d, new in fresh.items():
@@ -147,11 +156,8 @@ def repair_symbol(con, sym: str, start: date, end: date, now: str, run_id: str) 
     """**整段重下并重写**一只标的 —— 厂商重述后的唯一正确反应。
 
     为什么不能局部修补：重述影响的是当前增量窗口**之外**的更早历史（拆股日之前的
-    全部行）。只见窗口的行就只能把断层从窗口左边界挪到别处，问题依旧存在。
-    整段重下之后，该标的的整条序列来自**同一个 vintage** —— 这才是要钉住的不变量。
-
-    代价是这只标的一次全量请求；触发条件是"厂商真的改了历史"，所以它的频率等于
-    拆股/修错价的频率，不会成为常态开销。
+    全部行）。只见窗口的行就只能把断层从窗口左边界挪到别处。整段重下之后，
+    该标的的整条序列来自**同一个 vintage** —— 这才是要钉住的不变量。
     """
     raw, _bad = fetch_with_split([sym], start, end)
     frames = _frames_from_batch(raw, [sym]) if raw is not None else []
@@ -181,7 +187,7 @@ def write_symbol(con, sym: str, df: pd.DataFrame, now: str, run_id: str
 
 
 # 取数源。两源的**价格口径相同**（都已拆股复权、未分红复权），差别在事件来源：
-#   yahoo          —— Close + 显式的 dividends/splits 两列（本库原来的唯一路径）
+#   yahoo          —— Close + 显式的 dividends/splits 两列
 #   stockanalysis  —— Close + 由 (a,c) **反解**的分红；拆股事件不可观测（见该模块 docstring）
 # 限流语义两源共用（vendor 抛的也是 yfutil.RateLimited），所以上游的
 # "限流不拆批 / 中止本轮"决策路径对两个源完全一致。
@@ -306,7 +312,8 @@ def download(universe_name: str, limit: int | None, skip_covered: bool,
     db.init()
     total = 0
     # 逐只状态计数：返回给 main() 决定 exit code，并让「这轮到底成不成」在日志里可读。
-    stats = {"ok": 0, "empty": 0, "error": 0, "restated": 0, "repaired": 0, "rows": 0}
+    stats = {"ok": 0, "empty": 0, "error": 0, "restated": 0, "repaired": 0,
+             "repaired_ohlc": 0, "rows": 0}
     with db.session() as con:
         # 增量模式必须刷所有标的；全量模式才跳过已覆盖的
         if skip_covered and recent_days is None:
@@ -355,15 +362,15 @@ def download(universe_name: str, limit: int | None, skip_covered: bool,
             time.sleep(0.4)
 
     stats["rows"] = total
-    stats["impossible_ohlc"] = _IMPOSSIBLE["ohlc"]
-    if _IMPOSSIBLE["ohlc"]:
-        log.warning("拒收 %d 行不可能的 OHLC（close 落在 [low, high] 之外）—— "
-                    "vendor 当日快照未定型是已知成因，下一轮增量刷新会重取",
-                    _IMPOSSIBLE["ohlc"])
+    stats["repaired_ohlc"] = _REPAIRED["ohlc"]
+    if _REPAIRED["ohlc"]:
+        log.warning("修复 %d 行不自洽的 OHLC（close 落在 [low, high] 之外，已把区间"
+                    "撑开到包含 close）—— vendor 最后一根 bar 的收盘与 high/low 不同源",
+                    _REPAIRED["ohlc"])
     log.info("完成，写入 %d 行（成功 %d 只 / 失败 %d 只 / 无数据 %d 只 / "
-             "重述 %d 只→已整段重写 %d 只 / 拒收 %d 行）",
+             "重述 %d 只→已整段重写 %d 只 / OHLC 修复 %d 行）",
              total, stats["ok"], stats["error"], stats["empty"],
-             stats["restated"], stats["repaired"], stats["impossible_ohlc"])
+             stats["restated"], stats["repaired"], stats["repaired_ohlc"])
     return stats
 
 

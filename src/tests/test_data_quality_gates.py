@@ -87,24 +87,47 @@ def test_rows_carry_the_source():
 
 # ---------------------------------------------------------------- 物理上不可能的价
 
-def test_impossible_ohlc_is_rejected_not_stored():
-    """`close` 落在 [low, high] 之外是物理上不可能的（实测 470 行，全在最后一根 bar）。"""
-    before = D._IMPOSSIBLE["ohlc"]
-    bad = pd.DataFrame({"Open": [348.28], "High": [350.66], "Low": [343.13],
-                        "Close": [343.01], "Volume": [1e6], "Dividends": [0.0],
-                        "Stock Splits": [0.0]}, index=pd.DatetimeIndex(["2026-10-16"]))
-    assert D._to_rows("GOOGL", bad, "now", "stockanalysis") == []
-    assert D._IMPOSSIBLE["ohlc"] == before + 1
-    good = bad.assign(High=[352.0], Low=[342.0])   # 同时修 low（它原先 > close）
-    assert len(D._to_rows("GOOGL", good, "now", "stockanalysis")) == 1
+def test_inconsistent_ohlc_is_repaired_by_widening_the_range():
+    """`close ∉ [low, high]`（实测 470 行，全在最后一根 bar，两个方向都有）。
+
+    处置是**撑开区间**而不是拒收：拒收会丢掉一个真实观测到的收盘价，
+    而撑开既不丢数据、也不凭空造价格水平，且方向保守（区间只会变宽）。
+    原样入库是不行的 —— 它会让引擎"触发价必须落在 bar 区间内"的不变量 fail-fast。
+    """
+    before = D._REPAIRED["ohlc"]
+    below = pd.DataFrame({"Open": [348.28], "High": [350.66], "Low": [343.13],
+                          "Close": [343.01], "Volume": [1e6], "Dividends": [0.0],
+                          "Stock Splits": [0.0]}, index=pd.DatetimeIndex(["2026-10-16"]))
+    row = D._to_rows("GOOGL", below, "now", "stockanalysis")[0]
+    o, h, lo, c = row[2], row[3], row[4], row[5]
+    assert c == pytest.approx(343.01), "真实收盘价必须保住"
+    assert lo <= min(o, c) and h >= max(o, c), "区间必须自洽"
+    assert lo == pytest.approx(343.01), "只把区间撑到包含 close，不多撑"
+
+    above = below.assign(Close=[351.5])
+    row2 = D._to_rows("GOOGL", above, "now", "stockanalysis")[0]
+    assert row2[3] == pytest.approx(351.5), "上方越界时撑 high"
+    assert D._REPAIRED["ohlc"] == before + 2
 
 
-def test_boundary_tolerance_does_not_reject_valid_rows():
-    """浮点误差级的越界（1e-5）不得被误拒 —— 拒收判据必须带容差。"""
+def test_consistent_rows_are_untouched():
+    before = D._REPAIRED["ohlc"]
+    df = pd.DataFrame({"Open": [1.0], "High": [1.1], "Low": [0.9], "Close": [1.0],
+                       "Volume": [10.0], "Dividends": [0.0], "Stock Splits": [0.0]},
+                      index=pd.DatetimeIndex(["2024-01-02"]))
+    row = D._to_rows("AAA", df, "now", "yahoo")[0]
+    assert (row[2], row[3], row[4], row[5]) == (1.0, 1.1, 0.9, 1.0)
+    assert D._REPAIRED["ohlc"] == before, "自洽的行不得被改动"
+
+
+def test_boundary_tolerance_does_not_touch_valid_rows():
+    """浮点误差级的越界（1e-5）不算不自洽 —— 判据必须带容差，否则会把好数据改掉。"""
+    before = D._REPAIRED["ohlc"]
     df = pd.DataFrame({"Open": [1.0], "High": [1.0 + 5e-5], "Low": [0.9],
                        "Close": [1.00001], "Volume": [10.0], "Dividends": [0.0],
                        "Stock Splits": [0.0]}, index=pd.DatetimeIndex(["2024-01-02"]))
     assert len(D._to_rows("AAA", df, "now", "yahoo")) == 1
+    assert D._REPAIRED["ohlc"] == before
 
 
 # ---------------------------------------------------------------- 说不清真伪的跳变
