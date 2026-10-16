@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from core.preset_contract import describe_engine_spec, resolve
+from core.preset_contract import describe_engine_spec, exit_scheme, resolve
 from research import (broker, indicators, metrics, panel as panel_mod, presets,
                       regime, signals)
 
@@ -609,11 +609,18 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
     # 对照配置:从**已解析的 broker preset** 反推,保证对照与策略同杠杆同止损止盈。
     # (search_12m.make_preset 读的是 sl_mult/tp_mult 这套键名,broker preset 用的是
     #  atr_sl_mult/atr_tp_mult —— 名字不同,值必须一致,否则对照就不成立。)
+    # ⚠️ 按 preset **实际用的那套几何**建对照（审计 G5）：契约允许 ATR 归一化或
+    # 固定百分比两套，而这里此前直接读 `preset["atr_sl_mult"]` —— 一个合法的
+    # pct preset 会让它 KeyError。用 `exit_scheme()` 显式分支，两套都支持。
+    _scheme = exit_scheme(preset)
     cfg = {
-        "sl_mult": preset["atr_sl_mult"], "tp_mult": preset["atr_tp_mult"],
         "max_hold": preset["max_hold"], "max_positions": preset["max_positions"],
         "risk_per_trade": preset["risk_per_trade"],
     }
+    if _scheme == "atr":
+        cfg.update({"sl_mult": preset["atr_sl_mult"], "tp_mult": preset["atr_tp_mult"]})
+    else:
+        cfg.update({"sl_pct": preset["sl_pct"], "tp_pct": preset["tp_pct"]})
     if control_runs > 0:
         # 必须把 reg 传进去:对照要在**策略自己的机会集**里抽(含 regime 门),
         # 否则比的是两个不同的池子(见 search_12m._control_pool)。

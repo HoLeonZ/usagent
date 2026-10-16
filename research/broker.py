@@ -166,16 +166,20 @@ class _Book:
 # **弱引用 + 身份比较**:面板一被回收,弱引用变 None,缓存自动失效,不可能命中错的面板。
 # 效果(实测):一次 pooled 调用从 1.43s 降到 ~0.05s(425k 行的 groupby+取数组是纯重复劳动,
 # 而搜索里同一份面板要被用几千次)。
-_BAR_INDEX_CACHE: list[tuple[weakref.ref, tuple, tuple]] = []
+# ⚠️ 缓存项就是 (弱引用, 值) —— **没有 key 槽**（审计 G6）。
+# 此前是 (弱引用, key=(), 值) 三元组，而那个 key **恒为空元组、从不参与比较**：
+# 它看起来像"按 key 校验"，实际只按对象身份命中。留着它比删掉更坏 —— 下一个读者会
+# 以为缓存有失效逻辑（比如按面板内容变化失效），从而在别处依赖一个不存在的保证。
+# 身份比较本身就是正确的机制：面板一次载入、进程内不变。
+_BAR_INDEX_CACHE: list[tuple[weakref.ref, tuple]] = []
 
 
 def _bar_index_cached(panel: pd.DataFrame):
-    for ref, key, val in _BAR_INDEX_CACHE:
+    for ref, val in _BAR_INDEX_CACHE:
         if ref() is panel:
             return val
     val = _bar_index(panel)
-    key = ()
-    _BAR_INDEX_CACHE.insert(0, (weakref.ref(panel), key, val))
+    _BAR_INDEX_CACHE.insert(0, (weakref.ref(panel), val))
     del _BAR_INDEX_CACHE[4:]                     # 只留最近 4 个面板
     return val
 

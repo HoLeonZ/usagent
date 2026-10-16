@@ -181,6 +181,22 @@ def spec_header(preset: dict) -> str:
     return " | ".join(f"{lab} {val}" for lab, val in describe_engine_spec(preset))
 
 
+def exit_scheme(preset: dict) -> str:
+    """这份 preset 用的是哪套退出几何：`"atr"`（ATR 归一化）还是 `"pct"`（固定百分比）。
+
+    为什么要有一个函数（审计 G5）：契约**允许**两套（`validate` 强制恰好一套），
+    但下游有些地方**只认 ATR 那套**（`render_report` 直接读 `preset["atr_sl_mult"]`
+    ⇒ 一个合法的 pct preset 会让它 KeyError）。把"哪一套"变成显式查询之后，
+    下游就不可能再默默假设只有一套。
+    """
+    spec = resolve(preset)
+    if spec["atr_sl_mult"] is not None:
+        return "atr"
+    if spec["sl_pct"] is not None:
+        return "pct"
+    raise ValueError("preset 的退出几何既不是 atr_* 也不是 pct_* —— 契约校验漏了")
+
+
 def derived_position_sizing(preset: dict) -> str:
     """实际生效的仓位政策 —— 由**键**派生,不由声明字段决定。
 

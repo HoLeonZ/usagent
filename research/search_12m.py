@@ -71,10 +71,17 @@ class SearchError(RuntimeError):
 
 
 def make_preset(cfg: dict) -> dict:
-    """把搜索配置翻成 broker 能吃的 preset。"""
-    return {
-        "atr_sl_mult": cfg.get("sl_mult", BASE_EXIT["sl_mult"]),
-        "atr_tp_mult": cfg.get("tp_mult", BASE_EXIT["tp_mult"]),
+    """把搜索配置翻成 broker 能吃的 preset。
+
+    ⚠️ 退出几何两套都要支持（审计 G5）：契约允许 `atr_sl_mult/atr_tp_mult` 或
+    `sl_pct/tp_pct`（恰好一套），而这里此前**只认 ATR 那套** —— 于是"运气对照"
+    对一个合法的 pct preset 直接 KeyError。cfg 里给了 `sl_pct`/`tp_pct` 就走百分比那套，
+    两套同时给 ⇒ fail-fast（不许猜）。
+    """
+    _pct = ("sl_pct" in cfg) or ("tp_pct" in cfg)
+    if _pct and (("sl_mult" in cfg) or ("tp_mult" in cfg)):
+        raise SearchError("cfg 同时给了 ATR 与百分比两套退出几何 —— 契约要求恰好一套")
+    out = {
         "max_hold": cfg.get("max_hold", BASE_EXIT["max_hold"]),
         "max_positions": cfg.get("max_positions", 1),
         "risk_per_trade": cfg.get("risk_per_trade", 0.01),
@@ -85,6 +92,13 @@ def make_preset(cfg: dict) -> dict:
         "atr_slip_scale": costs.ATR_SLIP_SCALE,
         "cost_bps_roundtrip": costs.COST_BPS_ROUNDTRIP,
     }
+    if _pct:
+        out["sl_pct"] = cfg.get("sl_pct", 0.05)
+        out["tp_pct"] = cfg.get("tp_pct", 0.20)
+    else:
+        out["atr_sl_mult"] = cfg.get("sl_mult", BASE_EXIT["sl_mult"])
+        out["atr_tp_mult"] = cfg.get("tp_mult", BASE_EXIT["tp_mult"])
+    return out
 
 
 def signal_kwargs(cfg: dict) -> dict:
