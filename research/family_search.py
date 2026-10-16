@@ -145,7 +145,9 @@ def overlay(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None) -> di
         if sig is not None and sig.empty:
             benchs.append(_bench_cagr(reg, lo, hi))
             continue
-        res = broker.simulate(S.make_preset(cfg or {}), sig, ind, start=lo, end=hi)
+        res = broker.simulate(S.make_preset(cfg or {}), sig, ind, start=lo, end=hi,
+                              regime_ok=(regime.regime_ok_dates(reg)
+                                         if reg is not None else None))
         eq = res["equity"].set_index("date")
         if len(eq) < 3:
             benchs.append(_bench_cagr(reg, lo, hi))

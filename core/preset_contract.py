@@ -49,6 +49,9 @@ OPTIONAL_KEYS: tuple[str, ...] = (
     # 组合内**两两相关性**上限（数据驱动，无外部行业分类）：新仓与任一在持标的的
     # 尾部相关超过它就不建。见 broker 里的实现说明（审计 D6：此前完全没有相关性约束）。
     "max_pair_corr",
+    # regime 翻转时**出场侧**怎么办（审计 D4）。"none" = 只挡入场（既有行为）；
+    # "close" = 在 regime 失效后的下一个开盘平掉全部持仓（组合层降杠杆）。
+    "regime_exit_policy",
     # ---- 止损穿价深度（2026-10-17 审计 E2）----
     # 盘中触发止损时的成交位置：fill_trigger = sl_price − θ × (sl_price − bar_low)。
     # θ=0 是既有行为（假定止损价上无限流动性）；θ=1 是"按当日最低价成交"，
@@ -84,6 +87,7 @@ DEFAULTS: dict[str, object] = {
     "max_heat": None,
     "max_drawdown_halt": None,
     "max_pair_corr": None,
+    "regime_exit_policy": "none",
     "spread_model": "none",
     # 默认清算：它让头条收益与 E[R]/胜率/盈亏比落在**同一个样本**上，
     # 而且方向保守（多付一次出场成本）。不想要就显式写 False。
@@ -138,6 +142,8 @@ SPEC_LABELS: dict[str, tuple[str, "callable"]] = {
     "clamp_entry_to_bar": ("入场价钳制",
                            lambda v: "钳到 bar 区间内（滑点在窄 bar 上被抹平）" if v
                            else "不钳制（保留滑点，可能报出高于 bar 高点的价）"),
+    "regime_exit_policy": ("regime 翻转时", lambda v: "只挡入场" if v == "none"
+                           else "平掉全部持仓（组合层降杠杆）"),
     "max_pair_corr": ("组合内相关性上限",
                       lambda v: ("**未设**" if v is None else f"两两 ≤ {float(v):.2f}")),
     "atr_sl_mult": ("止损宽度", lambda v: "—" if v is None else f"{float(v):g}×ATR"),

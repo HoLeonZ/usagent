@@ -145,7 +145,10 @@ def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
                 "bench_cagr": bench, "excess": float("nan")}
 
     # 不覆盖成本口径 —— 让引擎读 preset 里的(§2(b) 单一来源)
-    res = broker.simulate(make_preset(cfg), sig, ind, start=lo, end=hi)
+    res = broker.simulate(make_preset(cfg), sig, ind, start=lo, end=hi,
+                          # D4：声明了 regime_exit_policy="close" 的配置需要它
+                          regime_ok=(regime.regime_ok_dates(reg) if reg is not None
+                                     else None))
 
     eq, tr = res["equity"], res["trades"]
     cagr = metrics.cagr(eq["equity"], eq["date"])

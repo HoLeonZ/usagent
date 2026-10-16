@@ -82,7 +82,7 @@ VALID_TIEBREAK = ("sl_first",)
 # 它是**实现参数**而不是策略旋钮（preset 只声明 max_pair_corr 这个阈值）。
 CORR_LOOKBACK = 60
 
-EXIT_REASONS = ("sl", "sl_gap", "tp", "tp_gap", "max_hold", "eod")
+EXIT_REASONS = ("sl", "sl_gap", "tp", "tp_gap", "max_hold", "eod", "regime")
 
 
 # 锁「交易列表行为」用的列(CLAUDE.md §6)。sl_width/tp_width 必须在内:它们是
@@ -235,6 +235,7 @@ def simulate(
     start: str,
     end: str,
     cost_bps_roundtrip: float | None = None,
+    regime_ok: set | None = None,
 ) -> dict:
     """在 [start, end) 上跑一次回测。
 
@@ -323,6 +324,16 @@ def simulate(
         raise BrokerError(f"max_pair_corr ∈ [-1,1]，得到 {max_pair_corr!r}")
     max_pair_corr = None if max_pair_corr is None else float(max_pair_corr)
     clamp_entry_to_bar = bool(spec["clamp_entry_to_bar"])
+    # regime 翻转时的**出场侧**政策（审计 D4）。默认 "none" = 只挡入场 ——
+    # 但把"择时只管入场"这件事从**隐含假设**变成**声明**，并给出组合层的降杠杆选项。
+    regime_exit_policy = spec["regime_exit_policy"]
+    if regime_exit_policy not in ("none", "close"):
+        raise BrokerError(f"regime_exit_policy 必须是 none/close，得到 {regime_exit_policy!r}")
+    if regime_exit_policy == "close" and regime_ok is None:
+        # 声明了"翻转就平仓"却没给 regime 数据 ⇒ 静默退化成"只挡入场"是不可接受的
+        raise BrokerError(
+            "regime_exit_policy='close' 需要调用方传入 regime_ok（regime 有效的交易日集合）"
+            " —— 不许在没有 regime 数据时静默退化成'只挡入场'")
 
     if max_positions < 1:
         raise BrokerError(f"max_positions 必须 >= 1,得到 {max_positions}")
@@ -592,6 +603,27 @@ def simulate(
                         and equity_at_open <= peak_equity * (1.0 - max_dd_halt))
         if halted_today:
             stats_halted_days += 1
+
+        # ---------- 0b) regime 翻转 ⇒ 开盘降杠杆（审计 D4）----------
+        # 择时此前**只作用于入场**（signals 按 regime_ok 过滤信号），已建仓位在
+        # regime 翻转后没有任何组合层处置路径 —— 而"市场转弱就降杠杆"恰恰是机构在
+        # 组合层做的事（单笔止损管不了系统性风险）。
+        # 因果性：regime_ok(T−1) 在 T−1 收盘后已知 ⇒ 最早 T 开盘能动手，正是这里。
+        _prev_day = days[day_pos[day] - 1] if day_pos[day] > 0 else None
+        if (regime_exit_policy == "close" and _prev_day is not None
+                and _prev_day not in regime_ok and book.positions):
+            for _sym in list(book.positions):
+                _pos = book.positions[_sym]
+                _k = per_sym.get(_sym, {}).get(day)
+                if _k is None:
+                    continue            # 当日无 bar ⇒ 卖不掉（§1），顺延
+                _o = float(data[_sym]["raw_open"][_k])
+                if not (_o > 0):
+                    continue
+                close_position(_pos, day, _o, "regime",
+                               bar_lo=float(data[_sym]["raw_low"][_k]),
+                               bar_hi=float(data[_sym]["raw_high"][_k]),
+                               bar_vol=float(data[_sym]["volume"][_k]))
 
         # ---------- 1) 持仓:开盘 gap → 盘中 SL/TP ----------
         for sym in list(book.positions):

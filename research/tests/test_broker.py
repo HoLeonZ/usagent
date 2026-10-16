@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from research.broker import BrokerError, simulate
+from research.broker import (EXIT_REASONS, BrokerError, simulate,
+                             trade_fingerprint)
 from research.signals import ENTRY_COLS
 
 FLAT = 100.0
@@ -992,3 +993,62 @@ def test_no_overflow_when_the_bar_is_wide():
     assert r["metrics"]["n_entry_overflow"] >= 0
     if len(r["trades"]):
         assert r["trades"]["entry_overflow_bps"].max() >= 0
+
+
+# ---------------------------------------------------------------- regime 翻转的出场侧（D4）
+
+def _regime_case(policy: str, off_day_idx: int = 5, n: int = 25):
+    """平盘面板 + 一次信号；把第 off_day_idx 天设为 regime 失效。"""
+    panel = mk_panel(flat_days(n))
+    days = sorted(panel["date"].unique())
+    regime_ok = {d for i, d in enumerate(days) if i != off_day_idx}
+    r = simulate({**BASE, "regime_exit_policy": policy}, mk_signal(str(days[0])[:10]),
+                 panel, start="2024-01-01", end="2024-03-31", cost_bps_roundtrip=0.0,
+                 regime_ok=regime_ok)
+    return r, days
+
+
+def test_regime_flip_closes_at_the_next_open():
+    """声明 `close` ⇒ regime 失效后的**下一个开盘**平掉全部持仓（审计 D4）。
+
+    择时此前只作用于入场（signals 按 regime_ok 过滤信号），已建仓位在 regime 翻转后
+    没有任何组合层处置路径 —— 而"市场转弱就降杠杆"正是机构在组合层做的事
+    （单笔止损管不了系统性风险）。
+    """
+    r, days = _regime_case("close", off_day_idx=5)
+    tr = r["trades"]
+    assert len(tr) == 1 and tr["exit_reason"].iloc[0] == "regime"
+    assert tr["exit_date"].iloc[0] == days[6], "应当在 regime 失效日的**下一个**开盘出场"
+    assert "regime" in EXIT_REASONS
+
+
+def test_policy_none_is_the_default_and_changes_nothing():
+    """默认 `none` = 只挡入场（既有行为）—— 不声明这个键时交易列表逐位不变。"""
+    a = simulate(BASE, mk_signal("2024-01-01"), mk_panel(flat_days(25)),
+                 start="2024-01-01", end="2024-03-31", cost_bps_roundtrip=0.0)
+    b = simulate({**BASE, "regime_exit_policy": "none"}, mk_signal("2024-01-01"),
+                 mk_panel(flat_days(25)), start="2024-01-01", end="2024-03-31",
+                 cost_bps_roundtrip=0.0)
+    assert trade_fingerprint(a["trades"]) == trade_fingerprint(b["trades"])
+    assert "regime" not in set(a["trades"]["exit_reason"])
+
+
+def test_close_policy_without_regime_data_fails_fast():
+    """声明了"翻转就平仓"却没给 regime 数据 ⇒ 抛错，**不许静默退化成"只挡入场"**。"""
+    with pytest.raises(BrokerError, match="regime_ok"):
+        simulate({**BASE, "regime_exit_policy": "close"}, mk_signal("2024-01-01"),
+                 mk_panel(flat_days(25)), start="2024-01-01", end="2024-03-31",
+                 cost_bps_roundtrip=0.0)
+
+
+def test_bad_policy_fails_fast():
+    with pytest.raises(BrokerError, match="regime_exit_policy"):
+        simulate({**BASE, "regime_exit_policy": "maybe"}, mk_signal("2024-01-01"),
+                 mk_panel(flat_days(25)), start="2024-01-01", end="2024-03-31",
+                 cost_bps_roundtrip=0.0)
+
+
+def test_no_close_when_the_regime_is_on():
+    """regime 全程有效 ⇒ 不该有任何 regime 出场（反证上一条不是"到点就平"）。"""
+    r, _ = _regime_case("close", off_day_idx=999)
+    assert "regime" not in set(r["trades"]["exit_reason"])

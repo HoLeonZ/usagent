@@ -110,7 +110,10 @@ def run(args) -> dict:
 
     sig = _signals(ind, reg, preset, lo, hi, avoid_earnings=args.avoid_earnings)
     res = broker.simulate(preset, sig, ind, start=lo, end=hi,
-                          cost_bps_roundtrip=eff_cost)
+                          cost_bps_roundtrip=eff_cost,
+                          # regime_ok 必须传下去：声明了 regime_exit_policy="close"
+                          # 的 preset 缺了它会被 fail-fast（不许静默退化，审计 D4）
+                          regime_ok=regime.regime_ok_dates(reg))
     eq, tr = res["equity"], res["trades"]
     ts = metrics.tail_stats(tr)
     cg = metrics.cagr(eq["equity"], eq["date"])
