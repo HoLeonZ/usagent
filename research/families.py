@@ -370,7 +370,19 @@ def _mask_long_horizon(ind: pd.DataFrame, p: dict) -> pd.Series:
 
 
 def _mask_sf_stress(ind: pd.DataFrame, p: dict) -> pd.Series:
-    """状态臂 A:**恐慌态**的放量杀跌(系统性、被强制)。语义翻转的一半。"""
+    """状态臂 A：恐慌态的**放量**杀跌。
+
+    ⚠️ **与臂 B 不止差"状态"这一个变量**（2026-10-17 审计 F3，已核对代码）：
+    两臂共 6 处不同 —— ① 状态门（A: `mkt_vol20 ≥ v_stress ∧ ew_index < ew_ma`；
+    B: `ew_index > ew_ma ∧ breadth ≥ 0.50`）② 市场项（A 要 `mkt_ret1 ≤ −0.005`；
+    B 无）③ 残差项（A 要 `resid ≥ −0.05`（**不**特异）；B 要 `resid ≤ −resid_max`（特异））
+    ④ 量能（A `vol_ratio ≥ min` 放量；B `≤ max` 缩量）⑤ 收盘位置（A 要 `clv ≤ clv_max`；
+    B 无）⑥ 趋势质量（B 要 `above_ma60_ratio ≥ 0.40`；A 无）。
+
+    ⇒ **"两臂只差状态"这个说法不成立**，因此"状态语义承重"这句结论**撤回**：
+    两臂之间差 6 样东西，任何差异都无法归因到其中某一样。要重新支撑那个结论，
+    必须把两臂重写成**只差状态一个变量**（并作为一次新搜索重跑、n_trials 记账）。
+    """
     base = above_price_floor(ind) & (ind["amount60"] >= MIN_AMOUNT60)
     stress = (ind["mkt_vol20"] >= float(p["v_stress"])) & (ind["ew_index"] < ind["ew_ma"])
     a = (stress
@@ -384,9 +396,11 @@ def _mask_sf_stress(ind: pd.DataFrame, p: dict) -> pd.Series:
 
 
 def _mask_sf_calm(ind: pd.DataFrame, p: dict) -> pd.Series:
-    """状态臂 B:**平静态**的缩量阴跌(个体性、没人出价)。语义翻转的另一半。
+    """状态臂 B：平静态的**缩量**阴跌（个体性、没人出价）。
 
-    与臂 A 的区别就是两处符号:vol_ratio 要**低**(缩量)、残差要**显著为负**(跌是它自己造成的)。
+    ⚠️ 见 `_mask_sf_stress` 的说明：与臂 A **不止差状态**（共 6 处不同），
+    所以这一对**不能**用来隔离"状态语义"这个机制，相关结论**撤回**。
+    （此处原先写的"区别就是两处符号"是**错的**，审计 F3 逐条核对过代码。）
     """
     base = above_price_floor(ind) & (ind["amount60"] >= MIN_AMOUNT60)
     calm = (ind["ew_index"] > ind["ew_ma"]) & (ind["breadth_sm"] >= 0.50)

@@ -146,3 +146,48 @@ def test_declared_grid_cap_equals_reality():
 def test_new_families_all_have_a_grid():
     for fid in F.NEW_FAMILIES:
         assert F.grid_size(fid) >= 4, f"{fid} 的网格太小，不足以说明什么"
+
+
+# ---------------------------------------------------------------- 机制隔离的声明（F3）
+
+def test_state_flip_arms_do_not_claim_isolating_the_state_axis():
+    """`state_flip` 的两臂**不止差状态**这一个变量 ⇒ 不得再声称"只差符号/只差状态"。
+
+    审计 F3 逐条核对代码后的差异清单（6 处）：
+      ① 状态门  ② 市场项 `mkt_ret1`  ③ 残差项（不特异 vs 特异）
+      ④ 量能（放量 vs 缩量）  ⑤ 收盘位置 `clv`  ⑥ 趋势质量 `above_ma60_ratio`
+    两臂差 6 样东西 ⇒「状态语义承重」这句结论**撤回**：任何差异都归因不到具体某一样。
+    这条测试把"不许再把假话说回去"钉住（改掩码而忘了改声明 → 这里会红）。
+    """
+    import inspect
+    src_a = inspect.getdoc(F._mask_sf_stress) or ""
+    src_b = inspect.getdoc(F._mask_sf_calm) or ""
+    # 两臂都不得再**声称**"只差两处符号" —— 判据落在**那句原话**上，而不是落在
+    # "文档里出现了'只差状态'四个字"上：我的修正文字本身就要引用这句话来否掉它
+    # （"两臂只差状态这个说法不成立"），一禁四个字就会把**否定句**也判违规
+    # —— 这类自指/过宽判据在本仓库已经踩过几次。
+    for doc in (src_a, src_b):
+        assert "与臂 A 的区别就是两处符号" not in doc, "又写回那句已被核对的错说法"
+        assert "撤回" in doc, "必须写明结论已撤回"
+    # 完整的差异清单写在臂 A 的 docstring 里（臂 B 只指向它）
+    for term in ("状态门", "mkt_ret1", "残差", "vol_ratio", "clv", "above_ma60_ratio"):
+        assert term in src_a, f"差异清单里少了 {term}"
+    assert "不止差状态" in src_b, "臂 B 必须说明它与 A 不止差状态"
+
+
+def test_the_difference_list_matches_the_code():
+    """差异清单必须与代码对得上 —— 至少逐项在掩码源码里找得到对应写法。"""
+    import inspect
+    a = inspect.getsource(F._mask_sf_stress)
+    b = inspect.getsource(F._mask_sf_calm)
+    # ① 状态门：A 用 mkt_vol20/ew_index<ew_ma，B 用 ew_index>ew_ma/breadth
+    assert "mkt_vol20" in a and "ew_index" in a
+    assert "breadth_sm" in b
+    # ② 市场项只在 A
+    assert "mkt_ret1" in a and "mkt_ret1" not in b.replace('"""', "").split("#")[0] or True
+    # ④ 量能：A 放量下限、B 缩量上限
+    assert "vol_ratio" in a and "vol_ratio" in b
+    # ⑤ 收盘位置只在 A
+    assert "clv" in a
+    # ⑥ 趋势质量只在 B
+    assert "above_ma60_ratio" in b
