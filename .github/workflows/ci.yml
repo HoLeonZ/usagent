@@ -1,0 +1,35 @@
+# CI —— 让"护栏在跑"这件事不依赖某台机器。
+#
+# 为什么需要（2026-10-17 审计 G1）：§6 要求行为锁保护交易列表，而真正的行为锁
+# （`test_golden_trades`）需要一个 277MB 的本地库，它**不入库**。于是任何全新 clone、
+# 任何 CI 上，那把锁会静默退化成 skip —— 而这正是最坏的一种失败模式：绿色的构建
+# 看起来像"一切都验证过了"。
+#
+# 解法的两层：
+#   1. `test_golden_fixture_lock`（**离线行为锁**）：用确定性合成市场，任何机器都能跑，
+#      且实测会在口径被改动时变红。CI 靠它。
+#   2. `test_golden_trades`（**真数据锁**）：本机有库时跑；CI 上没有库 ⇒ 跳过，
+#      这是已知且显式的缺口，不是被掩盖的。
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: 安装（版本已在 requirements.txt 钉住）
+        run: python -m pip install -r requirements.txt
+      - name: 测试（含离线行为锁）
+        run: python -m pytest research/tests src/tests -q -rs
+      - name: 说明
+        if: always()
+        run: |
+          echo "注：真数据行为锁（test_golden_trades）在没有 data/usagent.db 时跳过。"
+          echo "离线行为锁（test_golden_fixture_lock）始终运行，覆盖两条策略路径。"
+          echo "取数（换一台机器时的第一步）："
+          echo "  python src/download_ohlcv.py --source stockanalysis --universe all --as-of <YYYY-MM-DD>"
