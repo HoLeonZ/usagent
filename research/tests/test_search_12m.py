@@ -14,6 +14,8 @@ out-of-sample (OOS) testing windows.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -219,3 +221,34 @@ def test_random_control_draws_from_the_strategys_opportunity_set():
     pool = set(S._control_pool(ind, lo, hi)["symbol"])
     assert "BBB" not in pool, "流动性不达标的标的仍在对照池里"
     assert seen and seen <= {"AAA"}, f"抽到了池子外的标的:{seen - {'AAA'}}"
+
+
+# ---------------------------------------------------------------- 机会集对齐（C2）
+
+def test_explicit_none_removes_the_liquidity_upper_bound():
+    """`{"max_amount": None}` = **显式移除**流动性上界；缺键 = 保留 v21 的上界。
+
+    两种语义必须分开，否则没办法表达"移除"（审计 C2：基准线带着 A 股的
+    `amount60 ≤ $3e8` 上界，而族型策略没有这一条 —— 不显式去掉，"族 vs 基准线"
+    就是两个机会集的比较）。
+    """
+    from research import signals
+    base = S.signal_kwargs({})
+    assert base["max_amount"] == signals.V21_SIGNAL_PARAMS["max_amount"]
+    removed = S.signal_kwargs({"max_amount": None})
+    assert removed["max_amount"] is None, "显式的 None 应当把上界去掉"
+    assert S.signal_kwargs({"max_amount": 5e8})["max_amount"] == 5e8
+
+
+def test_none_on_other_axes_still_means_do_not_touch():
+    """其它轴上 None 仍表示"这一轴不动" —— 与 max_amount 的语义**刻意不同**。"""
+    base = S.signal_kwargs({})
+    assert S.signal_kwargs({"min_mom120": None})["min_mom120"] == base["min_mom120"]
+
+
+def test_family_search_judges_against_the_aligned_baseline():
+    """判据① 必须用**去掉上界**的那条基准线（同机会集才可比），且把两条都打印出来。"""
+    src = (Path(__file__).resolve().parents[2] / "research" / "family_search.py").read_text()
+    assert 'bar_pooled, bar_cont = upb_te_noband["mean_cagr"]' in src, \
+        "判据① 又用回带 A 股上界的那条线了"
+    assert "机会集对齐（C2）" in src, "两条线都要打印出来，读者才能看到上界的影响"

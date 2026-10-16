@@ -92,6 +92,13 @@ def signal_kwargs(cfg: dict) -> dict:
     for k in SIGNAL_AXES:
         if cfg.get(k) is not None:
             kw[k] = cfg[k]
+    # ⚠️ 显式 `"max_amount": None` = **移除流动性上界**（审计 C2）。
+    # 在 A 股语境里上界是防小盘/涨停票的，搬到这个池子上它几乎全被击穿；
+    # 而**族型策略没有这一条** ⇒ 不把它显式关掉，"族 vs 基准线"就是两个不同的机会集比较。
+    # 注意与上面 SIGNAL_AXES 的差别：那里 None 表示"这一轴不动"，这里"键存在且为 None"
+    # 表示"明确移除"。两种语义必须分开，否则没法表达"移除"。
+    if "max_amount" in cfg:
+        kw["max_amount"] = cfg["max_amount"]
     return kw
 
 

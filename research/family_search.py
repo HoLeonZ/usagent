@@ -365,6 +365,14 @@ def main(argv=None) -> int:
     # ---- 基准线:uptrend-pullback 的 WFV 配置,走 cfg 路径(不带 signals_df)
     upb_cfg = {**UPB["signal"], **UPB["exit"], **SIZE_FIXED}
     upb_te = pooled(ind, reg, test, cfg=upb_cfg)
+    # ── 机会集对齐（审计 C2）──────────────────────────────────────────────
+    # 基准线带 v21 的**流动性上界**（amount60 ≤ $3e8，A 股口径，在这个池子上几乎全被
+    # 击穿），而族型策略**没有**这一条。不把上界去掉，"族战胜基准线"就混进了
+    # "族少受一条 A 股遗留条件的限制"。所以**两条线都算**：
+    #   * 带界 —— 历史记录口径，保留给人对照；
+    #   * 无界 —— 与族**同一机会集**的口径，判据① 用它。
+    _noband_cfg = {**upb_cfg, "max_amount": None}
+    upb_te_noband = pooled(ind, reg, test, cfg=_noband_cfg)
     upb_cont = continuous(ind, reg, lo, hi, cfg=upb_cfg)
     print(f"\n[基准] uptrend-pullback WFV 配置 {UPB}")
     print(_fmt("测试窗", upb_te))
@@ -379,7 +387,12 @@ def main(argv=None) -> int:
               f"{TARGET_POOLED_TEST*100:+.2f}% 差得超过 2pp。"
               f"\n     若你确实改了口径/取池/成本：更新 TARGET_* 并说明成因（§6）；"
               f"\n     若不知道为什么会变：**先查基准线**，再拿它去比其它族。")
-    bar_pooled, bar_cont = upb_te["mean_cagr"], upb_cont["cagr"]
+    bar_pooled, bar_cont = upb_te_noband["mean_cagr"], upb_cont["cagr"]
+    _d = (upb_te_noband["mean_cagr"] - upb_te["mean_cagr"])
+    print(f"  ⚠️ 机会集对齐（C2）：基准线带 A 股流动性上界时池化测试窗 "
+          f"{upb_te['mean_cagr']*100:+.2f}%，**去掉上界**（与族同口径）后 "
+          f"{upb_te_noband['mean_cagr']*100:+.2f}% ⇒ 上界让基准线偏 "
+          f"{_d*100:+.2f}pp。判据① **用无界那条**（同机会集才可比）。")
     print("\n  判据用的是**同窗口同口径**的比较(§5):池化测试窗与连续净值。"
           "\n  参考:该家族在任何窗口上的最高数是 12m_target 在 2024-10-14..2025-10-14 上的"
           "+51.57%(那是另一个窗口,拿它当线会变成比窗口而不是比策略)。")
