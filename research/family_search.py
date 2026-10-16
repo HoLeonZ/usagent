@@ -159,13 +159,9 @@ def overlay(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None) -> di
 
 
 def _bench_cagr(reg: pd.DataFrame, lo: str, hi: str) -> float:
-    """同一窗口上等权池指数的 CAGR(与 uptrend-pullback 的基准是同一把尺)。"""
-    idx = reg.set_index("date")["ew_index"]
-    b = idx[(idx.index >= pd.Timestamp(lo)) & (idx.index < pd.Timestamp(hi))]
-    if len(b) < 2:
-        return float("nan")
-    days = (b.index[-1] - b.index[0]).days
-    return float((b.iloc[-1] / b.iloc[0]) ** (365.25 / days) - 1.0) if days > 0 else float("nan")
+    """同一窗口上等权池指数的 CAGR。委托给 `regime.window_benchmark_cagr`（唯一定义）。"""
+    from research.regime import window_benchmark_cagr
+    return window_benchmark_cagr(reg, lo, hi)
 
 
 def continuous(ind, reg, lo, hi, *, family_id=None, fparams=None, cfg=None) -> dict:

@@ -90,6 +90,22 @@ def regime_ok_dates(regime_df: pd.DataFrame) -> set[pd.Timestamp]:
     return set(pd.to_datetime(regime_df.loc[regime_df["regime_ok"], "date"]).tolist())
 
 
+def window_benchmark_cagr(regime_df: pd.DataFrame, lo: str, hi: str) -> float:
+    """**同一窗口**上等权池指数的 CAGR（左闭右开）。
+
+    这是全仓库唯一的"基准"定义：任何头条收益都必须与它同窗口比较（§5(e)）。
+    此前它只存在于 family_search 的一个私有函数里，而**搜索层（search_12m）根本没有基准**
+    —— 于是搜索的目标是对**绝对 CAGR** 求 argmax，跑出来的"最好配置"是"在牛市里
+    拿得最多的那个"，而不是"相对池子做得最好的那个"（审计 C3）。
+    """
+    idx = regime_df.set_index("date")["ew_index"]
+    b = idx[(idx.index >= pd.Timestamp(lo)) & (idx.index < pd.Timestamp(hi))]
+    if len(b) < 2:
+        return float("nan")
+    days = (b.index[-1] - b.index[0]).days
+    return float((b.iloc[-1] / b.iloc[0]) ** (365.25 / days) - 1.0) if days > 0 else float("nan")
+
+
 def equal_weight_benchmark(regime_df: pd.DataFrame) -> pd.Series:
     """等权指数的日收益(基准),索引为 date。
 

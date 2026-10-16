@@ -24,6 +24,12 @@ if str(ROOT) not in sys.path:
 
 TEXT_SUFFIXES = (".md", ".py", ".sh", ".txt", ".yaml", ".yml", ".toml", ".cfg")
 
+# 唯一豁免：本文件。它**必须**写出这些模式才能定义它们（正则字面量与 docstring 里
+# 各一份）。豁免名单只允许这一个，且由 test_the_allowlist_is_exactly_one_file 钉住 ——
+# 豁免名单一旦能悄悄变长，这条护栏就失效了。
+_ALLOWLIST = {Path(__file__).resolve()}
+_SELF = Path(__file__).resolve()
+
 # (正则, 为什么禁止)
 FORBIDDEN = [
     (re.compile(r"/Users/[^/\s`]+/code/usagent"),
@@ -48,6 +54,8 @@ def test_no_machine_specific_paths_in_tracked_files():
         pytest.skip("不是 git 工作区，无法枚举被跟踪文件")
     hits = []
     for f in files:
+        if f.resolve() in _ALLOWLIST:
+            continue
         try:
             text = f.read_text(encoding="utf-8")
         except (UnicodeDecodeError, FileNotFoundError):
@@ -68,6 +76,11 @@ def test_dependencies_are_pinned():
     assert deps, "requirements.txt 里没有任何依赖"
     unpinned = [d for d in deps if "==" not in d]
     assert not unpinned, f"这些依赖没钉版本：{unpinned}"
+
+
+def test_the_allowlist_is_exactly_one_file():
+    """豁免只能有一个（本文件自己）—— 它一旦能悄悄变长，这条护栏就等于没有。"""
+    assert _ALLOWLIST == {_SELF}, f"护栏豁免名单被扩大了：{_ALLOWLIST - {_SELF}}"
 
 
 def test_run_daily_does_not_hardcode_an_interpreter():
