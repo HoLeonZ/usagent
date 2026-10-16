@@ -155,6 +155,16 @@ def run(args) -> dict:
               f"只在场日 {_si:+.2f}（在场 {res['metrics']['n_days_invested']} 天 / "
               f"{res['metrics']['days']}）—— DSR 用的是**含空仓日**那条序列")
 
+    # 风格因子归因（C4）：超额是不是选股能力，只有归因能回答 —— CAGR 之差对此是瞎的。
+    # 默认关闭：它要构造横截面因子（多空三分位），比跑一次回测本身还贵，而测试套件
+    # 会反复调 run()。
+    if getattr(args, "attribution", False):
+        from research import factor_model as FM
+        _fac = FM.style_factor_returns(ind.loc[ind["date"].isin(sret.index)], lo=lo, hi=hi)
+        _att = FM.attribute(sret, _fac, bret.reindex(sret.index).fillna(0.0))
+        print("归因: " + FM.describe(_att))
+        print("      ⚠️ 无价值/规模因子（无基本面数据、市值快照非 PIT）——覆盖范围到此为止")
+
     # 容量余量（D5/E4）："这套策略能装多少钱"此前在库里和报告里都没有读数。
     _hr = res["metrics"].get("capacity_headroom_min")
     if _hr is not None and np.isfinite(_hr):
@@ -228,6 +238,8 @@ def main() -> int:
     ap.add_argument("--end", default=None)
     # None ⇒ 用 preset 里的成本口径(§2(b):常数只在 core/costs.py 定义一次)。
     # 显式给值只用于成本敏感性分析。
+    ap.add_argument("--attribution", action="store_true",
+                    help="额外跑风格因子归因（market/mom/lowvol + 跟踪误差/IR，审计 C4）")
     ap.add_argument("--spread-model", default=None,
                     choices=["none", "corwin_schultz"],
                     help="价差口径(默认取 preset):成本模型里**尺寸无关**的那一半")

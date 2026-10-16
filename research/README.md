@@ -66,6 +66,7 @@ $PY -m research.run_baseline --preset us_uptrend_pullback_v1 --cost-bps 20
 | **DSR 口径** | `metrics.deflated_sharpe_from_returns(收益序列, n_trials, periods_per_year)`:T/偏度/峰度/自相关全部从**同一条序列**派生 | 审计 B3:此前四个调用点各传各的(交易日数/成交笔数/月数),且**从不传高阶矩**(等于假设 iid 正态)。实测日收益偏度 +1.46、峰度 40、自相关 +0.20 |
 | **多比较校正** | `metrics.benjamini_hochberg` + `bonferroni_t_threshold`;因子判词先看整族再下 | 审计 B4:点比较的 |t|≥2 在族规模下**不成立**。预注册判据**不事后放宽**,校正的产物是"还剩几个" |
 | **holdout 台账** | `research/holdout.py`:同一窗口二次 claim **默认拒绝**,给理由才放行且理由入账 | 审计 B1:"这段窗口没参与过选择"此前只写在注释里。台账落在 `research/results/`(run artifact) |
+| **归因** | `research/factor_model.py`：对 [market, mom, lowvol] 做**带 HAC 标准误**的回归 + 跟踪误差/IR；`run_baseline --attribution` | 审计 C4:"超额"此前**只有 CAGR 之差**，回答不了"这份收益里有多少是风格 beta"。因子代理从**面板自己**构造（横截面动量/波动的多空三分位），月频再平衡、划分只用 ≤ 再平衡日的数据。⚠️ 无价值因子（无基本面）与规模因子（市值快照非 PIT） |
 | **口径自报** | 报告头由 `core/preset_contract.spec_header()` 生成,CLI/HTML/JSON **共用同一个函数** | 审计 E5:读者此前只能去读 preset 源码,或默认"没价差、没上限"。**否定事实必须显示**("滑点关闭"/"未设上限"/"不清算") |
 | 纪律 | `n_comparisons` 在 `presets.py`(单一事实来源) | CLAUDE.md §5 Iterative-Tuning Accounting。本文不复述数值 —— §7 要求文档只写怎么复现、不写曾观测到什么 |
 
