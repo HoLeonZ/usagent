@@ -49,6 +49,7 @@ import numpy as np
 import pandas as pd
 
 from research import indicators as I
+from research import signals
 from research import universe as mod_universe
 from research.metrics import bonferroni_t_threshold
 from research import panel as P
@@ -68,7 +69,8 @@ TIER_DESC = {
     "trend": "A 趋势:close>MA60 ∧ MA20>MA60 ∧ above_ma60_ratio≥0.6693 ∧ mom120≥0.18",
     "trend_pullback": "A + B 回调:down_streak∈[3,10] ∧ ret1∈[-8.8%,-2%]",
     "trend_pullback_macd": "A + B + D MACD 衰减:|bar|<|bar_prev| ∧ dif>0 ∧ dea>0",
-    "v21_full": "A + B + D + E 流动性 + close≥MA60×1.0121(v21 原样)",
+    "v21_full": "**引擎的 v21 本身**（由 signals.select_entries 给出，不再手抄条件；"
+                "不含 regime 门 —— 这一层量的是条件本身的信息量）",
 }
 
 
@@ -108,12 +110,27 @@ def _masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     liq = (df["amount60"] >= sp["min_amount"]) & (df["amount60"] <= sp["max_amount"])
     buf = df["close"] >= df["ma60"] * (1 + sp["close_ma60_buffer"])
 
+    # ⚠️ `v21_full` **不再手抄条件**（审计 F4）：它必须**就是引擎的 v21**。
+    # 此前这一层是手写的 `trend & pullback & macd & liq & buf`，而手写版多了一个
+    # `ma20 > ma60`（引擎的 A 组没有这一条）—— 于是用户在候选清单里跟着的那个
+    # "历史基准率"量的是**另一个策略**。手抄的条件迟早会与引擎分叉，所以这里改成
+    # 直接调用 `signals.select_entries`（引擎自己的入口），按 (date, symbol) 取命中。
+    #
+    # 已知且**显式**的差别：这一层不含 F（regime 门）。理由是本工具的用途是量
+    # "条件本身携带多少信息"，而 regime 是外部择时门；这句话写在层描述里，不藏着。
+    v21 = signals.select_entries(
+        df, start_date=str(df["date"].min().date()),
+        end_date=str((df["date"].max() + pd.Timedelta(days=1)).date()))
+    hit = pd.MultiIndex.from_frame(v21[["date", "symbol"]]) if len(v21) else None
+    idx = pd.MultiIndex.from_frame(df[["date", "symbol"]])
+    v21_full = pd.Series(idx.isin(hit) if hit is not None else False, index=df.index)
+
     return {
         "base": ready,
         "trend": trend,
         "trend_pullback": trend & pullback,
         "trend_pullback_macd": trend & pullback & macd,
-        "v21_full": trend & pullback & macd & liq & buf,
+        "v21_full": v21_full & ready,
     }
 
 
