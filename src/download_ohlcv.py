@@ -21,8 +21,8 @@ import yfinance as yf
 
 import db
 import yfutil
-from config import (BACKOFF_BASE, BATCH_SIZE, HISTORY_YEARS, history_start,
-                    load_universe)
+from config import (BACKOFF_BASE, BATCH_SIZE, HISTORY_YEARS, RESTATE_MIN_REL_DIFF,
+                    history_start, load_universe)
 from yfutil import RateLimited
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -87,6 +87,81 @@ def _f(v, default=None):
         return float(v)
     except Exception:
         return default
+
+
+# ---------------------------------------------------------------- 厂商重述检测与修复
+#
+# 缺陷本体（2026-10-17 审计 A1）：每日任务是 `--recent 10` 的增量刷新，而写入是
+# INSERT OR REPLACE、(symbol,date) 为主键 ⇒ 只有最近 10 天会被改写。厂商在拆股后
+# 会把**该日之前的整段历史**重述，于是更早的行永久停在旧基数，在窗口左边界留下
+# 一个等于累计拆股比的假单日跌幅。检测阈值见 config.RESTATE_MIN_REL_DIFF 的注释。
+
+def _stored_closes(con, symbol: str, dates: list[str]) -> dict[str, float]:
+    """写入**之前**读取这些日期上已落盘的 close。"""
+    if not dates:
+        return {}
+    q = ",".join("?" * len(dates))
+    rows = con.execute(
+        f"SELECT date, close FROM ohlcv WHERE symbol=? AND date IN ({q})",
+        [symbol, *dates]).fetchall()
+    return {d: c for d, c in rows if c is not None}
+
+
+def restated_dates(stored: dict[str, float], fresh: dict[str, float],
+                   min_rel_diff: float = RESTATE_MIN_REL_DIFF
+                   ) -> list[tuple[str, float, float]]:
+    """重叠日期上「新取的 close」与「已落盘的 close」不一致 ⇒ 厂商重述过这段历史。
+
+    返回 [(date, 旧值, 新值)]（按日期升序）。纯函数 —— 判定逻辑与 IO 分开，便于测试。
+
+    只比**重叠**日期：不在旧集合里的日期是无从谈起"变化"的新行；旧值为空或非正的行
+    也不参与（没有可比基准）。
+    """
+    out: list[tuple[str, float, float]] = []
+    for d, new in fresh.items():
+        old = stored.get(d)
+        if old is None or new is None or old <= 0 or new <= 0:
+            continue
+        if abs(new - old) / old > min_rel_diff:
+            out.append((d, float(old), float(new)))
+    return sorted(out)
+
+
+def repair_symbol(con, sym: str, start: date, end: date, now: str, run_id: str) -> int:
+    """**整段重下并重写**一只标的 —— 厂商重述后的唯一正确反应。
+
+    为什么不能局部修补：重述影响的是当前增量窗口**之外**的更早历史（拆股日之前的
+    全部行）。只见窗口的行就只能把断层从窗口左边界挪到别处，问题依旧存在。
+    整段重下之后，该标的的整条序列来自**同一个 vintage** —— 这才是要钉住的不变量。
+
+    代价是这只标的一次全量请求；触发条件是"厂商真的改了历史"，所以它的频率等于
+    拆股/修错价的频率，不会成为常态开销。
+    """
+    raw, _bad = fetch_with_split([sym], start, end)
+    frames = _frames_from_batch(raw, [sym]) if raw is not None else []
+    n = 0
+    for _s, df in frames:
+        n += db.upsert_many(con, "ohlcv", COLS, _to_rows(_s, df, now))
+    log.warning("厂商重述 ⇒ 整段重下重写 %s（%d 行）", sym, n)
+    db.log(con, run_id, now, "ohlcv", sym, "repaired", f"整段重写 {n} 行")
+    return n
+
+
+def write_symbol(con, sym: str, df: pd.DataFrame, now: str, run_id: str
+                 ) -> tuple[int, list[tuple[str, float, float]]]:
+    """写入一只标的（先检测重述、再写）。返回 (写入行数, 重述日期列表)。"""
+    rows = _to_rows(sym, df, now)
+    if not rows:
+        return 0, []
+    fresh = {r[1]: r[5] for r in rows}          # COLS: ..., date(1), ..., close(5), ...
+    drift = restated_dates(_stored_closes(con, sym, list(fresh)), fresh)
+    n = db.upsert_many(con, "ohlcv", COLS, rows)
+    db.log(con, run_id, now, "ohlcv", sym, "ok", f"{n} rows")
+    if drift:
+        d0, old, new = drift[0]
+        db.log(con, run_id, now, "ohlcv", sym, "restated",
+               f"{len(drift)} 个重叠日期的 close 变了,例 {d0} {old:.4f}->{new:.4f}")
+    return n, drift
 
 
 def _fetch_batch(batch: list[str], start: date, end: date) -> pd.DataFrame:
@@ -187,6 +262,9 @@ def download(universe_name: str, limit: int | None, skip_covered: bool,
         start = today - timedelta(days=recent_days)
     else:
         start = history_start(today)
+    # 整段重下用的起点：与本次的增量窗口无关。重述修复必须覆盖 3 年全历史，
+    # 否则"单一时序 vintage"这条不变量不成立（见 repair_symbol 的 docstring）。
+    full_start = history_start(today)
     end = today
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     run_id = f"ohlcv-{now}"
@@ -194,7 +272,7 @@ def download(universe_name: str, limit: int | None, skip_covered: bool,
     db.init()
     total = 0
     # 逐只状态计数：返回给 main() 决定 exit code，并让「这轮到底成不成」在日志里可读。
-    stats = {"ok": 0, "empty": 0, "error": 0, "rows": 0}
+    stats = {"ok": 0, "empty": 0, "error": 0, "restated": 0, "repaired": 0, "rows": 0}
     with db.session() as con:
         # 增量模式必须刷所有标的；全量模式才跳过已覆盖的
         if skip_covered and recent_days is None:
@@ -210,12 +288,23 @@ def download(universe_name: str, limit: int | None, skip_covered: bool,
 
             frames = _frames_from_batch(raw, batch) if raw is not None else []
             got = {s for s, _ in frames}
+            to_repair: list[str] = []
             for sym, df in frames:
-                rows = _to_rows(sym, df, now)
-                total += db.upsert_many(con, "ohlcv", COLS, rows)
+                n, drift = write_symbol(con, sym, df, now, run_id)
+                total += n
                 stats["ok"] += 1
-                db.log(con, run_id, now, "ohlcv", sym, "ok", f"{len(rows)} rows")
+                if drift:
+                    stats["restated"] += 1
+                    to_repair.append(sym)
                 con.commit()   # 逐标的提交：别让写锁一直握着，阻塞其他脚本
+            # 重述修复必须在**本批写完**之后做：它要拿整段历史覆盖刚才写的增量行。
+            # 放在这里而不是延后到全量结束后，是为了让「同一只标的的历史来自单一
+            # vintage」这条不变量在每一批结束时都成立（失败也只影响这一批）。
+            for sym in to_repair:
+                total += repair_symbol(con, sym, start=full_start, end=end,
+                                       now=now, run_id=run_id)
+                stats["repaired"] += 1
+                con.commit()
             for s in batch:
                 if s in got:
                     continue
@@ -232,8 +321,10 @@ def download(universe_name: str, limit: int | None, skip_covered: bool,
             time.sleep(0.4)
 
     stats["rows"] = total
-    log.info("完成，写入 %d 行（成功 %d 只 / 失败 %d 只 / 无数据 %d 只）",
-             total, stats["ok"], stats["error"], stats["empty"])
+    log.info("完成，写入 %d 行（成功 %d 只 / 失败 %d 只 / 无数据 %d 只 / "
+             "重述 %d 只→已整段重写 %d 只）",
+             total, stats["ok"], stats["error"], stats["empty"],
+             stats["restated"], stats["repaired"])
     return stats
 
 

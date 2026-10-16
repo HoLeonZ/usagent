@@ -45,6 +45,10 @@ run() {                       # run <名称> <命令...>
 # 1) 价格:增量,只拉最近 10 天。
 #    `--recent 10` 兼作补抓:漏跑一天不会在库里留下空洞(不会覆盖更早的行,
 #    因为 --no-skip 只影响"是否跳过已覆盖标的",不影响写入区间)。
+#    ⚠️ 但"只重写最近 10 天"本身是个陷阱:厂商(拆股后)会把更早的历史**整段重述**,
+#    于是更早的行会永久停在旧基数、在窗口左边界留下假单日跌幅。所以下载器内置了
+#    重述检测:增量窗口里发现同一 (symbol,date) 的 close 变了 ⇒ 该标的**整段重下重写**
+#    (download_ohlcv.write_symbol / repair_symbol,阈值见 config.RESTATE_MIN_REL_DIFF)。
 run "OHLCV 增量" $PY -u src/download_ohlcv.py --universe oi100 --recent 10 --no-skip
 
 # 2) 校验:任何结构性断言失败都会非零退出,便于接告警
