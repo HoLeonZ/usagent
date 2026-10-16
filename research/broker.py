@@ -74,6 +74,11 @@ TRADE_COLS = [
 
 VALID_TIEBREAK = ("sl_first",)
 
+# 相关性闸门的尾部窗口（交易日）。60 个交易日 ≈ 一个季度：
+# 短于此会把噪声当信号，长于此会让"最近才变高相关"的两个名字漏过去。
+# 它是**实现参数**而不是策略旋钮（preset 只声明 max_pair_corr 这个阈值）。
+CORR_LOOKBACK = 60
+
 EXIT_REASONS = ("sl", "sl_gap", "tp", "tp_gap", "max_hold", "eod")
 
 
@@ -204,6 +209,10 @@ def _bar_index(panel: pd.DataFrame) -> tuple[dict[str, dict[str, int]], list[pd.
         # 买卖价差估计（Corwin-Schultz，逐日、因果）。用 **as-traded** high/low ——
         # 价差是物理盘口属性，复权价会把它缩放成另一个量。与面板同生命周期缓存，
         # 所以搜索里几千次模拟只算一次。
+        # 尾部收益（相关性闸门用；因果：只用 ≤T 的价格）
+        rc = data[sym]["raw_close"]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            data[sym]["ret1"] = np.concatenate([[np.nan], rc[1:] / rc[:-1] - 1.0])
         data[sym]["spread_bps"] = spread_mod.rolling_median(
             spread_mod.corwin_schultz(sub["raw_high"].to_numpy(dtype=float),
                                       sub["raw_low"].to_numpy(dtype=float)))
@@ -296,6 +305,16 @@ def simulate(
     max_heat = None if max_heat is None else float(max_heat)
     max_dd_halt = None if max_dd_halt is None else float(max_dd_halt)
 
+    # 组合内两两相关性上限（审计 D6）。用**尾部相关**而不是外部行业分类：
+    #   * 数据驱动、因果（只用 ≤ 信号日的收益）、不需要我们没有的行业数据；
+    #   * 只与**已在场**的标的做两两比较（≤2 笔），不是全矩阵 ⇒ 每次入场 O(在持数)，
+    #     不用每天算 3028² 的相关矩阵。
+    # 语义：相关性高的两个名字在经济上是**同一个仓位**，同时持有等于加倍下注。
+    max_pair_corr = spec["max_pair_corr"]
+    if max_pair_corr is not None and not (-1.0 <= float(max_pair_corr) <= 1.0):
+        raise BrokerError(f"max_pair_corr ∈ [-1,1]，得到 {max_pair_corr!r}")
+    max_pair_corr = None if max_pair_corr is None else float(max_pair_corr)
+
     if max_positions < 1:
         raise BrokerError(f"max_positions 必须 >= 1,得到 {max_positions}")
     if not (0 < position_fraction <= 1.0):
@@ -357,8 +376,37 @@ def simulate(
     def planned_risk(pos: Position) -> float:
         return pos.sl_width * pos.entry_price * pos.size
 
+    def trailing_corr(a: str, b: str, end_idx: int, dates: list) -> float:
+        """a 与 b 在**截至信号日**的尾部窗口里的相关系数（对齐到共同日期）。
+
+        对齐必须按**日期**而不是按下标：面板里各标的的日期覆盖不同（晚间上市、
+        停牌、退市），按下标对齐会把不同日期的收益配成一对 —— 那是错的相关系数，
+        而且错得看不出来。共同观测不足窗口一半 ⇒ 返回 nan（不判定）。
+        """
+        ka = per_sym.get(a, {})
+        kb = per_sym.get(b, {})
+        xa, xb = [], []
+        d0 = end_idx - CORR_LOOKBACK
+        for j in range(max(d0, 0), end_idx + 1):
+            d = dates[j]
+            ia, ib = ka.get(d), kb.get(d)
+            if ia is None or ib is None:
+                continue
+            ra, rb = data[a]["ret1"][ia], data[b]["ret1"][ib]
+            if np.isfinite(ra) and np.isfinite(rb):
+                xa.append(ra)
+                xb.append(rb)
+        if len(xa) < CORR_LOOKBACK // 2:
+            return float("nan")
+        xa_, xb_ = np.array(xa), np.array(xb)
+        if xa_.std() <= 0 or xb_.std() <= 0:
+            return float("nan")
+        return float(np.corrcoef(xa_, xb_)[0, 1])
+
     peak_equity = initial_cash
     stats_halted_days = 0
+    # 因相关性超限被挡掉的入场次数（审计 D6：这类约束此前完全没有）
+    stats_blocked_corr = 0
     # 窗口末尾因"当日无 bar"而**无法**清算的仓位个数（见步骤 3b 的注释）。
     stats_unliquidated = 0
     # 持仓**当日无 bar** 的次数（停牌/退市/数据中断）。审计 A3：这些日子权益是按
@@ -572,6 +620,15 @@ def simulate(
                     # 开盘时仍持有(它当天盘中才出场)⇒ 不得在当日再次建仓,
                     # 否则等于用一根尚未走完的 bar 同时做两件事。
                     continue
+                if max_pair_corr is not None and book.positions:
+                    # 与**已在场**的每个标的比尾部相关（审计 D6）。超限就不建并计数 ——
+                    # 相关性高的两个名字同时持有，经济上等于加倍下注同一件事。
+                    # 窗口右端取**信号日**（prev_idx）：入场日的收益在开盘那一刻还不知道。
+                    if any((lambda c: np.isfinite(c) and c > max_pair_corr)(
+                            trailing_corr(sym, other, prev_idx, days))
+                           for other in list(book.positions)):
+                        stats_blocked_corr += 1
+                        continue
                 k = per_sym.get(sym, {}).get(day)
                 if k is None:
                     continue
@@ -770,6 +827,7 @@ def simulate(
     # 陈旧重估占"持仓-日"的比例：>0 才说明有停牌/退市真的进了回测。
     pos_days = int(equity["n_pos"].sum())
     metrics["stale_position_days"] = int(stats_stale_days)
+    metrics["n_blocked_by_corr"] = int(stats_blocked_corr)
     metrics["pct_position_days_stale"] = (stats_stale_days / pos_days) if pos_days else 0.0
     # 判据只有一条：窗口结束时账本里还剩不剩仓位。
     # 剩 ⇒ 权益口径含未实现浮盈、而交易口径只覆盖已平仓 ⇒ 两组数不同源。

@@ -46,6 +46,9 @@ OPTIONAL_KEYS: tuple[str, ...] = (
     "max_weight",          # 单名名义额 / 权益 上限
     "max_heat",            # 组合计划风险（Σ 止损宽度×价格×股数）/ 权益 上限
     "max_drawdown_halt",   # 自峰值回撤超过它 ⇒ 停止开新仓（停机开关）
+    # 组合内**两两相关性**上限（数据驱动，无外部行业分类）：新仓与任一在持标的的
+    # 尾部相关超过它就不建。见 broker 里的实现说明（审计 D6：此前完全没有相关性约束）。
+    "max_pair_corr",
     # ---- 止损穿价深度（2026-10-17 审计 E2）----
     # 盘中触发止损时的成交位置：fill_trigger = sl_price − θ × (sl_price − bar_low)。
     # θ=0 是既有行为（假定止损价上无限流动性）；θ=1 是"按当日最低价成交"，
@@ -76,6 +79,7 @@ DEFAULTS: dict[str, object] = {
     "max_weight": None,
     "max_heat": None,
     "max_drawdown_halt": None,
+    "max_pair_corr": None,
     "spread_model": "none",
     # 默认清算：它让头条收益与 E[R]/胜率/盈亏比落在**同一个样本**上，
     # 而且方向保守（多付一次出场成本）。不想要就显式写 False。
@@ -125,6 +129,8 @@ SPEC_LABELS: dict[str, tuple[str, "callable"]] = {
     "max_weight": ("单名上限", lambda v: ("**未设**" if v is None else f"{float(v):.0%} 权益")),
     "max_heat": ("组合热风险上限", lambda v: ("**未设**" if v is None else f"{float(v):.0%} 权益")),
     "max_drawdown_halt": ("回撤停机", lambda v: ("**未设**" if v is None else f"{float(v):.0%}")),
+    "max_pair_corr": ("组合内相关性上限",
+                      lambda v: ("**未设**" if v is None else f"两两 ≤ {float(v):.2f}")),
     "atr_sl_mult": ("止损宽度", lambda v: "—" if v is None else f"{float(v):g}×ATR"),
     "atr_tp_mult": ("止盈宽度", lambda v: "—" if v is None else f"{float(v):g}×ATR"),
     "sl_pct": ("止损宽度", lambda v: "—" if v is None else f"{float(v):.2%}"),
