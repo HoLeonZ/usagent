@@ -49,7 +49,10 @@ EQUITY_KEY_COLS = ["date", "equity", "cash", "n_pos"]
 # 而 golden 基线必须钉在一个不会自己动的坐标上(vintage 另有一道断言看住数据)。
 CASES: list[dict] = [
     {"name": "us_uptrend_pullback_v1", "preset": "us_uptrend_pullback_v1",
-     "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": True},
+     # 窗口随**数据 vintage**变（CLI 的默认窗口由 panel.first_signal_date 算出）：
+     # 2026-10-17 换源重下后面板起点晚了一个自然日 ⇒ 预热后的首个信号日也跟着移一天。
+     # 这两处必须同步，否则 "is_cli_default" 这个标注就成了空话（有测试钉住）。
+     "start": "2024-04-10", "end": "2026-10-17", "is_cli_default": True},
     {"name": "us_uptrend_pullback_12m_target", "preset": "us_uptrend_pullback_12m_target",
      "start": "2025-10-14", "end": "2026-10-14", "is_cli_default": False},
     # WFV 搜索选出的候选:窗口取**全可评估期**,让行为锁覆盖尽量多的分支

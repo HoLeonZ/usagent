@@ -21,14 +21,39 @@ CHECKS: list[tuple[str, bool, str]] = []
 # 同一个量级）。用它把"可疑但反正不会交易的名字"与"会进研究结论的名字"分开 ——
 # 前者若也报警，运维层会训练出"反正每天都红"的疲劳（审计已吃过这个教训）。
 POOL_MIN_ADV = 3e7
+POOL_WINDOW = 60          # 与 research/universe.DEFAULT_LOOKBACK 一致
+POOL_MIN_COVERAGE = 0.9   # 与 research/universe.DEFAULT_MIN_COVERAGE 一致
 
 
 def _pool_symbols(con) -> set[str]:
+    """"此刻可交易的池内标的" —— 与 `research/universe` 的 liquidity 模式**同一套判据**：
+    近 60 个交易日的成交额均值 ≥ 门槛 **且** 出勤率 ≥ 90%。
+
+    为什么必须带上出勤率（2026-10-17 实测）：ACCV 这类名字近 60 日只成交了 12 天
+    （出勤 20%），成交额却够大 —— 于是它能过旧口径的"池内"，并被判为"缺档"。
+    而引擎的取池是**逐日**判定的（`continuity_ok`），根本不会选它。
+    两套口径不一致，会让校验报出引擎根本不会交易的名字（反过来也会漏）。
+    """
     rows = con.execute(
-        "SELECT symbol, AVG(a) FROM (SELECT symbol, volume*close AS a, "
+        "SELECT symbol, AVG(a), COUNT(*) FROM (SELECT symbol, volume*close AS a, "
         "ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) rn FROM ohlcv) "
-        "WHERE rn <= 60 GROUP BY symbol HAVING AVG(a) >= ?", (POOL_MIN_ADV,)).fetchall()
+        "WHERE rn <= ? GROUP BY symbol HAVING AVG(a) >= ? AND "
+        "COUNT(*) >= ?", (POOL_WINDOW, POOL_MIN_ADV,
+                          POOL_WINDOW * POOL_MIN_COVERAGE)).fetchall()
     return {r[0] for r in rows}
+
+
+def _pool_view(items: list[str], pool: set[str]) -> tuple[list[str], int, bool]:
+    """把一串"有问题的标的"分成 (池内明细, 池外个数, 池是否为空)。
+
+    池为空时**按全部标的判**（返回第三项 True 告知调用方）—— 否则这类"池内才判失败"
+    的检查会在算不出流动性时**静默通过**，那是比误报更坏的失败模式。
+    ⚠️ 池为空时明细必须返回**全部**违规者，而不是"在池内的那些"（池是空的 ⇒ 那样会
+    得到"1 只但例子里什么都没有"这种自相矛盾的消息 —— 实测踩过）。
+    """
+    if not pool:
+        return list(items), 0, True
+    return [x for x in items if x in pool], sum(1 for x in items if x not in pool), False
 
 
 def _split_pool(items, pool: set[str], all_symbols: set[str]) -> tuple[int, int, bool]:
@@ -90,11 +115,23 @@ def main() -> int:
                 gappy.append((s, c, expected))
         gappy.sort(key=lambda x: x[1] / x[2])
         pool = _pool_symbols(con)
-        g_in, g_out, pool_empty = _split_pool([s for s, _c, _e in gappy], pool, set())
-        check("池内个股无中间缺口（池外稀疏交易是正常的）", g_in == 0,
-              ("⚠️ 算不出流动性池 ⇒ 按**全部标的**判；" if pool_empty else "")
-              + f"池内缺档 {g_in} 只 / 池外 {g_out} 只（池外多为低价低流动、并非每日成交的名字）"
-              + (f"（例：{[(s, c, e) for s, c, e in gappy if s in pool][:4]}）" if g_in else ""))
+        # 池内只看**近 POOL_WINDOW 个交易日**：历史中段的缺口属于"那时它还不在机会集里"的
+        # 那些日子（引擎的取池是逐日判定的，那几天的资格是 False）。
+        # 拿整段历史去判池内名字，等于把"当年不可交易"算成"今天的数据坏了"。
+        recent = {r[0] for r in con.execute(
+            "SELECT symbol FROM (SELECT symbol, ROW_NUMBER() OVER "
+            "(PARTITION BY symbol ORDER BY date DESC) rn FROM ohlcv) "
+            "WHERE rn <= ? GROUP BY symbol HAVING COUNT(*) >= ?",
+            (POOL_WINDOW, POOL_WINDOW * POOL_MIN_COVERAGE)).fetchall()}
+        # 池为空 ⇒ 按**全部标的**判（否则这条检查会在算不出流动性时静默通过）
+        scope = pool if pool else {s for s, _c, _e in gappy}
+        recent_gap = sorted(scope - recent)
+        check(f"池内个股近 {POOL_WINDOW} 个交易日无缺口", not recent_gap,
+              ("⚠️ 算不出流动性池 ⇒ 按**全部标的**判；" if not pool else "")
+              + f"最近缺档 {len(recent_gap)} 只"
+              + (f"（例：{recent_gap[:5]}）" if recent_gap else "")
+              + f" ｜ 全历史口径另有 {len([s for s, _c, _e in gappy if (not pool or s in pool)])} 只"
+                f"（多为「当年不在池里」的稀疏期，引擎逐日判定已排除）")
 
         starts = sorted(r[2] for r in rows)
         late = sum(1 for s in starts if s > d0)
@@ -142,11 +179,12 @@ def main() -> int:
             gap = len(expected_sessions(date.fromisoformat(m) + timedelta(days=1), last_panel))
             if gap >= 5:
                 cut[sym] = gap
-        c_in, c_out, _ = _split_pool(list(cut), pool, set())
-        check("池内无序列尾部截断（缺 ≥5 个交易日）", c_in == 0,
-              f"池内 {c_in} 只 / 池外 {c_out} 只"
-              + (f"（例：{sorted(((s, g) for s, g in cut.items() if s in pool), key=lambda x: -x[1])[:4]}）"
-                 if c_in else ""))
+        c_list, c_out, c_empty = _pool_view(list(cut), pool)
+        check("池内无序列尾部截断（缺 ≥5 个交易日）", not c_list,
+              ("⚠️ 算不出流动性池 ⇒ 按**全部标的**判；" if c_empty else "")
+              + f"池内 {len(c_list)} 只 / 池外 {c_out} 只"
+              + (f"（例：{sorted(((s, cut[s]) for s in c_list), key=lambda x: -x[1])[:4]}）"
+                 if c_list else ""))
 
         # ── 取数源：同一标的不得混源（审计 G9）──
         # 两个源的价格口径相同但**事件来源不同**（Yahoo 给显式 dividends/splits，
@@ -175,11 +213,16 @@ def main() -> int:
               (close/prev >= 1.98 AND ABS(close/prev - ROUND(close/prev)) / ROUND(close/prev) < 0.01)
               OR (prev/close >= 1.98 AND ABS(prev/close - ROUND(prev/close)) / ROUND(prev/close) < 0.01))
             ORDER BY symbol, date""").fetchall()
-        b_in, b_out, _ = _split_pool([s for s, *_ in breaks], pool, set())
-        check("池内无疑似价格基数断层", b_in == 0,
-              f"池内 {b_in} 只 / 池外 {b_out} 只（池外多为仙股/破产壳：实测有标的在 "
-              f"$0.00001 价位上刷出 110 倍的假跳变，成交量仅几十股）"
-              + (f"（例：{[s for s, *_ in breaks if s in pool][:4]}）" if b_in else ""))
+        # 已由引擎**按标的×日期**排除（`universe.untrustworthy_jumps`），所以这里
+        # **不判失败**（否则每天都红 = 告警疲劳）；但也不能不报 —— 它是"待人工复核"的
+        # 未决项：要判定它到底是真实事件还是缺失的公司行动，需要我们没有的数据源。
+        b_list, b_out, b_empty = _pool_view([s for s, *_ in breaks], pool)
+        check(f"[提示·非阻断] 池内整数倍跳变 {len(set(b_list))} 只（已按标的×日期排除出机会集）",
+              True,
+              ("⚠️ 算不出流动性池 ⇒ 按**全部标的**判；" if b_empty else "")
+              + f"池内 {len(set(b_list))} 只 / 池外 {b_out} 只 ｜ 示例 "
+              + f"{sorted(set(b_list))[:6]} ｜ 判定需要公司行动数据源；"
+                f"本轮处置是「不交易那一天」，不是「修价格」")
 
         # 覆盖率
         cov = {r[0] for r in con.execute(

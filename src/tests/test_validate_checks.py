@@ -48,6 +48,14 @@ def _checks() -> dict[str, tuple[bool, str]]:
     return {name: (ok, detail) for name, ok, detail in validate.CHECKS}
 
 
+def _jump_check() -> tuple[bool, str]:
+    """跳变项现在是**非阻断的提示**（引擎已按标的×日期排除），所以断言要看**计数**
+    而不是 ok 标志。名字里带前缀，按前缀找，改名字不会让测试静默失效。"""
+    hits = [(ok, d) for name, ok, d in validate.CHECKS if "整数倍跳变" in name]
+    assert hits, f"没有找到跳变检查项：{[n for n, _, _ in validate.CHECKS]}"
+    return hits[0]
+
+
 def _run(tmp_path, monkeypatch, **kw) -> dict[str, tuple[bool, str]]:
     _seed(tmp_path, monkeypatch, **kw)
     validate.CHECKS.clear()
@@ -93,10 +101,9 @@ def test_basis_break_is_detected(tmp_path, monkeypatch):
     n = len(RECENT)
     closes = [100.0] * (n // 2) + [110.0] * (n - n // 2)
     closes[n // 2] = 1100.0                                    # 断层：正好 10 倍
-    got = _run(tmp_path, monkeypatch, basis={"AAA": closes})
-    ok, detail = got["池内无疑似价格基数断层"]
-    assert not ok, "整数倍断层应当被抓到"
-    assert "AAA" in detail
+    _run(tmp_path, monkeypatch, basis={"AAA": closes})
+    ok, detail = _jump_check()
+    assert "池内 1 只" in detail, f"整数倍断层应当被数出来：{detail}"
 
 
 def test_reverse_split_break_is_detected(tmp_path, monkeypatch):
@@ -104,8 +111,8 @@ def test_reverse_split_break_is_detected(tmp_path, monkeypatch):
     n = len(RECENT)
     closes = [100.0] * (n // 2) + [10.0] * (n - n // 2)
     closes[n // 2] = 1.0 / 15.0 * 100.0                        # 1/15 反向拆股的重述
-    got = _run(tmp_path, monkeypatch, basis={"BBB": closes})
-    assert not got["池内无疑似价格基数断层"][0]
+    _run(tmp_path, monkeypatch, basis={"BBB": closes})
+    assert "池内 1 只" in _jump_check()[1]
 
 
 def test_split_event_explains_the_jump(tmp_path, monkeypatch):
@@ -118,7 +125,7 @@ def test_split_event_explains_the_jump(tmp_path, monkeypatch):
                     (RECENT[n // 2].isoformat(),))
     validate.CHECKS.clear()
     validate.main()
-    assert _checks()["池内无疑似价格基数断层"][0], _checks()["池内无疑似价格基数断层"][1]
+    assert "池内 0 只" in _jump_check()[1], _jump_check()[1]
 
 
 def test_extra_non_session_date_is_flagged(tmp_path, monkeypatch):

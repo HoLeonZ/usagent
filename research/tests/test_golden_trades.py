@@ -36,7 +36,12 @@ def real_chain():
     if not G.db_available():
         pytest.skip(f"本地 DB 不在({G.db_path()}),跳过 golden 基线比对(§6:skip 不 error)")
     try:
-        panel = panel_mod.load_full_panel()
+        # ⚠️ 必须用**取池的唯一入口**（与 `golden_baseline._run_all` 同一条路径）。
+        # 这里此前是裸的 `load_full_panel()`（= 模式 all，不做流动性/连续性过滤）——
+        # 于是"测试"与"重生成"跑的是**两个不同的池子**：池子不同 ⇒ 等权指数不同 ⇒
+        # regime 门不同 ⇒ 交易列表不同。实测 12m preset 在两条路径上是 15 笔 vs 18 笔，
+        # 而且重生成之后**仍然对不上**（因为漂移的根因是两条入口，不是基线过期）。
+        panel = panel_mod.load_panel_for_preset(G.presets.get_preset(G.CASES[0]["preset"]))
     except Exception as exc:                                  # noqa: BLE001
         pytest.skip(f"本地 DB 不可读,跳过 golden 基线比对:{type(exc).__name__}: {exc}")
     return panel, indicators.compute_all(panel)
