@@ -88,7 +88,10 @@
       `sharpe_significance_pvalue` 的单位 bug 一并修；broker 的 Sharpe 收进 metrics。
       实测：12m preset 日收益偏度 +1.46 / 峰度 40.0 / 自相关 +0.201
       （此前被静默当成 iid 正态）。
-- [ ] **B4** 跨族/跨因子判词不控制族错误率（Bonferroni 只在一个文件里落地）。
+- [x] **B4** 族错误率校正（`dff05bb`）：`metrics.benjamini_hochberg`
+      + `two_sided_p`；factor_probe 两族判据接上 `_family_report`
+      （Bonferroni 与 BH-FDR 两个口径 + 点比较口径 + 「族校正后不存活」标注）。
+      实测 ret21 的 IC t=2.12 点比较显著、族校正后不存活。
 - [ ] **B5** 选择判据在不同窗口子集上取均值/argmax（预热门导致第一折无有效行；
       空信号窗被排除而不计 0）。判据必须落在可比的窗口集合上。
 - [ ] **B6** 判据④（随机对照中位）在零边缘下约 31% 为真，使"四条同时为假"的
