@@ -42,6 +42,7 @@ from __future__ import annotations
 import copy
 
 from core import costs
+from research import universe as mod_universe
 from core.preset_contract import validate
 
 # v33_long_reverse_v21 的原始信号参数,**一个都没改**(基线的意义就在于此)
@@ -70,8 +71,11 @@ DEFAULT_RISK_PER_TRADE: float = 0.01
 PRESETS: dict[str, dict] = {
     "us_uptrend_pullback_v1": {
         # ---- 数据口径 ----------------------------------------------------
-        "universe": "oi100",              # 596 只;今日快照,含幸存者偏差(见 BASELINE.md)
-        "universe_note": "今日 OI>=100 快照,非 PIT —— 面板本身偏乐观",
+        # PIT 取池：截至 T 的滚动成交额门槛，因果（见 research/universe.py）。
+        # 曾经这里是字符串 "oi100" —— 一份**今日**的期权 OI 快照，而引擎根本不读它。
+        "universe": dict(mod_universe.DEFAULT_SPEC),
+        "universe_note": "PIT 流动性池(截至 T 的 60 日滚动成交额 >= $3e7, 因果) —— "
+                     "仍未消除的是**退市名单缺失**:DB 里没有已退市标的,所以绝对收益应读作上界",
 
         # ---- 执行语义(CLAUDE.md §2/§4 的可移植部分)----------------------
         "intraday_tiebreak": "sl_first",
@@ -242,7 +246,7 @@ IOC 部分成交未实现 —— 实测余量 24~127 倍(策略池全是 amount6
 
 
 PRESETS["us_uptrend_pullback_12m_target"] = {
-    "universe": "oi100",
+    "universe": dict(mod_universe.DEFAULT_SPEC),
     "intraday_tiebreak": "sl_first",
     "max_volume_participation": costs.MAX_VOLUME_PARTICIPATION,
     "cost_bps_roundtrip": costs.COST_BPS_ROUNDTRIP,
@@ -354,8 +358,9 @@ C 退出 48 + D 杠杆 8)。复现:
     排序层面的改动不产生可证实的 alpha」),而在换信号源(基本面/事件维度)。
 """
 PRESETS["us_uptrend_pullback_wfv"] = {
-    "universe": "oi100",              # 596 只;今日快照,含幸存者偏差(见 README)
-    "universe_note": "今日 OI>=100 快照,非 PIT —— 面板本身偏乐观",
+    "universe": dict(mod_universe.DEFAULT_SPEC),   # PIT 流动性池(见 research/universe.py)
+    "universe_note": "PIT 流动性池(截至 T 的 60 日滚动成交额 >= $3e7, 因果) —— "
+                     "仍未消除的是**退市名单缺失**:DB 里没有已退市标的,所以绝对收益应读作上界",
     # ---- 执行语义(与 v1 同一套)---------------------------------------
     "intraday_tiebreak": "sl_first",
     "max_volume_participation": costs.MAX_VOLUME_PARTICIPATION,
@@ -485,8 +490,9 @@ FAMILY_SEARCH_NOTE = """
     python -m research.run_baseline --preset us_reversal_dip_v1 --start 2024-04-09 --end 2025-10-13
 """
 PRESETS["us_reversal_dip_v1"] = {
-    "universe": "oi100",
-    "universe_note": "今日 OI>=100 快照,非 PIT —— 面板本身偏乐观",
+    "universe": dict(mod_universe.DEFAULT_SPEC),
+    "universe_note": "PIT 流动性池(截至 T 的 60 日滚动成交额 >= $3e7, 因果) —— "
+                     "仍未消除的是**退市名单缺失**:DB 里没有已退市标的,所以绝对收益应读作上界",
     # ---- 信号:走 families.py(不走 signals.select_entries)--------------------
     "family": "str",
     "family_params": {"drop5": 0.12, "min_drawdown": 0.20, "min_off_low": 0.05,

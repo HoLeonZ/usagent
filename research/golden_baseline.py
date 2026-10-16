@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import sys
 from pathlib import Path
@@ -38,7 +39,7 @@ import pandas as pd
 from research import broker, indicators, presets, regime as regime_mod, signals
 from research import holdout as mod_holdout
 from research.broker import TRADE_LOCK_COLS, trade_fingerprint
-from research.panel import data_vintage, load_full_panel
+from research.panel import data_vintage, load_panel_for_preset
 
 BASELINE_DIR = Path(__file__).resolve().parent / "tests" / "baselines"
 
@@ -198,7 +199,15 @@ def save_baseline(name: str, case: dict, info: dict) -> Path:
 # ---------------------------------------------------------------- CLI
 
 def _run_all() -> list[tuple[dict, dict]]:
-    panel = load_full_panel()
+    # 行为锁跑的是一个**面板**，所以所有用例必须声明同一个取池口径；
+    # 声明不一致 ⇒ 这个锁本身是歧义的，fail-fast（§0），绝不挑一个默认的用。
+    specs = {json.dumps(presets.get_preset(c["preset"]).get("universe"), sort_keys=True)
+             for c in CASES}
+    if len(specs) != 1:
+        raise ValueError(
+            f"CASES 里的 preset 声明了 {len(specs)} 种不同的 universe —— "
+            f"行为锁必须跑在同一个池子上；请统一声明或拆成两把锁：{sorted(specs)}")
+    panel = load_panel_for_preset(presets.get_preset(CASES[0]["preset"]))
     ind = indicators.compute_all(panel)
     return [(c, run_case(c, panel, ind)) for c in CASES]
 

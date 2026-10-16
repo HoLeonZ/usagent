@@ -49,6 +49,7 @@ import numpy as np
 import pandas as pd
 
 from research import indicators as I
+from research import universe as mod_universe
 from research.metrics import bonferroni_t_threshold
 from research import panel as P
 from research import presets as PS
@@ -75,8 +76,14 @@ def _masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     """逐层掩码。每层都是上一层再 ∧ 一个条件。"""
     sp = PS.V21_SIGNAL_PARAMS
 
+    # 池资格在最底层（§3 PIT Mandate）：每一层都从 ready 派生，所以基准层
+    # ("base" = 各层条件的历史基准率) 也自动变成**池内**基准率 ——
+    # 拿全池当基准会把"策略买不到的票"混进分母（审计 C1 同源缺陷）。
+    eligible = mod_universe.require_eligible_mask(df)
+
     ready = (
-        df["ma60"].notna() & df["ma120"].notna() & df["mom120"].notna()
+        eligible
+        & df["ma60"].notna() & df["ma120"].notna() & df["mom120"].notna()
         & df["amount60"].notna() & df["macd_bar"].notna()
         & df["macd_bar_prev"].notna() & df["above_ma60_ratio"].notna()
         & df["prev_close"].notna()
@@ -279,7 +286,8 @@ def main() -> int:
     a = ap.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
-    p = P.load_full_panel()
+    # 诊断脚本没有 preset，用项目默认的 PIT 取池口径（显式，不靠隐含默认）
+    p = P.load_full_panel(universe=mod_universe.DEFAULT_SPEC)
     ind = I.compute_all(p)
 
     if a.measure:

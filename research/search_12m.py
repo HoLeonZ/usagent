@@ -438,7 +438,8 @@ def main() -> int:
     a = ap.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
-    p = panel_mod.load_full_panel()
+    # 诊断脚本没有 preset，用项目默认的 PIT 取池口径（显式，不靠隐含默认）
+    p = panel_mod.load_full_panel(universe=mod_universe.DEFAULT_SPEC)
     ind = indicators.compute_all(p)
     reg = regime.compute_regime(ind)
 

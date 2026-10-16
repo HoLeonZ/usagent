@@ -17,6 +17,8 @@ import logging
 
 import pandas as pd
 
+from research import universe as mod_universe
+
 logger = logging.getLogger(__name__)
 
 REGIME_COLS = ["date", "ew_index", "ew_ma", "breadth_sm", "regime_ok"]
@@ -46,8 +48,19 @@ def compute_regime(
     if missing:
         raise ValueError(f"compute_regime 需要 {sorted(needed)},缺 {sorted(missing)}")
 
+    # 基准 = **可投资集**的等权指数（§3 PIT Mandate + §5 Attribution Mandate）。
+    # 这一步同时修掉一处口径错配（2026-10-17 审计 C1）：基准此前是"未过门的全池"
+    # 等权，而策略只在 amount60 带内交易 —— 两条头条超额的分母里混着策略永远买不到
+    # 的票，"跑输基准 X pp"因此不能被读成选股能力的缺失。
+    # 缺 eligible 列 fail-fast：基准的构成必须是显式的。
+    pool = panel_ind[mod_universe.require_eligible_mask(panel_ind)]
+    if pool.empty:
+        raise ValueError(
+            "regime：可投资集为空（eligible 全 False）—— 取池口径把整个池子筛掉了。"
+            "检查 universe 声明（research/universe.py），不要静默产出 NaN 指数")
+
     daily = (
-        panel_ind.groupby("date", sort=True)
+        pool.groupby("date", sort=True)
         .agg(ret=("ret1", "mean"), breadth=("above_ma20", "mean"))
         .reset_index()
     )

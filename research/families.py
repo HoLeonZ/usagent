@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from research import signals
+from research import universe as mod_universe
 
 logger = logging.getLogger(__name__)
 
@@ -599,6 +600,8 @@ def select(ind: pd.DataFrame, family_id: str, params: dict, lo: str, hi: str,
             df = df.merge(reg[["date", *need]].drop_duplicates("date"), on="date", how="left")
     params = {**FIXED.get(family_id, {}), **params}   # 固定轴先铺底,网格轴覆盖它
     m = MASK[family_id](df, params)
+    # 池资格（§3 PIT Mandate）：族也只在**可投资集**里找信号，缺列 fail-fast。
+    m &= mod_universe.require_eligible_mask(df)
     m &= (df["date"] >= pd.Timestamp(lo)) & (df["date"] < pd.Timestamp(hi))
     hits = df[m]
     if use_regime and reg is not None and not hits.empty:

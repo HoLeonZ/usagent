@@ -41,6 +41,9 @@ def make_synth_panel(symbols: tuple[str, ...] = ("AAA", "BBB"), bars: int = BARS
             # as-traded 价与复权价相同(合成分红为 0)⇒ 双价格体系对这份 panel 是恒等操作。
             "raw_open": open_, "raw_high": high, "raw_low": low, "raw_close": close,
             "volume": volume, "amount": volume * close, "dividends": 0.0,
+            # 池资格是**必填**列（§3 PIT Mandate）：合成面板的执行语义是
+            # "全员随时可交易"，所以这里恒为 True。要测取池行为请显式改这一列。
+            "eligible": True,
         }))
     return pd.concat(frames, ignore_index=True).sort_values(
         ["symbol", "date"]).reset_index(drop=True)

@@ -24,6 +24,8 @@ import logging
 
 import pandas as pd
 
+from research import universe as mod_universe
+
 logger = logging.getLogger(__name__)
 
 ENTRY_COLS = [
@@ -111,6 +113,10 @@ def select_entries(
     )
     if max_amount is not None:
         mask = mask & (df["amount60"] <= max_amount)
+
+    # 池资格（§3 PIT Mandate）：只在**可投资集**里找信号。缺列 fail-fast ——
+    # 不允许存在"忘了带池子"却照样出数字的路径。
+    mask = mask & mod_universe.require_eligible_mask(df)
 
     # 指标就绪(不靠 bfill 补预热期的空洞)
     for c in ("ma60", "above_ma60_ratio", "amount60", "macd_bar",

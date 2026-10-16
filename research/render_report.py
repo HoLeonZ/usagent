@@ -546,7 +546,7 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
         raise NotImplementedError(
             f"preset {preset_name!r} 走的是 families.py 的族({P['family']}),"
             f"逐笔 HTML 报告尚未支持;数字请用 research.run_baseline / research.family_search")
-    p = panel_mod.load_full_panel()
+    p = panel_mod.load_panel_for_preset(P)
     ind = indicators.compute_all(p)
     # 卡片上的均线也要落在 **as-traded** 轴上(与蜡烛、止损止盈线、买卖标记同轴)——
     # 见 candles_svg 的注释:混轴会让图上出现从未发生的止损击穿。

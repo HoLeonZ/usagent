@@ -84,12 +84,16 @@ def load_full_panel(
     symbols: Iterable[str] | None = None,
     *,
     adjust: str = "total",
-    universe_path: str | None = None,
+    universe: dict | str | None = None,
 ) -> pd.DataFrame:
     """载入全部标的的全部历史,返回长表。
 
     symbols 为 None 时,从 ohlcv 表里取全部 distinct symbol。
     adjust 默认 "total"(拆股+分红复权,总收益口径)。
+
+    `universe` 是**取池声明**（见 research/universe.py）:挂一列因果可判定的
+    `eligible`,不删行。此前的 `universe_path` 形参是**死参数**（声明了却没人读,
+    2026-10-17 审计 A2）,已删除并换成真正会被消费的 `universe`。
     """
     import db  # 延迟导入:调用方可能用 -m 从仓库根运行
 
@@ -137,7 +141,23 @@ def load_full_panel(
         len(panel), panel["symbol"].nunique(),
         panel["date"].min().date(), panel["date"].max().date(), adjust,
     )
-    return panel[PANEL_COLS + RAW_COLS + ["dividends", "splits"]]
+    panel = panel[PANEL_COLS + RAW_COLS + ["dividends", "splits"]]
+    # 取池资格：挂列不删行（见 research/universe.attach 的 docstring）。
+    from research import universe as mod_universe
+    return mod_universe.attach(panel, universe)
+
+
+def load_panel_for_preset(preset: dict, *, adjust: str = "total") -> pd.DataFrame:
+    """按 preset 声明的 `universe` 载入面板 —— **取池的唯一入口**。
+
+    存在的理由：preset 声明过 `universe`，而引擎此前根本不读它（core/preset_contract.py
+    的 docstring 自己承认），回测池等于"DB 里恰好有什么"（2026-10-17 审计 A2）。
+    把入口收成一个函数之后，「忘了带池子」在代码层就没有位置了 ——
+    这也正是本仓库为根除"声明了却没人读"而立的规矩（§2(a)）。
+    """
+    if not isinstance(preset, dict):
+        raise PanelError(f"load_panel_for_preset 需要 preset dict，得到 {type(preset).__name__}")
+    return load_full_panel(adjust=adjust, universe=preset.get("universe"))
 
 
 def data_vintage(panel: pd.DataFrame) -> str:

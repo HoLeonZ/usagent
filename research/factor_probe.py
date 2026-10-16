@@ -46,7 +46,8 @@ import numpy as np
 import pandas as pd
 
 from core import costs
-from research import families as F, holdout as mod_holdout, indicators, metrics, panel as mod_panel
+from research import families as F, holdout as mod_holdout, indicators, metrics
+from research import panel as mod_panel, universe as mod_universe
 
 logger = logging.getLogger("factor_probe")
 
@@ -287,7 +288,9 @@ def main(argv=None) -> int:
         print(f"⚠️ 后半段 {a.mid}..{a.hi} 此前已被 claim 消费 {prior} 次 ⇒ "
               f"本次的两半比较**不是样本外**。理由已记入台账：{a.force_holdout}\n")
 
-    ind = F.add_family_indicators(indicators.compute_all(mod_panel.load_full_panel()))
+    # 诊断脚本没有 preset，用项目默认的 PIT 取池口径（显式，不靠隐含默认）
+    ind = F.add_family_indicators(indicators.compute_all(
+        mod_panel.load_full_panel(universe=mod_universe.DEFAULT_SPEC)))
     cb = costs.COST_BPS_ROUNDTRIP
     if a.gate_scan:
         _gate_scan(ind, lo=a.lo, mid=a.mid, hi=a.hi, cost_bps=cb)

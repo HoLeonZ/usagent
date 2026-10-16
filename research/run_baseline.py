@@ -30,13 +30,16 @@ logger = logging.getLogger("run_baseline")
 
 
 @functools.lru_cache(maxsize=4)
-def _load_panel_and_indicators(adjust: str = "total"):
+def _load_panel_and_indicators(preset_name: str,
+                               adjust: str = "total"):
     """载入真库 + 算指标。按 adjust 记忆化:一次进程里 DB 不变,重复载入没有意义
     (审计后新增的入口一致性测试会反复调 run(),不缓存的话套件从 6 秒涨到 100 秒)。
 
     ⚠️ 返回的对象是共享的,调用方**不得就地修改** —— select_entries / simulate 都只读。
     """
-    p = panel_mod.load_full_panel(adjust=adjust)
+    # 取池口径由 preset 声明（见 panel.load_panel_for_preset）—— 缓存键因此必须
+    # 带上 preset 名，否则换个 preset 会命中上一个池子的面板。
+    p = panel_mod.load_panel_for_preset(presets.get_preset(preset_name), adjust=adjust)
     return p, indicators.compute_all(p)   # 必须用 compute_all(55列):
                                           # 带新过滤层的 preset 需要 rsi/stoch/bb/dist_high252 等列
 
@@ -46,7 +49,7 @@ def _build(args):
     # 指标价轴是**引擎约定**(§3(b):数学指标必须用分红回补价),不是 preset 旋钮 ——
     # 曾把它做成 preset 键,结果是「一个入口读它、另外四个入口静默忽略」。见
     # core.preset_contract.INDICATOR_PRICE_ADJUST。
-    p, ind = _load_panel_and_indicators(INDICATOR_PRICE_ADJUST)
+    p, ind = _load_panel_and_indicators(args.preset, INDICATOR_PRICE_ADJUST)
     reg = regime.compute_regime(ind, **(preset.get("regime") or {}))
     return p, ind, reg
 

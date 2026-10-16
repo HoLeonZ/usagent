@@ -305,9 +305,9 @@ def main(argv=None) -> int:
     if a.k_offset:
         print(f"(n_trials 起点 = {a.k_offset},来自之前的轮次;本轮的 DSR 按累计 k 计算)")
 
-    p = mod_panel.load_full_panel()
-    ind = F.add_family_indicators(indicators.compute_all(p))    # 族指标只算一次
     preset = presets.get_preset("us_uptrend_pullback_v1")
+    p = mod_panel.load_panel_for_preset(preset)
+    ind = F.add_family_indicators(indicators.compute_all(p))    # 族指标只算一次
     reg = regime.compute_regime(ind, **(preset.get("regime") or {}))
     train, test = windows()
     lo, hi = W.SEARCH_LO, W.SEARCH_HI

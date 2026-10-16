@@ -288,9 +288,9 @@ def main(argv: list[str] | None = None) -> int:
     if not a.run:
         ap.print_help()
         return 0
-    p = mod_panel.load_full_panel()
-    ind = indicators.compute_all(p)
     preset = presets.get_preset("us_uptrend_pullback_v1")
+    p = mod_panel.load_panel_for_preset(preset)
+    ind = indicators.compute_all(p)
     reg = regime.compute_regime(ind, **(preset.get("regime") or {}))
     try:
         report(ind, reg, force_holdout=a.force_holdout)
