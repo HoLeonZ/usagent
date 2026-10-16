@@ -54,9 +54,10 @@
 - [x] **A1** 增量刷新把厂商追溯重述后的价格写回 ⇒ 永久价格基数断层。
       **检测 + 自愈已完成**（`8b7b7af`）：重叠日期 close 变化 >5% 判重述 ⇒
       该标的整段重下重写，事件落 fetch_log；配套三条运维判据见 `601a629`。
-- [ ] **A7**（由 A1 拆出）落盘层仍是 `INSERT OR REPLACE`：重述只能**事后修复**，
-      无法复现"当时看到的那一版数据"，也没有 append-only/vintage 快照。
-      审计表也只记首条变动日期。要做的是版本化的价格表（或每日 vintage 快照）。
+- [x] **A7** 重述审计 + vintage 台账（`09ee759`）：`ohlcv_restatement`
+      记**全部**变动日期与旧值（追加写、可回滚），`vintage_log` 每次取数记一行
+      （含价格摘要）⇒"用的是哪一版数据"可审计。摘要实现收成一处（`db.price_digest_of`）。
+      ⚠️ 这买到的**不是**完整版本化存储：表本身仍是覆盖写，回滚要靠审计表手工重放。
 - [x] **A2** PIT 取池（`9a49bad`）：`research/universe.py`（membership / liquidity /
       因果 `eligible` 列）+ 取池入口 `load_panel_for_preset` + 四个消费点强制该列
       （信号、族、基准、screen 各层基准率）+ 四个 preset 改成 PIT 声明。
