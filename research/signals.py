@@ -189,6 +189,7 @@ def filter_earnings_window(
     by_symbol: dict[str, list[pd.Timestamp]],
     *,
     forward_days: int,
+    coverage: tuple[pd.Timestamp, pd.Timestamp] | None,
 ) -> pd.DataFrame:
     """剔除「持有窗口内夹着财报」的信号。
 
@@ -208,7 +209,9 @@ def filter_earnings_window(
     for _, r in sig.iterrows():
         lo = pd.Timestamp(r["date"]) + pd.Timedelta(days=1)
         hi = pd.Timestamp(r["date"]) + pd.Timedelta(days=forward_days)
-        keep.append(not has_earnings_between(by_symbol, str(r["symbol"]), lo, hi))
+        # coverage 必填：窗口不在日历覆盖内会抛错（审计 A5：未知 ≠ 没有）
+        keep.append(not has_earnings_between(by_symbol, str(r["symbol"]), lo, hi,
+                                             coverage=coverage))
     out = sig[keep].reset_index(drop=True)
     logger.info("filter_earnings_window: %d -> %d 个信号(剔除 %d)",
                 len(sig), len(out), len(sig) - len(out))

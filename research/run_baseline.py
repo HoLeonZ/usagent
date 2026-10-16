@@ -67,11 +67,15 @@ def _signals(ind, reg, preset, lo, hi, *, avoid_earnings: bool = False):
         sig = signals.select_entries(ind, start_date=lo, end_date=hi,
                                      regime_df=reg if preset.get("regime") else None, **kw)
     if avoid_earnings:
-        from research.earnings import earnings_dates_by_symbol, load_calendar
-        by_symbol = earnings_dates_by_symbol(load_calendar())
+        from research.earnings import (calendar_coverage, earnings_dates_by_symbol,
+                                       load_calendar)
+        cal = load_calendar()
+        # ⚠️ 覆盖率必须显式传下去（审计 A5）：日历没覆盖到的地方**不许**静默当成
+        # "没有财报"。这里不吞异常 —— 覆盖不足就让它抛，并给出可行动的下一步。
         sig = signals.filter_earnings_window(
-            sig, by_symbol,
-            forward_days=int(preset.get("avoid_earnings_forward_calendar_days", 26)))
+            sig, earnings_dates_by_symbol(cal),
+            forward_days=int(preset.get("avoid_earnings_forward_calendar_days", 26)),
+            coverage=calendar_coverage(cal))
     return sig
 
 

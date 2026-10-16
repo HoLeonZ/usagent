@@ -148,11 +148,43 @@ def earnings_dates_by_symbol(cache: dict[str, list[str]]) -> dict[str, list[pd.T
     return out
 
 
+def calendar_coverage(calendar: dict[str, list[str]]) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """日历**覆盖到的**日期闭区间 (min, max)；日历为空时返回 None。
+
+    为什么需要它（审计 A5）：`has_earnings_between` 此前在"符号不在日历里"与
+    "那段日期我们根本没取过"两种情况下都返回 **False**（= 窗口内没有财报），
+    于是**过滤在样本尾部静默失效** —— 你看到的是一个"已经剔除了财报窗"的信号表，
+    而实际上它只是没数据。未知 ≠ 没有。
+    """
+    if not calendar:
+        return None
+    ds = sorted(pd.Timestamp(d) for d in calendar)
+    return ds[0], ds[-1]
+
+
 def has_earnings_between(by_symbol: dict[str, list[pd.Timestamp]], symbol: str,
-                         lo: pd.Timestamp, hi: pd.Timestamp) -> bool:
-    """[lo, hi] 闭区间内该标的是否有财报 —— 二分查找。"""
+                         lo: pd.Timestamp, hi: pd.Timestamp, *,
+                         coverage: tuple[pd.Timestamp, pd.Timestamp] | None) -> bool:
+    """[lo, hi] 闭区间内该标的是否有财报 —— 二分查找。
+
+    ⚠️ `coverage` 是**必填**的日历覆盖区间：窗口落在覆盖之外就抛错，
+    而不是回答"没有财报"。把"不知道"说成"没有"是这条路径此前最危险的失效方式 ——
+    它让一个失效的过滤器看起来像在正常工作。
+    """
+    if coverage is None:
+        raise EarningsError(
+            "日历为空 —— 无法判定财报窗（先把日历取下来：python -m research.earnings）")
+    c0, c1 = coverage
+    if pd.Timestamp(lo) < c0 or pd.Timestamp(hi) > c1:
+        raise EarningsError(
+            f"财报日历只覆盖 {c0.date()}..{c1.date()}，而查询窗口是 "
+            f"{pd.Timestamp(lo).date()}..{pd.Timestamp(hi).date()} —— **未知不等于没有**。\n"
+            f"  处置二选一：① 把日历补齐到覆盖整个样本期；"
+            f"② 不用财报过滤（并在结论里写明「未做事件过滤」）。\n"
+            f"  绝不接受：让过滤器在样本尾部静默失效却当成已生效。")
     ds = by_symbol.get(symbol)
     if not ds:
+        # 覆盖之内、符号不在日历里 ⇒ 那段时间它确实没有财报（这是**确定性**的答案）
         return False
     import bisect
     i = bisect.bisect_left(ds, lo)
