@@ -62,10 +62,13 @@
 
 ### B. 研究治理（统计与预注册）
 
-- [ ] **B1** 一次性 holdout **没有任何代码护栏或账本**：同一段窗口被三处读取，
-      `wfv_search` 每次运行都无条件重跑。加机器可验证的 consumption ledger。
-- [ ] **B2** 跨轮 `n_trials` / `n_comparisons` 无单一事实来源（人肉传参 + 硬编码），
-      唯一强制的检查是 `>= 1`。收进 `core/`，成为可审计台账。
+- [x] **B1** 一次性 holdout 的消费台账（`6eb470b`）：同一窗口二次 claim 默认拒绝，
+      给理由才放行且理由入账；`kind="lock"` 只登记不烧窗口；台账落在
+      `research/results/`（run artifact）。wfv_search / factor_probe / golden_baseline
+      三处读取者全部接线。
+- [~] **B2** `n_trials` 的单一事实来源：台账已给出 `n_windows()`（§5 要求"改动评估
+      窗口本身"计入迭代）。**尚未做**：把 wfv_search / family_search / factor_probe
+      里手写的 k 与 `--k-offset` 人肉传参改成从台账派生。
 - [ ] **B3** DSR 的 `n_returns` 三个入口三种口径，且四处调用都不传
       `skewness/kurtosis`（非正态修正恒为默认值 ⇒ 惰性）。
 - [ ] **B4** 跨族/跨因子判词不控制族错误率（Bonferroni 只在一个文件里落地）。
