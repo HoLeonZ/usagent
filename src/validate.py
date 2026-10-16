@@ -17,6 +17,32 @@ from trading_calendar import expected_sessions, last_session_on_or_before
 
 CHECKS: list[tuple[str, bool, str]] = []
 
+# 「池内」= 最近 60 个交易日的成交额均值 ≥ 研究池门槛（与 research/universe.DEFAULT_SPEC
+# 同一个量级）。用它把"可疑但反正不会交易的名字"与"会进研究结论的名字"分开 ——
+# 前者若也报警，运维层会训练出"反正每天都红"的疲劳（审计已吃过这个教训）。
+POOL_MIN_ADV = 3e7
+
+
+def _pool_symbols(con) -> set[str]:
+    rows = con.execute(
+        "SELECT symbol, AVG(a) FROM (SELECT symbol, volume*close AS a, "
+        "ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) rn FROM ohlcv) "
+        "WHERE rn <= 60 GROUP BY symbol HAVING AVG(a) >= ?", (POOL_MIN_ADV,)).fetchall()
+    return {r[0] for r in rows}
+
+
+def _split_pool(items, pool: set[str], all_symbols: set[str]) -> tuple[int, int, bool]:
+    """(池内个数, 池外个数, 池是否为空)。
+
+    ⚠️ 池为空时**按全部标的判**（返回的第三项告知调用方），否则这类"池内才判失败"的
+    检查会在算不出流动性时**静默通过** —— 那是比误报更坏的失败模式（合成复核就抓过
+    "判据形同虚设"这一类）。
+    """
+    if not pool:
+        return sum(1 for _ in items), 0, True
+    return (sum(1 for x in items if x in pool),
+            sum(1 for x in items if x not in pool), False)
+
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     CHECKS.append((name, ok, detail))
@@ -63,8 +89,12 @@ def main() -> int:
             if expected and c < expected * 0.9:
                 gappy.append((s, c, expected))
         gappy.sort(key=lambda x: x[1] / x[2])
-        check("个股无中间缺口（已排除新股晚上市）", not gappy,
-              f"缺档 {len(gappy)} 只" + (f"（例：{[(s, c, e) for s, c, e in gappy[:4]]}）" if gappy else ""))
+        pool = _pool_symbols(con)
+        g_in, g_out, pool_empty = _split_pool([s for s, _c, _e in gappy], pool, set())
+        check("池内个股无中间缺口（池外稀疏交易是正常的）", g_in == 0,
+              ("⚠️ 算不出流动性池 ⇒ 按**全部标的**判；" if pool_empty else "")
+              + f"池内缺档 {g_in} 只 / 池外 {g_out} 只（池外多为低价低流动、并非每日成交的名字）"
+              + (f"（例：{[(s, c, e) for s, c, e in gappy if s in pool][:4]}）" if g_in else ""))
 
         starts = sorted(r[2] for r in rows)
         late = sum(1 for s in starts if s > d0)
@@ -98,6 +128,19 @@ def main() -> int:
         check("无「不该有数据」的日期（周末/休市）", not unexpected,
               f"多余 {len(unexpected)} 天" + (f"（例：{unexpected[:4]}）" if unexpected else ""))
 
+        # ── 取数源：同一标的不得混源（审计 G9）──
+        # 两个源的价格口径相同但**事件来源不同**（Yahoo 给显式 dividends/splits，
+        # 备用源是从 (a,c) 反解的）。混在同一条序列里，两个口径会无痕地拼在一起 ——
+        # 而这种污染没有任何别的检查能发现。
+        mixed = con.execute(
+            "SELECT symbol, COUNT(DISTINCT source) k FROM ohlcv "
+            "GROUP BY symbol HAVING k > 1").fetchall()
+        check("同一标的不混源", not mixed,
+              f"混源 {len(mixed)} 只" + (f"（例：{[m[0] for m in mixed[:5]]}）" if mixed else ""))
+        unknown = con.execute(
+            "SELECT COUNT(*) FROM ohlcv WHERE source IS NULL OR source=''").fetchone()[0]
+        check("每行都有取数源", unknown == 0, f"缺失 {unknown} 行")
+
         # ── 疑似基数断层：厂商重述遗留（增量刷新时代的病灶）──
         # 判据：单日倍数**恰好**接近一个整数 ≥2（容差 1%，且当天没有拆股事件）。
         # 真实行情的暴涨暴跌几乎不会精确等于整数倍，而"厂商按 k:1 重述整段历史、
@@ -112,8 +155,11 @@ def main() -> int:
               (close/prev >= 1.98 AND ABS(close/prev - ROUND(close/prev)) / ROUND(close/prev) < 0.01)
               OR (prev/close >= 1.98 AND ABS(prev/close - ROUND(prev/close)) / ROUND(prev/close) < 0.01))
             ORDER BY symbol, date""").fetchall()
-        check("无疑似价格基数断层", not breaks,
-              f"疑似 {len(breaks)} 处" + (f"（例：{[(s, d) for s, d, _, _ in breaks[:4]]}）" if breaks else ""))
+        b_in, b_out, _ = _split_pool([s for s, *_ in breaks], pool, set())
+        check("池内无疑似价格基数断层", b_in == 0,
+              f"池内 {b_in} 只 / 池外 {b_out} 只（池外多为仙股/破产壳：实测有标的在 "
+              f"$0.00001 价位上刷出 110 倍的假跳变，成交量仅几十股）"
+              + (f"（例：{[s for s, *_ in breaks if s in pool][:4]}）" if b_in else ""))
 
         # 覆盖率
         cov = {r[0] for r in con.execute(

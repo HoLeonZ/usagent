@@ -35,6 +35,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,14 @@ MODES = (MODE_MEMBERSHIP, MODE_LIQUIDITY, MODE_ALL)
 # liquidity 模式的默认值：60 个交易日的滚动成交额 ≥ $3e7。
 # 门槛的来源不是调参：hiagent 的 E 条件本来就用 amount60 ≥ 3e7（A 股口径），
 # 这里把同一条门槛**改成因果的逐日判定**（原来是"全窗已实现"的池子筛选）。
+# 不可信的整数倍跳变。实测（2026-10-17 全量下载）：全池 141 只标的存在这种跳变，
+# 其中 11 只在流动性池内（CORT/NVAX/REPL 一类）。价位从 $1 到 $1000 都有，
+# 倍数贴近整数（2.0/3.0/0.5），而**拆股事件记录为空** —— 于是我们无法判断
+# 这到底是真实的暴涨暴跌，还是"vendor 没做公司行动调整"留下的基准断层。
+# 判据（因果：只看 t 与 t−1）:单日倍数**恰好**接近整数 ≥2（双向）且当日无拆股记录。
+JUMP_RATIO = 2.0
+JUMP_TOLERANCE = 0.01
+
 DEFAULT_LOOKBACK = 60
 DEFAULT_MIN_DOLLAR_VOLUME = 3e7
 
@@ -203,6 +212,14 @@ def eligibility(panel: pd.DataFrame, spec: UniverseSpec,
         for r in mem.itertuples(index=False):
             ok |= (syms == r.symbol) & (dates >= r.start) & (dates <= r.end)
 
+    # 数据可信度与"取池口径"正交，所以**三种模式都施加**：说不清真伪的那一天，
+    # 无论池子怎么定义都不该被交易（见 untrustworthy_jumps 的说明）。
+    bad = untrustworthy_jumps(panel)
+    if bad.any():
+        logger.warning("universe: 排除 %d 个「整数倍跳变且无拆股记录」的标的×日期"
+                       "（无法判断是真实行情还是基准断层）", int(bad.sum()))
+        ok &= ~bad
+
     if spec.min_price is not None:
         if "close" not in panel.columns:
             raise UniverseError("min_price 需要 panel 的 close 列")
@@ -210,6 +227,33 @@ def eligibility(panel: pd.DataFrame, spec: UniverseSpec,
         ok &= panel["close"] >= spec.min_price
 
     return ok.fillna(False).astype(bool)
+
+
+def untrustworthy_jumps(panel: pd.DataFrame) -> pd.Series:
+    """逐行标记「这一天无法判断价格真伪」的整数倍跳变。
+
+    为什么不直接修价格：我们**不知道**它是不是真事件（实测这些跳变当天成交量放大
+    1000 倍、`c` 与 `a` 一致 ⇒ 更像真事件），所以既不能当拆股去复权，也不能假装没发生。
+    能做的只有一件事：**不拿它交易**。这是保守且可辩护的处置 ——
+    "数据说不清的行情，不进机会集"。它按标的×日期生效，只影响那一天。
+    """
+    if panel.empty or not {"symbol", "date", "raw_close", "splits"} <= set(panel.columns):
+        return pd.Series(False, index=panel.index)
+    ordered = panel.sort_values(["symbol", "date"], kind="mergesort")
+    prev = ordered.groupby("symbol", sort=False)["raw_close"].shift(1)
+    cur = ordered["raw_close"]
+    ratio = (cur / prev).to_numpy(dtype=float)
+    sp = ordered["splits"].fillna(0.0).to_numpy(dtype=float)
+
+    def near_int(x: np.ndarray) -> np.ndarray:
+        r = np.round(x)
+        return np.isfinite(x) & (r >= JUMP_RATIO) & (np.abs(x - r) / np.maximum(r, 1.0)
+                                                    < JUMP_TOLERANCE)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inv = np.where((ratio > 0) & np.isfinite(ratio), 1.0 / ratio, np.nan)
+    flag = ((sp <= 0) & (near_int(ratio) | near_int(inv)))
+    return pd.Series(flag, index=ordered.index).reindex(panel.index).fillna(False)
 
 
 def require_eligible_mask(df: pd.DataFrame) -> pd.Series:

@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     dividends   REAL DEFAULT 0,
     splits      REAL DEFAULT 0,
     fetched_at  TEXT NOT NULL,
+    -- 取数源（yahoo / stockanalysis …）。2026-10-17 审计 G9：本库现在有**两个**
+    -- 价格口径相同但事件来源不同的源；没有这一列时，用 A 源铺历史再被 B 源增量
+    -- 刷新，同一标的的序列会混进两种口径而且**无从检测**。
+    source      TEXT,
     PRIMARY KEY (symbol, date)
 );
 CREATE INDEX IF NOT EXISTS ix_ohlcv_date ON ohlcv(date);
@@ -87,9 +91,43 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return con
 
 
+# 需要向后兼容的列迁移：列名 → DDL 片段。**只加列、不改列、不删列。**
+_MIGRATIONS: dict[str, str] = {
+    "ohlcv": "ALTER TABLE ohlcv ADD COLUMN source TEXT",
+}
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    """幂等的加列迁移（老的库没有 source 列）。
+
+    为什么必须显式做这一层而不是靠 CREATE TABLE IF NOT EXISTS：后者对**已存在**的
+    表什么都不做 —— 于是"新加的列"在最需要它（老库）的地方恰好不存在，
+    而写入会因为列数不匹配而报错或静默丢列。
+    """
+    have = {r[1] for r in con.execute("PRAGMA table_info(ohlcv)").fetchall()}
+    if not have:
+        return
+    if "source" not in have:
+        con.execute(_MIGRATIONS["ohlcv"])
+
+
+def backfill_source(con: sqlite3.Connection, source: str) -> int:
+    """把 source 为空的历史行**显式**标注为某个源。
+
+    不放进 init():默认值必须是"未知",而不是替操作者猜一个。谁跑这次回填、
+    为什么是这个值，要由调用方说清（本项目唯一一次：2026-10-17 全量下载，
+    3028 只全部来自 stockanalysis）。
+    """
+    if not source:
+        raise ValueError("backfill_source 需要显式的源名 —— 不许猜")
+    cur = con.execute("UPDATE ohlcv SET source=? WHERE source IS NULL", (source,))
+    return int(cur.rowcount)
+
+
 def init(path: Path | None = None) -> None:
     with connect(path) as con:
         con.executescript(SCHEMA)
+        _migrate(con)
         con.commit()
 
 

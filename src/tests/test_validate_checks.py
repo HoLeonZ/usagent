@@ -94,7 +94,7 @@ def test_basis_break_is_detected(tmp_path, monkeypatch):
     closes = [100.0] * (n // 2) + [110.0] * (n - n // 2)
     closes[n // 2] = 1100.0                                    # 断层：正好 10 倍
     got = _run(tmp_path, monkeypatch, basis={"AAA": closes})
-    ok, detail = got["无疑似价格基数断层"]
+    ok, detail = got["池内无疑似价格基数断层"]
     assert not ok, "整数倍断层应当被抓到"
     assert "AAA" in detail
 
@@ -105,7 +105,7 @@ def test_reverse_split_break_is_detected(tmp_path, monkeypatch):
     closes = [100.0] * (n // 2) + [10.0] * (n - n // 2)
     closes[n // 2] = 1.0 / 15.0 * 100.0                        # 1/15 反向拆股的重述
     got = _run(tmp_path, monkeypatch, basis={"BBB": closes})
-    assert not got["无疑似价格基数断层"][0]
+    assert not got["池内无疑似价格基数断层"][0]
 
 
 def test_split_event_explains_the_jump(tmp_path, monkeypatch):
@@ -118,7 +118,7 @@ def test_split_event_explains_the_jump(tmp_path, monkeypatch):
                     (RECENT[n // 2].isoformat(),))
     validate.CHECKS.clear()
     validate.main()
-    assert _checks()["无疑似价格基数断层"][0], _checks()["无疑似价格基数断层"][1]
+    assert _checks()["池内无疑似价格基数断层"][0], _checks()["池内无疑似价格基数断层"][1]
 
 
 def test_extra_non_session_date_is_flagged(tmp_path, monkeypatch):

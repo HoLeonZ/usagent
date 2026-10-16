@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover
 REQUEST_TIMEOUT = 20  # 秒。Yahoo 慢速限流时会吊住连接，必须有上限
 
 COLS = ["symbol", "date", "open", "high", "low", "close", "volume",
-        "dividends", "splits", "fetched_at"]
+        "dividends", "splits", "fetched_at", "source"]
 
 FIELDS = {"Open": "open", "High": "high", "Low": "low", "Close": "close",
           "Volume": "volume", "Dividends": "dividends", "Stock Splits": "splits"}
@@ -64,7 +64,18 @@ def _frames_from_batch(raw: pd.DataFrame, batch: list[str]) -> list[tuple[str, p
     return out
 
 
-def _to_rows(sym: str, df: pd.DataFrame, now: str) -> list[tuple]:
+# 物理上不可能的行计数（OHLC 自洽性）。落库前拦掉，而不是让它们污染面板。
+_IMPOSSIBLE = {"ohlc": 0}
+
+
+def _to_rows(sym: str, df: pd.DataFrame, now: str, source: str) -> list[tuple]:
+    """把一只标的的 DataFrame 转成待写入的行。
+
+    ⚠️ **物理上不可能的行不落库**（§0：宁可拒收，也不要往库里落不可能的价）。
+    实测：本数据源有 470 行满足 `close ∉ [low, high]`，且全部集中在**最后一根 bar**
+    （vendor 当日快照未定型/收盘口径不一致）。这类行一旦入库，会污染该日的
+    ret1/ATR/触发判定 —— 而它们在物理上根本不可能发生。
+    """
     df = df.rename(columns=FIELDS)
     if "close" not in df.columns:
         return []
@@ -72,11 +83,15 @@ def _to_rows(sym: str, df: pd.DataFrame, now: str) -> list[tuple]:
     rows = []
     for ts, r in df.iterrows():
         d = ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10]
+        o, h, lo, c = _f(r.get("open")), _f(r.get("high")), _f(r.get("low")), _f(r.get("close"))
+        if None not in (o, h, lo, c) and (h < max(o, c) - 1e-4 or lo > min(o, c) + 1e-4):
+            _IMPOSSIBLE["ohlc"] += 1
+            continue                       # 不可能的 OHLC：拒收（走日志，不静默计数）
         rows.append((
             sym, d,
             _f(r.get("open")), _f(r.get("high")), _f(r.get("low")), _f(r.get("close")),
             _f(r.get("volume")), _f(r.get("dividends"), 0.0), _f(r.get("splits"), 0.0),
-            now,
+            now, source,
         ))
     return rows
 
@@ -142,7 +157,7 @@ def repair_symbol(con, sym: str, start: date, end: date, now: str, run_id: str) 
     frames = _frames_from_batch(raw, [sym]) if raw is not None else []
     n = 0
     for _s, df in frames:
-        n += db.upsert_many(con, "ohlcv", COLS, _to_rows(_s, df, now))
+        n += db.upsert_many(con, "ohlcv", COLS, _to_rows(_s, df, now, SOURCE))
     log.warning("厂商重述 ⇒ 整段重下重写 %s（%d 行）", sym, n)
     db.log(con, run_id, now, "ohlcv", sym, "repaired", f"整段重写 {n} 行")
     return n
@@ -151,7 +166,7 @@ def repair_symbol(con, sym: str, start: date, end: date, now: str, run_id: str) 
 def write_symbol(con, sym: str, df: pd.DataFrame, now: str, run_id: str
                  ) -> tuple[int, list[tuple[str, float, float]]]:
     """写入一只标的（先检测重述、再写）。返回 (写入行数, 重述日期列表)。"""
-    rows = _to_rows(sym, df, now)
+    rows = _to_rows(sym, df, now, SOURCE)
     if not rows:
         return 0, []
     fresh = {r[1]: r[5] for r in rows}          # COLS: ..., date(1), ..., close(5), ...
@@ -340,10 +355,15 @@ def download(universe_name: str, limit: int | None, skip_covered: bool,
             time.sleep(0.4)
 
     stats["rows"] = total
+    stats["impossible_ohlc"] = _IMPOSSIBLE["ohlc"]
+    if _IMPOSSIBLE["ohlc"]:
+        log.warning("拒收 %d 行不可能的 OHLC（close 落在 [low, high] 之外）—— "
+                    "vendor 当日快照未定型是已知成因，下一轮增量刷新会重取",
+                    _IMPOSSIBLE["ohlc"])
     log.info("完成，写入 %d 行（成功 %d 只 / 失败 %d 只 / 无数据 %d 只 / "
-             "重述 %d 只→已整段重写 %d 只）",
+             "重述 %d 只→已整段重写 %d 只 / 拒收 %d 行）",
              total, stats["ok"], stats["error"], stats["empty"],
-             stats["restated"], stats["repaired"])
+             stats["restated"], stats["repaired"], stats["impossible_ohlc"])
     return stats
 
 
