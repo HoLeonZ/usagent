@@ -35,8 +35,29 @@ from core.preset_contract import (
 from research import (broker, metrics, presets, render_report, run_baseline, screen,
                       search_12m)
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 # ---------------------------------------------------------------- §2(b) 单一来源
+
+# (键名, 不允许再出现的字面量)。这些常数只允许在 core/costs.py 里出现一次。
+def _production_modules() -> list[Path]:
+    """**全部**生产模块：`research/` + `src/` + `tools/` 的 .py（自动枚举）。
+
+    为什么必须自动枚举（审计 G4）：此前两条护栏各自手写一个 **7 元组**，而仓库有 18 个
+    research 模块、`src/` 与 `tools/` 完全在外 —— 于是"新加的模块"默认落在护栏之外，
+    而**只覆盖一部分的护栏比没有护栏更坏**：它给出虚假的安全感（测试全绿，但保护的是
+    另一批文件）。排除测试与 `__init__`。
+    """
+    roots = [REPO_ROOT / "research", REPO_ROOT / "src", REPO_ROOT / "tools"]
+    out: list[Path] = []
+    for r in roots:
+        for f in sorted(r.glob("*.py")):
+            if f.name.startswith("_") or "test" in f.name or f.name == "conftest.py":
+                continue
+            out.append(f)
+    return out
+
 
 # (键名, 不允许再出现的字面量)。这些常数只允许在 core/costs.py 里出现一次。
 CONST_LITERALS = [
@@ -60,8 +81,8 @@ def test_execution_constants_have_a_single_definition():
     只扫生产模块:测试 fixture 里的字面量是为隔离而故意写的,不算「引擎或 preset 里
     重定义常数」。
     """
-    for mod in (broker, presets, run_baseline, search_12m, render_report, metrics, screen):
-        for i, line in enumerate(Path(mod.__file__).read_text(encoding="utf-8").splitlines(), 1):
+    for path in _production_modules():
+        for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
             if "=" not in line and '":' not in line:
@@ -73,7 +94,7 @@ def test_execution_constants_have_a_single_definition():
                 shapes = (f'"{key}": {lit}', f"{key}={lit}", f"{key} = {lit}",
                           f"{key}: float = {lit}", f'"{key}": {lit},')
                 assert not any(sh in line for sh in shapes), (
-                    f"{mod.__name__}:{i} 又定义了一遍 {key} = {lit} —— "
+                    f"{path.relative_to(REPO_ROOT)}:{i} 又定义了一遍 {key} = {lit} —— "
                     f"常数只能 import core.costs(§2(b) 要求恰好定义一次)"
                 )
 
@@ -224,8 +245,8 @@ def test_cost_constants_cannot_be_rebound_through_an_intermediate_name():
     两行各自只满足一半条件,160 个用例全绿。这里按 AST 走一遍:任何被赋值的名字、
     dict 键、关键字参数,只要名字里含有该常数的语义片段,其右值就不许是那个字面量。
     """
-    for mod in (broker, metrics, presets, render_report, run_baseline, screen, search_12m):
-        tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    for path in _production_modules():
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
         for node in ast.walk(tree):
             pairs: list[tuple[str, object]] = []
             if isinstance(node, ast.Assign):
@@ -240,6 +261,42 @@ def test_cost_constants_cannot_be_rebound_through_an_intermediate_name():
             for name, value in pairs:
                 hit = _binds_a_constant(name, value)
                 assert hit is None, (
-                    f"{mod.__name__}:{getattr(node, 'lineno', '?')} 用中间名字 {name!r} "
+                    f"{path.relative_to(REPO_ROOT)}:{getattr(node, 'lineno', '?')} "
+                    f"用中间名字 {name!r} "
                     f"又定义了一遍常数 {hit} —— 常数只能 import core.costs(§2(b))"
                 )
+
+
+# ---------------------------------------------------------------- 护栏的覆盖范围（G4）
+
+def test_the_guard_covers_every_production_module():
+    """护栏必须覆盖**全部**生产模块，而不是一个手写的子集（审计 G4）。
+
+    此前两条护栏各写一个 7 元组，而 research/ 有 18 个模块、`src/` 与 `tools/` 完全在外。
+    只覆盖一部分的护栏**比没有护栏更坏**：它给出虚假的安全感。
+    """
+    mods = _production_modules()
+    names = {p.name for p in mods}
+    assert len(names) >= 18, f"只发现 {len(names)} 个生产模块：{sorted(names)}"
+    # 此前明确落在覆盖之外的几个，现在必须在册
+    for must in ("families.py", "family_search.py", "wfv_search.py", "factor_probe.py",
+                 "holdout.py", "universe.py", "factor_model.py", "download_ohlcv.py",
+                 "snapshot_options.py", "parse_family_logs.py"):
+        assert must in names, f"{must} 不在护栏的覆盖范围内"
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert "_production_modules()" in src
+    # ⚠️ 判据本身要拼出来：直接写字面量的话，这一行**会把自己扫到**（自指）。
+    # 这个坑在本仓库已经踩过三次（护栏扫到自己），一律用拼接规避。
+    hand_written = "for mod in " + "(broker"
+    assert hand_written not in src, "护栏又被写回手写模块元组了"
+
+
+def test_the_guard_would_actually_catch_a_violation():
+    """护栏要有牙：直接喂一个"用中间名字重定义常数"的结点，必须被认出来。"""
+    hit = _binds_a_constant("_FEE_BPS_", ast.parse("5.0").body[0].value)
+    assert hit is not None and "cost_bps_roundtrip" in hit
+    assert _binds_a_constant("_SLIP_", ast.parse("1.0").body[0].value) is not None
+    assert _binds_a_constant("_CASH_", ast.parse("100_000.0").body[0].value) is not None
+    # 反向：与常数无关的名字不该误报
+    assert _binds_a_constant("max_positions", ast.parse("5.0").body[0].value) is None
+    assert _binds_a_constant("_FEE_BPS_", ast.parse("'5.0'").body[0].value) is None
