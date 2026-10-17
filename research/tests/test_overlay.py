@@ -44,12 +44,34 @@ def test_full_exposure_equals_the_strategy_itself():
 
 
 def test_zero_exposure_equals_the_pool():
-    """敞口恒为 0 ⇒ overlay 就是池指数（口径的左端点）。"""
+    """敞口恒为 0 ⇒ overlay 就是池指数（口径的左端点）。
+
+    ⚠️ 从**第二天**起：第一行的 `pct_change` 是"窗口开始之前一天 → 首日"的收益，
+    组合赚不到它，所以被置零（2026-10-17 台账 H1）。不置零的话，零敞口策略会显示
+    +0.44pp 的"超额"—— 实测过。
+    """
     r = np.resize([0.002, -0.001], 60)
     eq = _eq(np.ones(60), np.zeros(60), DAYS)
     out = O.overlay_from_equity(eq, _bench(DAYS, r))
-    pool = float(pd.Series(r, index=DAYS).add(1).prod() ** (365.25 / (DAYS[-1] - DAYS[0]).days) - 1)
+    pool = float(pd.Series(r[1:], index=DAYS[1:]).add(1).prod()
+                 ** (365.25 / (DAYS[-1] - DAYS[0]).days) - 1)
     assert out["cagr"] == pytest.approx(pool, rel=1e-9)
+
+
+def test_zero_exposure_gives_exactly_zero_excess():
+    """**不变量**：零敞口 ⇒ 超额恰好 0 —— 这是 H1 那处偏置的护栏。
+
+    它与上面那条测的不是一件事：上面测"overlay 等于池子"（同一条序列内的identity），
+    这条测"overlay 与**基准那另一把尺**相等"。偏置正是出在两个函数的**锚**不同上，所以
+    只有这条能在缺陷发生时变红（实测：修之前这里会得到 +0.44pp）。
+    """
+    r = np.resize([0.002, -0.001], 60)
+    reg = pd.DataFrame({"date": DAYS, "ew_index": np.cumprod(1 + np.r_[0.0, r[1:]]) * 100.0})
+    eq = _eq(np.ones(60), np.zeros(60), DAYS)
+    lo, hi = str(DAYS[0].date()), str((DAYS[-1] + pd.Timedelta(days=1)).date())
+    out = O.excess_vs_pool(eq, reg, lo, hi)
+    assert abs(out["excess"]) < 1e-9, \
+        f"零敞口却报出超额 {out['excess']:+.4%} —— 两把尺的锚又不一致了"
 
 
 def test_exposure_is_lagged_by_one_day():

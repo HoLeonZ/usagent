@@ -48,7 +48,15 @@ def overlay_from_equity(eq: pd.DataFrame, bench_ret: pd.Series, *,
 
     sret = eq["equity"].pct_change().fillna(0.0)
     w = eq["exposure"].shift(1).fillna(0.0)          # 前一日敞口（因果）
-    b = bench_ret.reindex(eq.index).fillna(0.0)
+    b = bench_ret.reindex(eq.index).fillna(0.0).copy()
+    # ⚠️ **第一天的池子收益必须置零**：`pct_change()` 的第一项是"窗口开始**之前**一天 →
+    # 窗口首日"的收益，而组合在这段窗口里根本赚不到它（第一天它还没持有任何东西）。
+    # 不置零的后果是**可测的**（2026-10-17 实测，台账 H1）：0 信号 / 0 成交 / 0 敞口的
+    # 策略会显示 **+0.44pp** 的"超额"，而 win 1.5 年的窗口上那个数就是首日池子收益的
+    # 年化 —— 于是"什么都不做"看起来赢了基准，任何候选也白得同样的分。
+    # 置零之后，"零敞口 ⇒ 超额恰好 0" 成为不变量（tests/test_overlay.py 钉住）。
+    if len(b):
+        b.iloc[0] = 0.0
     ov = w * sret + (1.0 - w) * b
 
     days = (eq.index[-1] - eq.index[0]).days
