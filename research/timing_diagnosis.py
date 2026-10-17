@@ -83,7 +83,11 @@ def block_control(b: np.ndarray, lengths: list[int], n_draws: int, rng) -> np.nd
 def analyse(b: pd.Series, expo: pd.Series, label: str, rng) -> dict:
     """一段窗口上的：在场日池子收益 vs 全窗，与随机块对照。"""
     bb = b.reindex(expo.index).to_numpy(float)
-    m = (expo.reindex(b.index).fillna(0.0) > 0).to_numpy()
+    # ⚠️ 掩码不能用 `exposure > 0`：低敞口策略可能**几乎每天都有小仓位**
+    # （实测 dip：620/694 天有仓位，但平均权重只有 22%），那样"在场日"≈全部天数，
+    # 这个体检就退化成空转。用"敞口达到自己均值的一半"当"真在场"。
+    thr = 0.5 * float(expo.mean())
+    m = (expo.reindex(b.index).fillna(0.0) >= thr).to_numpy()
     lengths = runs_of(m)
     obs = pool_prod(bb, np.where(m)[0])
     allv = pool_prod(bb, np.arange(len(bb)))
