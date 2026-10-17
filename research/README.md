@@ -204,13 +204,17 @@ $PY -m research.screen --tier trend_pullback --out results/candidates.json --not
 
 ## 交付物
 
-`presets.py` 里注册了三个,全部 **`validated = False`**,负面证据与参数同时记录(§5):
+`research/preset_defs/` 里注册了 6 条（**一条 preset 一个文件**；`presets.py` 只做扫描与门面），
+全部 **`validated = False`**，负面证据与参数同时记录（§5，写在各文件的 `VERDICT`/`NOTES` 里）：
 
 | preset | 它是怎么来的 | 一句话结论 |
 |---|---|---|
 | `us_uptrend_pullback_v1` | v21 参数原样搬过来 + ATR 归一化止损 + 风险预算仓位 | 无可证实的正 alpha（几乎全部仓位走止损出场） |
 | `us_uptrend_pullback_12m_target` | 在**单一窗口**上 argmax 搜出来的（旧 stage1/stage2） | 目标已不成立，且它的净值有相当一部分来自一次物理上不可能的记账 |
 | `us_uptrend_pullback_wfv` | **预注册 WFV** 搜索选出（训练窗取参、测试窗报数、一次性 holdout） | 相对 v1 有可重复的改善，但**绝对收益不成立**（holdout 为负） |
+| `us_reversal_dip_v1` | 多族横向比较里唯一在预注册四条判据上同时过关的族（`str`） | **绝对收益最好的一条**，但曝光匹配超额为负（跑输无脑持有）；硬证据是机制对照臂 |
+| `us_uptrend_pullback_wfv_noearn` | 只改一个变量：打开事件过滤（持有窗内撞财报就不做） | **已否**：剔除集比保留集更好 ⇒ 事件维度在判据上是负的 |
+| `us_uptrend_pullback_wfv_postearn` | 只改一个变量：只做「距上一份财报 ≤3 个交易日」 | **已否**：+0.01pp ≈ 什么都不做（口径修正前那个「+0.45pp」是 instrument 偏置） |
 
 > ⚠️ 这里**不再写具体数值**（§7：文档只写口径与复现方法，不写曾观测到什么）。
 > 数字请自己跑一条命令再生：`python -m research.run_baseline --preset <名>`，
@@ -222,6 +226,34 @@ $PY -m research.screen --tier trend_pullback --out results/candidates.json --not
 三个都不推荐实盘。要**复现**它们的数字、或按同一套纪律再搜一次,见下节。
 
 ---
+
+## 逐笔 HTML 报告 —— **公共能力**（变的只是策略，不变的是呈现）
+
+```bash
+$PY -m research.render_report                                   # 默认 preset（兼容旧行为）
+$PY -m research.render_report --preset us_reversal_dip_v1 \
+    --lo 2024-04-09 --hi 2026-10-14 --out research/results/dip.html
+$PY -m research.render_report --family xs_flow \
+    --params '{"xs_ret5_max": 0.1}' --out research/results/xs_flow.html
+```
+
+呈现（版式、K 线卡、止损止盈线、权益曲线、口径头、自检）在 **`research/html_report.py`**，
+对任何策略逐字相同；`render_report.py` 只是入口层（跑回测 → 交给它渲染）。每张卡含最常要的
+五样：**信号日的条件清单（实际值 vs 阈值）**、**入场价 / 出场价**（图上标注 + 表格两列）、
+**K 线图**、**当时的指标**。
+
+唯一与策略有关的入口是 `explain` 钩子：
+
+| 策略类型 | 条件清单来自 |
+|---|---|
+| signal 型 preset | `condition_rows`：A~F 条件表（阈值直接来自 preset） |
+| 族型（`--family`） | `family_explain_rows`：**AST 扫掩码源码**读出它实际读了哪些列 + 本次参数 |
+
+⇒ **新增一个族不用改渲染层**，也不必维护"这个族看哪些指标"的手写表（那种表必然与代码分叉）。
+判读依据一律是**策略自己声明的 `VERDICT`**（§5）；族没有 VERDICT ⇒ 报告就地明说
+「本策略没有声明负面证据」，除非调用方给 `--note`。自包含（无外链、无 `<script>`）
+由 `selfcheck` 强制：元素计数 / NaN 坐标 / 外链三项都有测试。
+
 
 ## 按预注册协议挖 preset(`wfv_search.py`)
 

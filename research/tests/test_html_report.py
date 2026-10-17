@@ -78,7 +78,12 @@ def test_only_the_strategy_changes_the_form_stays(chain):
     assert "us_reversal_dip_v1" in d_preset and "family:str" in d_family
     assert s_p["verdict"] and s_f["verdict"] is None
     assert "（本策略没有声明负面证据" in d_family
-    assert s_p["verdict"][:24] in d_preset
+    # VERDICT 里的 `**` 会被 inline_md 转成 <b>（否则首屏就会打出星号）⇒
+    # 断言落在「去掉标签后的纯文本」上，这样它既不受标签影响、又不绑定具体措辞。
+    plain_doc = re.sub(r"<[^>]+>", "", d_preset)
+    plain_verdict = s_p["verdict"].replace("**", "").replace("`", "")
+    assert plain_verdict[:40] in plain_doc, "策略自己的 VERDICT 没进报告"
+    assert "<b>不得用于实盘。</b>" in d_preset, "VERDICT 的粗体没被转换"
 
 
 def test_note_overrides_the_missing_verdict_fallback(chain):
@@ -106,7 +111,8 @@ def test_family_explain_rows_come_from_the_mask_itself(chain):
     for c in cols:
         assert c in codes, f"掩码读了 {c}，但清单里没有"
     assert "param.drop5" in codes, "本次用的参数必须列出来（否则读者不知道阈值是多少）"
-    # 诚实边界：族不打 ✓/✗（打勾要重算一遍掩码实现，那是第二条路径）
+    # 诚实边界：族**不打勾**（打勾要重算一遍掩码实现，那是第二条路径）⇒ 第五项必须是 None
+    assert all(ok is None for *_, ok in rows), "族的条件清单出现了 ✓/✗"
     assert all(thr == "—" for _, _, _, thr, _ in rows)
 
 
@@ -140,3 +146,32 @@ def test_presentation_is_defined_in_exactly_one_place():
     # 写死"30% 目标"的那段（只对某一条 preset 成立）已由**策略自己的 VERDICT** 取代
     assert "_target_note" not in rr
     assert "verdict" in rr
+
+
+def test_verdict_and_note_are_escaped_then_minimally_formatted():
+    """判读依据那一行插的是**策略的 VERDICT / --note**：先转义、再做最小行内 markdown。
+
+    2026-10-17 修：它此前是**裸插**（本文件其余文案全走 html.escape）—— 一个 `<` 就能
+    弄坏文档；而 VERDICT 里本来就写着 `**粗体**`，不转换就会原样打出星号（首屏截图上
+    一眼可见）。只做两种行内标记：`**粗体**` 与 `` `代码` ``。
+    """
+    f = H.inline_md
+    assert f("**不得用于实盘。** 见 `overlay.py`") == "<b>不得用于实盘。</b> 见 <code>overlay.py</code>"
+    assert f("a<b & c>d") == "a&lt;b &amp; c&gt;d"
+    assert "<script" not in f("<script>alert(1)</script>")
+
+
+def test_a_hostile_note_cannot_break_the_document(chain):
+    """带 `<script>` 的 note 进报告后**仍然自包含**（转义生效的证据，不只是断言字符串）。
+
+    用**族**来测：preset 有自己的 VERDICT，note 本来就会被它优先顶掉（那是有意的优先级）。
+    """
+    doc, n, _ = _render(chain, family="str", note="<script>alert(1)</script>")
+    assert H.selfcheck(doc, n) == []
+    assert "&lt;script&gt;" in doc
+
+
+def test_family_rows_render_the_third_state_not_a_checkmark(chain):
+    """族的行在报告里必须是「·」而不是「✓」—— 一个**假 ✓** 比没有这一列更坏。"""
+    doc, _, _ = _render(chain, family="str")
+    assert 'class="">·</td>' in doc, "族的行没有渲染成'不适用'"

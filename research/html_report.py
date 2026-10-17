@@ -284,6 +284,20 @@ def equity_svg(eq: pd.DataFrame, bench: pd.Series | None) -> str:
 
 
 
+def inline_md(text: str) -> str:
+    """**先转义、再做最小行内 markdown** —— 只认 `**粗体**` 与 `` `代码` ``。
+
+    为什么必须转义（2026-10-17 修）：这一行插的是**策略自己声明的 VERDICT** 或调用方给的
+    `--note`，此前是裸插进 HTML；而本文件其余文案一律走 `html.escape`。一个 `<` 就能把
+    文档弄坏（或更糟）。为什么不直接上 markdown 库：报告必须**自包含、无外部依赖**，
+    而这里只需要两种行内标记。
+    """
+    out = html.escape(text or "")
+    out = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out, flags=re.S)
+    out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    return out
+
+
 CSS = """
 :root{--bg:#0f1115;--fg:#e6e8ee;--dim:#9aa3b2;--line:#262b36;--up:#31c48d;--dn:#f05252;
 --acc:#5b8def;--sl:#f05252;--tp:#31c48d;--warn:#f0b429;--card:#161a22}
@@ -370,7 +384,9 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                  f'{_spec["cost_bps_roundtrip"]:g}bp</div>')
     # 口径自报（审计 E5 及其同类）：与 run_baseline / --json 用的是**同一个函数**，
     # 所以两个入口不可能再各说一套。
-    _items = " ・ ".join(f"{e(lab)} <b>{e(val)}</b>"
+    # 口径标签里也有 `**强调**`（SPEC_LABELS 是为 Markdown 报告写的：**未设** / **不清算**），
+    # 所以这里与判读那一行走**同一个** `inline_md`，免得同一份文档里两种写法。
+    _items = " ・ ".join(f"{e(lab)} <b>{inline_md(val)}</b>"
                          for lab, val in describe_engine_spec(_spec))
     parts.append(f'<div class="sub" style="margin-top:-10px">生效口径：{_items}</div>')
     # 价格口径必须披露。2026-10-15 起是**双轨**(§3(b)):指标用复权价、成交与记账用
@@ -405,7 +421,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                  f'同期无脑等权持有 CAGR {bench_cagr*100:+.2f}% —— '
                  f'<b>{_over} {abs(_diff)*100:.1f}pp</b>(同口径比较)。'
                  f'它是 {summary["n_trials"]} 次试验里选出来的。</li>'
-                 f'<li><b>{summary.get("verdict") or summary.get("note") or "（本策略没有声明负面证据—— §5 要求负面证据与参数同时记录）"}</b></li>'
+                 f'<li><b>{inline_md(summary.get("verdict") or summary.get("note") or "（本策略没有声明负面证据—— §5 要求负面证据与参数同时记录）")}</b></li>'
                  f'<li><b>样本只有 {len(trades)} 笔</b>,敞口 {summary["exposure"]*100:.0f}%。'
                  f'{_ctl_line}'
                  f'按 §5,{summary["n_trials"]} 次试验的选择偏差折算后门槛还要更高。</li>'
@@ -508,9 +524,12 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
         parts.append('<table class="conds"><tr><th>#</th><th>条件</th>'
                      '<th>信号日实际值</th><th>阈值</th><th></th></tr>')
         for code, name, val, thr, ok in explain(ind, sym, sig_d, cfg):
+            # 第三态：`ok is None` ⇒ **不适用**（族不打勾：判定是多个条件的合取、阈值散在
+            # FIXED/params 里，逐条重算等于把掩码实现写第二遍 —— 那是本仓库禁止的第二条路径）。
+            # 少这一态就会出现"每一行都打 ✓"的假象（对抗核验式的自检抓到过）。
+            _cls, _mark = ("ok", "✓") if ok else ("", "·") if ok is None else ("no", "✗")
             parts.append(f'<tr><td>{e(code)}</td><td>{e(name)}</td><td>{e(val)}</td>'
-                         f'<td>{e(thr)}</td><td class="{"ok" if ok else "no"}">'
-                         f'{"✓" if ok else "✗"}</td></tr>')
+                         f'<td>{e(thr)}</td><td class="{_cls}">{_mark}</td></tr>')
         parts.append('</table></div>')
 
     parts.append('</div></body></html>')
@@ -571,12 +590,13 @@ def _mask_read_columns(mask) -> list[str]:
 
 def family_explain_rows(ind: pd.DataFrame, symbol: str, sig_date: pd.Timestamp,
                         cfg: dict, *, mask, params: dict | None = None,
-                        ) -> list[tuple[str, str, str, str, bool]]:
+                        ) -> list[tuple[str, str, str, str, bool | None]]:
     """族型策略的信号日清单：**掩码实际读的列**的当日值 + 本次用的参数。
 
     诚实边界：这里不打"✓/✗"（族的判定是多个条件的合取，且阈值散在 FIXED/params 里，
-    逐条重算等于把掩码实现写第二遍 —— 那正是本仓库禁止的两条路径）。所以末列固定为空，
-    报告里显示为「—」。读者要看的是**输入**：那些列的当日值，以及本次用了什么参数。
+    逐条重算等于把掩码实现写第二遍 —— 那正是本仓库禁止的两条路径）。所以第五项返回
+    **None**（= 不适用），报告里显示为「·」而不是「✓」。读者要看的是**输入**：
+    那些列的当日值，以及本次用了什么参数。
     """
     row = ind[(ind["symbol"] == symbol) & (ind["date"] == sig_date)]
     out: list[tuple[str, str, str, str, bool]] = []
@@ -589,9 +609,9 @@ def family_explain_rows(ind: pd.DataFrame, symbol: str, sig_date: pd.Timestamp,
             txt = f"{float(v):.4g}" if v is not None and np.isfinite(float(v)) else "—"
         except (TypeError, ValueError):
             txt = str(v)
-        out.append((col, f"掩码读了 {col}", txt, "—", True))
+        out.append((col, f"掩码读了 {col}", txt, "—", None))
     for k, v in sorted((params or {}).items()):
-        out.append((f"param.{k}", "本次用的参数", str(v), "—", True))
+        out.append((f"param.{k}", "本次用的参数", str(v), "—", None))
     if not out:
         out.append(("—", "这个掩码没有直接读面板列", "—", "—", False))
     return out
