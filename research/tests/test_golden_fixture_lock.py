@@ -57,7 +57,10 @@ CASES = _cases()
 def test_the_offline_exemption_list_is_explicit():
     """豁免表不许无声变长 —— 与真库锁的 `LOCK_EXEMPT` 同一条纪律。"""
     exempt = {n for n, r in presets.REGISTRY.items() if r["fixture_exempt"]}
-    assert exempt == {"us_uptrend_pullback_wfv"}, \
+    # 2026-10-17 事件维度两条（noearn / postearn）也在这张表里：wfv 那一系在**合成市场**
+    # 上出场/入场条件咬合不上 ⇒ 0 笔成交，锁会退化成空断言（这正是这张表存在的理由）。
+    assert exempt == {"us_uptrend_pullback_wfv", "us_uptrend_pullback_wfv_noearn",
+                      "us_uptrend_pullback_wfv_postearn"}, \
         f"离线锁的豁免名单变了：{sorted(exempt)} —— 要么给它 FIXTURE_WINDOW，" \
         f"要么在这里显式写明为什么它锁不了"
 
