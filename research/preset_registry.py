@@ -58,6 +58,11 @@ def load_one(path: Path) -> dict:
     if fx and exempt:
         raise ValueError(f"{path.name}: FIXTURE_WINDOW 与 FIXTURE_EXEMPT_REASON 只能给一个 —— "
                          f"既入离线锁又声明豁免，读了不知道该信哪个")
+    if not fx and not exempt:
+        raise ValueError(f"{path.name}: 必须就**离线锁**表态 —— 给 FIXTURE_WINDOW（入离线锁，"
+                         f"任何机器上都能跑）或给 FIXTURE_EXEMPT_REASON（为什么不入）。"
+                         f"两者都不给，这条 preset 就是**默认不在离线护栏里**，"
+                         f"而那正是这次重构要消灭的失效方式")
     return {
         "name": mod.NAME,
         "preset": preset,

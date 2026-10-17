@@ -47,22 +47,29 @@ EQUITY_KEY_COLS = ["date", "equity", "cash", "n_pos"]
 
 # 锁哪两个用例。窗口**写死绝对值**,不用 CLI 的默认解析 —— 默认解析会随数据漂移,
 # 而 golden 基线必须钉在一个不会自己动的坐标上(vintage 另有一道断言看住数据)。
-CASES: list[dict] = [
-    {"name": "us_uptrend_pullback_v1", "preset": "us_uptrend_pullback_v1",
-     # 窗口随**数据 vintage**变（CLI 的默认窗口由 panel.first_signal_date 算出）：
-     # 2026-10-17 换源重下后面板起点晚了一个自然日 ⇒ 预热后的首个信号日也跟着移一天。
-     # 这两处必须同步，否则 "is_cli_default" 这个标注就成了空话（有测试钉住）。
-     "start": "2024-04-10", "end": "2026-10-17", "is_cli_default": True},
-    {"name": "us_uptrend_pullback_12m_target", "preset": "us_uptrend_pullback_12m_target",
-     "start": "2025-10-14", "end": "2026-10-14", "is_cli_default": False},
-    # WFV 搜索选出的候选:窗口取**全可评估期**,让行为锁覆盖尽量多的分支
-    # (它的预注册搜索期是 2024-04-09..2025-10-13,holdout 是 2025-10-14..2026-10-13)。
-    {"name": "us_uptrend_pullback_wfv", "preset": "us_uptrend_pullback_wfv",
-     "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": False},
-    # 族型 preset(走 families.py 的短周期反转):同样锁全可评估期
-    {"name": "us_reversal_dip_v1", "preset": "us_reversal_dip_v1",
-     "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": False},
-]
+#
+# 2026-10-17 注册表重构：用例**从注册表派生**（窗口写在 `preset_defs/<name>.py` 里）。
+# 此前这里是手写清单 —— 新增 preset 时漏掉它**什么都不会发生**，新 preset 只是从此
+# 不在任何护栏里；而"漏了也没人知道"正是本仓库反复吃亏的那类缺陷。
+#
+# 豁免表：**空 = 全都锁**。它能被写大，但一次性写大的代价是被
+# `test_lock_coverage.test_exempt_table_cannot_grow_silently` 当场抓住 ——
+# 豁免名单一旦能无声扩大，这条护栏就等于没有。
+LOCK_EXEMPT: dict[str, str] = {}
+
+
+def _cases_from_registry() -> list[dict]:
+    out = []
+    for name, rec in sorted(presets.REGISTRY.items()):
+        if name in LOCK_EXEMPT:
+            continue
+        out.append({"name": name, "preset": name,
+                    "start": rec["window"][0], "end": rec["window"][1],
+                    "is_cli_default": rec["is_cli_default"]})
+    return out
+
+
+CASES: list[dict] = _cases_from_registry()
 
 
 # ---------------------------------------------------------------- 环境

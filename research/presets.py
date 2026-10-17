@@ -74,6 +74,10 @@ def _build() -> tuple[dict[str, dict], dict[str, dict]]:
 
 PRESETS, _REGISTRY = _build()
 
+# 装载记录（含**锁坐标**与 fixture 窗口等元数据）。公开出来是因为"哪些 preset 在
+# 行为锁里、用哪个绝对窗口"这件事必须能被测试断言，而 PRESETS 只带参数不带坐标。
+REGISTRY: dict[str, dict] = _REGISTRY
+
 # 定义体声明要再导出的名字（长篇负面证据随 preset 走，外部仍按原名字 import 得到）
 for _rec in _REGISTRY.values():
     for _nm, _val in (_rec.get("exports") or {}).items():

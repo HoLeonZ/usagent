@@ -133,6 +133,9 @@ VERDICT = (
     '无可证实的正 alpha。五组假设(A v21 原样 / B 止损 ATR 归一化 / C 风险预算仓位 / H1 财报窗口 / H2 移动止损)逐一被排除,详见 results/BASELINE.md §3。全期超额 −117.13pp,TP 出场 0 笔(2026-10-15 重测)。不得用于实盘,不得当作选股能力的证据。'
 )
 
+# 窗口随**数据 vintage**变（CLI 的默认窗口由 panel.first_signal_date 算出）：2026-10-17
+# 换源重下后面板起点晚了一个自然日 ⇒ 预热后的首个信号日也跟着移一天。这一行必须与
+# CLI 算出来的窗口同步，否则 LOCK_IS_CLI_DEFAULT 这个标注就成了空话（有测试钉住）。
 LOCK_WINDOW = ("2024-04-10", "2026-10-17")
 LOCK_IS_CLI_DEFAULT = True
 FIXTURE_WINDOW = ("2024-01-01", "2025-01-01")

@@ -34,14 +34,32 @@ REGEN = bool(os.environ.get("GOLDEN_FIXTURE_REGEN"))
 
 # 窗口取**绝对值**（与真库锁同一纪律）：合成市场是确定性的，所以它不会自己动。
 # 起点取第 130 根 K 线之后（mom120 预热 121 根 + dd120 预热 120 根）。
-CASES = [
-    {"name": "fixture_uptrend_pullback_v1", "preset": "us_uptrend_pullback_v1",
-     "start": "2024-01-01", "end": "2025-01-01"},
-    {"name": "fixture_reversal_dip_v1", "preset": "us_reversal_dip_v1",
-     "start": "2024-01-01", "end": "2025-01-01"},
-    {"name": "fixture_12m_target", "preset": "us_uptrend_pullback_12m_target",
-     "start": "2024-01-01", "end": "2025-01-01"},
-]
+#
+# 用例**从注册表派生**（2026-10-17 注册表重构）：窗口与"入不入锁"的表态写在
+# `preset_defs/<name>.py` 里 —— 有 `FIXTURE_WINDOW` 就入锁；只有
+# `FIXTURE_EXEMPT_REASON` 就不入锁（理由必须非空）；两者都没有由装载器在 import 期
+# 直接抛错。此前这里是手写清单：新增 preset 时漏掉它，新 preset 就静默不在离线锁里,
+# 而离线锁正是"没有真库的机器上唯一能跑的那道锁"。
+def _cases() -> list[dict]:
+    out = []
+    for name, rec in sorted(presets.REGISTRY.items()):
+        fw = rec["fixture_window"]
+        if not fw:
+            continue
+        out.append({"name": f"fixture_{name}", "preset": name,
+                    "start": fw[0], "end": fw[1]})
+    return out
+
+
+CASES = _cases()
+
+
+def test_the_offline_exemption_list_is_explicit():
+    """豁免表不许无声变长 —— 与真库锁的 `LOCK_EXEMPT` 同一条纪律。"""
+    exempt = {n for n, r in presets.REGISTRY.items() if r["fixture_exempt"]}
+    assert exempt == {"us_uptrend_pullback_wfv"}, \
+        f"离线锁的豁免名单变了：{sorted(exempt)} —— 要么给它 FIXTURE_WINDOW，" \
+        f"要么在这里显式写明为什么它锁不了"
 
 
 def _path(name: str) -> Path:

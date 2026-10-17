@@ -2,7 +2,7 @@
 # 只放哈希与计数，不放任何收益数字（§7）。
 # 重生成:GOLDEN_FIXTURE_REGEN=1 python -m pytest research/tests/test_golden_fixture_lock.py
 # 重生成 = 承认交易列表漂移，必须在 commit message 里说明原因与量级。
-case=fixture_uptrend_pullback_v1
+case=fixture_us_uptrend_pullback_v1
 preset=us_uptrend_pullback_v1
 start=2024-01-01
 end=2025-01-01

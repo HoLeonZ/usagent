@@ -28,6 +28,7 @@ PRESET = {"max_positions": 1, "position_fraction": 1.0, "atr_slip_scale": 1.0,
 VERDICT = "无可证实的正 alpha"
 LOCK_WINDOW = ("2024-01-01", "2025-01-01")
 LOCK_IS_CLI_DEFAULT = False
+FIXTURE_WINDOW = ("2024-01-01", "2025-01-01")
 '''
 
 
@@ -89,10 +90,23 @@ def test_load_dir_skips_private_files(tmp_path):
 
 
 def test_fixture_window_and_exemption_are_mutually_recorded(tmp_path):
-    body = GOOD + '\nFIXTURE_WINDOW = ("2024-01-01", "2025-01-01")\n'
-    got = R.load_one(_write(tmp_path, "x1", body))
+    got = R.load_one(_write(tmp_path, "x1", GOOD))
     assert got["fixture_window"] == ("2024-01-01", "2025-01-01")
     assert got["fixture_exempt"] is None
-    body2 = GOOD + '\nFIXTURE_EXEMPT_REASON = "合成市场上成交为 0，锁会变成空断言"\n'
+    body2 = GOOD.replace('FIXTURE_WINDOW = ("2024-01-01", "2025-01-01")',
+                         'FIXTURE_EXEMPT_REASON = "合成市场上成交为 0，锁会变成空断言"')
     got2 = R.load_one(_write(tmp_path, "x1", body2))
     assert got2["fixture_window"] is None and "空断言" in got2["fixture_exempt"]
+
+
+def test_offline_lock_membership_is_mandatory(tmp_path):
+    """两者都不给 ⇒ 抛错：不给表态，等于这条 preset **默认不在离线护栏里**。"""
+    body = GOOD.replace('FIXTURE_WINDOW = ("2024-01-01", "2025-01-01")', "")
+    with pytest.raises(ValueError, match="离线锁"):
+        R.load_one(_write(tmp_path, "x1", body))
+
+
+def test_fixture_window_and_exemption_are_exclusive(tmp_path):
+    body = GOOD + '\nFIXTURE_EXEMPT_REASON = "又想要锁又想要豁免"\n'
+    with pytest.raises(ValueError, match="只能给一个"):
+        R.load_one(_write(tmp_path, "x1", body))
