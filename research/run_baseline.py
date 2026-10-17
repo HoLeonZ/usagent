@@ -66,16 +66,13 @@ def _signals(ind, reg, preset, lo, hi, *, avoid_earnings: bool = False):
         kw = dict(preset["signal"])
         sig = signals.select_entries(ind, start_date=lo, end_date=hi,
                                      regime_df=reg if preset.get("regime") else None, **kw)
-    if avoid_earnings:
-        from research.earnings import (calendar_coverage, earnings_dates_by_symbol,
-                                       load_calendar)
-        cal = load_calendar()
-        # ⚠️ 覆盖率必须显式传下去（审计 A5）：日历没覆盖到的地方**不许**静默当成
-        # "没有财报"。这里不吞异常 —— 覆盖不足就让它抛，并给出可行动的下一步。
-        sig = signals.filter_earnings_window(
-            sig, earnings_dates_by_symbol(cal),
-            forward_days=int(preset.get("avoid_earnings_forward_calendar_days", 26)),
-            coverage=calendar_coverage(cal))
+    # 事件过滤走**唯一入口**（`signals.apply_event_filters`）：preset 自己声明的
+    # `avoid_earnings` / `require_earnings_within_trading_days` 在这里生效，
+    # CLI 的 --avoid-earnings 只是「强制打开」的覆盖。放两处实现 = 两条入口跑的不是
+    # 同一份信号表，而 golden 载体锁的就是这份表（有测试盯住两个入口的一致性）。
+    sig = signals.apply_event_filters(sig, preset,
+                                      trading_days=np.sort(ind["date"].unique()),
+                                      force_avoid_earnings=avoid_earnings)
     return sig
 
 

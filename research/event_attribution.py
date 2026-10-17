@@ -83,8 +83,14 @@ def rank_presets(panel: pd.DataFrame, ind: pd.DataFrame, reg: pd.DataFrame,
     """按协议 §2 的判据（曝光匹配 overlay 超额）给四条 preset 排名。
 
     "当前最佳"由这个函数选出，不由人挑 —— 否则"比当前最佳更好"这句话取决于谁挑的。
+
+    ⚠️ 同时报 **超额/敞口** 与 `bench_on_exposed_days`（只在策略有敞口的那些天持有池子）：
+    本窗池子 +32.9% 而策略只有 26~31%，于是 `超额 = w ×(策略−池) < 0` ——
+    **任何降低敞口的做法都会让"超额"自动变好看**。也就是说 P1 单独是可被"少做"刷高的，
+    所以判读必须同时看这两列（这不是改判据，是把判据的退化面写出来）。
     """
     rows = []
+    bench = overlay.pool_daily_returns(reg)
     for name in sorted(presets.PRESETS):
         case = {"name": name, "preset": name, "start": window[0], "end": window[1]}
         try:
@@ -94,18 +100,34 @@ def rank_presets(panel: pd.DataFrame, ind: pd.DataFrame, reg: pd.DataFrame,
             continue
         eq = res["equity"].set_index("date")
         ov = overlay.excess_vs_pool(eq, reg, window[0], window[1])
+        ba = metrics.beta_attribution(eq["equity"].pct_change().fillna(0.0), bench,
+                                      eq["exposure"])
         rows.append({"preset": name, "n_trades": int(len(res["trades"])),
                      "overlay_cagr": ov["cagr"], "bench": ov["bench"],
-                     "excess": ov["excess"], "exposure": ov["exposure"]})
+                     "excess": ov["excess"], "exposure": ov["exposure"],
+                     "excess_per_exposure": (ov["excess"] / ov["exposure"]
+                                             if ov["exposure"] else float("nan")),
+                     "bench_on_exposed_days": ba["bench_on_exposed_days"],
+                     "own_total_return": float(eq["equity"].iloc[-1] / eq["equity"].iloc[0] - 1)})
     ranked = sorted([r for r in rows if "excess" in r],
                     key=lambda r: r["excess"], reverse=True)
     return ranked + [r for r in rows if "excess" not in r]
 
 
-def _trade_groups(trades: pd.DataFrame, by_symbol: dict, coverage, forward_days: int) -> dict:
-    """把成交分成四组（前瞻×实现），每组给一组尾部敏感的读数。"""
+def _trade_groups(trades: pd.DataFrame, by_symbol: dict, coverage, forward_days: int,
+                  trading_days, recent_grid=(3, 5, 10)) -> dict:
+    """把成交分组（前瞻 / 实现 / **距上一份财报 ≤ k 个交易日**）。
+
+    前瞻与实现两组回答 H1（过滤器看得见的集合 / 实际撞上的笔）；
+    `rec{k}` 组回答 **H2**（事件刚过 = 不确定性刚消解）—— 按**信号日**判定，
+    因为过滤器的决策只能发生在信号日（因果）。
+    """
     r_mult = metrics.r_multiples(trades)
     out: dict[str, list[int]] = {"fwd_yes": [], "fwd_no": [], "real_yes": [], "real_no": []}
+    for k in recent_grid:
+        out[f"rec{k}_yes"] = []
+        out[f"rec{k}_no"] = []
+    gap_none = 0
     for i, row in trades.iterrows():
         sym = str(row["symbol"])
         sig_d = pd.Timestamp(row.get("signal_date", row["entry_date"]))
@@ -117,7 +139,14 @@ def _trade_groups(trades: pd.DataFrame, by_symbol: dict, coverage, forward_days:
             by_symbol, sym, ent, ext, coverage=coverage)
         out["fwd_yes" if fwd else "fwd_no"].append(i)
         out["real_yes" if real else "real_no"].append(i)
-    return {"groups": out, "r_mult": r_mult}
+        gap = mod_earnings.last_earnings_gap_trading_days(by_symbol, sym, sig_d,
+                                                          trading_days)
+        if gap is None:
+            gap_none += 1
+        for k in recent_grid:
+            recent = gap is not None and gap <= k
+            out[f"rec{k}_yes" if recent else f"rec{k}_no"].append(i)
+    return {"groups": out, "r_mult": r_mult, "gap_unknown": gap_none}
 
 
 def summarize(trades: pd.DataFrame, idx: pd.Series, group: list[int],
@@ -174,11 +203,15 @@ def main() -> int:
     logger.info("\n=== 四条 preset 在 %s..%s 上的曝光匹配超额（越高越好）===", a.start, a.end)
     for r in ranked:
         if "excess" in r:
-            logger.info("  %-34s 超额 %+7.2fpp  overlay %+7.2fpp  池 %+7.2fpp  敞口 %5.1f%%  %d 笔",
-                        r["preset"], r["excess"] * 100, r["overlay_cagr"] * 100,
-                        r["bench"] * 100, r["exposure"] * 100, r["n_trades"])
+            logger.info("  %-32s 超额 %+7.2fpp  超额/敞口 %+7.2f  池 %+7.2fpp  敞口 %5.1f%%  "
+                        "%3d 笔  [在场日池 %+6.1f%% vs 自身 %+6.1f%%]",
+                        r["preset"], r["excess"] * 100, r["excess_per_exposure"] * 100,
+                        r["bench"] * 100, r["exposure"] * 100, r["n_trades"],
+                        r["bench_on_exposed_days"] * 100, r["own_total_return"] * 100)
         else:
-            logger.info("  %-34s 跑不动：%s", r["preset"], r["error"])
+            logger.info("  %-32s 跑不动：%s", r["preset"], r["error"])
+    logger.info("  ⚠️ 池子为正而策略跑输时，超额 = 敞口×(策略−池) **为负** ⇒ 单纯少做也会让"
+                "\n     超额变好看。判读必须同时看「超额/敞口」与「在场日池 vs 自身」两列。")
 
     best = a.preset or (ranked[0]["preset"] if ranked else None)
     if not best:
@@ -190,18 +223,25 @@ def main() -> int:
     trades = res["trades"].copy()
     if "signal_date" not in trades.columns:
         trades["signal_date"] = trades["entry_date"]      # 成交表可能没留下信号日
-    g = _trade_groups(trades, by_symbol, coverage, a.forward_calendar_days)
+    g = _trade_groups(trades, by_symbol, coverage, a.forward_calendar_days,
+                      ind["date"].unique())
     idx = reg.set_index("date")["ew_index"].sort_index()   # asof 要求有序
     report = {"preset": best, "window": [a.start, a.end],
               "forward_calendar_days": a.forward_calendar_days,
+              "recent_grid_trading_days": [3, 5, 10],
+              "gap_unknown": g["gap_unknown"],
+              "ranking": ranked,
               "calendar": {"days": len(cal),
                            "covered": [str(coverage[0].date()), str(coverage[1].date())]},
               "groups": {}}
-    for key in ("fwd_yes", "fwd_no", "real_yes", "real_no"):
+    logger.info("  （距上一份财报的交易日数无法判定：%d 笔 —— 归入「事件未刚过」）",
+                g["gap_unknown"])
+    for key in ("fwd_yes", "fwd_no", "real_yes", "real_no",
+                "rec3_yes", "rec3_no", "rec5_yes", "rec5_no", "rec10_yes", "rec10_no"):
         s = summarize(trades, idx, g["groups"][key], g["r_mult"])
         report["groups"][key] = s
         logger.info("  %-9s n=%3d  R中位 %+6.2f  R均值 %+6.2f  R最差 %+6.2f  胜率 %4.1f%%  "
-                    "止损占比 %4.1f%%  敞口窗内 vs 池 %+6.2fpp",
+                    "止损占比 %4.1f%%  窗内 vs 池 %+6.2fpp",
                     key, s.get("n", 0), s.get("r_median", float("nan")),
                     s.get("r_mean", float("nan")), s.get("r_worst", float("nan")),
                     s.get("win_rate", float("nan")) * 100,

@@ -72,6 +72,17 @@ OPTIONAL_KEYS: tuple[str, ...] = (
     # "none"（默认）| "corwin_schultz"。默认 none 只为不改动既有数字，
     # 不是因为它更对：不建模价差等于把**尺寸无关**的那一半成本当成零。
     "spread_model",
+    # ---- 事件维度（2026-10-17，见 docs/2026-10-17-event-preset-presearch.md）----
+    # 这三个由**信号层**读（不是 broker），但放在这里：它们会改变**信号集**，
+    # 而"报告里看不见的旋钮"正是这一层要根除的东西（审计 E5）。放在 ENGINE_KEYS
+    # 而不是 METADATA_KEYS 的唯一理由就是**它必须出现在口径头里** —— 读者要能看出
+    # 这份数字是在"剔除了财报窗"还是"没剔除"的信号上跑出来的。
+    # 此前 `avoid_earnings` 只能由 CLI 的 --avoid-earnings 打开，preset 里**无法声明**，
+    # 而 `avoid_earnings_forward_calendar_days` 却是合法的元数据键 —— 即"声明了却没人读"
+    # 的又一处残留。
+    "avoid_earnings",                        # 持有窗内撞上财报 ⇒ 不出信号
+    "avoid_earnings_forward_calendar_days",  # 前瞻窗长度（自然日），应覆盖 max_hold
+    "require_earnings_within_trading_days",  # 只做「距上一份财报 ≤ N 个交易日」的信号
 )
 
 ENGINE_KEYS: tuple[str, ...] = REQUIRED_KEYS + OPTIONAL_KEYS
@@ -94,7 +105,12 @@ DEFAULTS: dict[str, object] = {
     "liquidate_at_end": True,
     "clamp_entry_to_bar": False,
     "sl_overshoot": 0.0,
-    "clamp_entry_to_bar": False,
+    # ---- 事件维度：默认**全关**（不改动既有 4 条 preset 的行为与 7 个哈希）----
+    "avoid_earnings": False,
+    # 26 自然日 ≈ max_hold=18 个交易日。用自然日是因为日历是按自然日组织的；
+    # 直接用交易日数当自然日会漏掉窗口尾部一周（见 signals.filter_earnings_window）。
+    "avoid_earnings_forward_calendar_days": 26,
+    "require_earnings_within_trading_days": None,
 }
 
 # 指标价轴是**引擎约定,不是 preset 旋钮**:CLAUDE.md §3(b) 规定数学指标必须用
@@ -112,7 +128,7 @@ METADATA_KEYS: frozenset[str] = frozenset({
     "universe", "universe_note",             # 口径声明(引擎不读,见模块 docstring)
     "n_comparisons", "validated", "verdict", "notes",   # §5 纪律与负面证据
     "position_sizing",                       # 派生量,声明值必须与键一致(见 validate)
-    "avoid_earnings_forward_calendar_days", "earnings_filter_validated",
+    "earnings_filter_validated",              # 声明"这个过滤器的口径已被人工核对过"
     "trailing_sl_validated",
 })
 
@@ -155,6 +171,11 @@ SPEC_LABELS: dict[str, tuple[str, "callable"]] = {
     "trailing_sl": ("移动止损", lambda v: "开" if v else "关"),
     "liquidate_at_end": ("窗口末尾", lambda v: ("按收盘清算（两组数同源）" if v
                           else "**不清算**（头条含未实现、与 E[R] 不同源）")),
+    "avoid_earnings": ("事件过滤", lambda v: ("剔除持有窗内撞上财报的信号"
+                        if v else "关（不剔除）")),
+    "avoid_earnings_forward_calendar_days": ("事件前瞻窗", lambda v: f"{int(v)} 自然日"),
+    "require_earnings_within_trading_days": (
+        "事件刚过", lambda v: "关" if v is None else f"距上一份财报 ≤ {int(v)} 个交易日"),
 }
 
 

@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import time
@@ -24,6 +25,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -189,6 +191,37 @@ def has_earnings_between(by_symbol: dict[str, list[pd.Timestamp]], symbol: str,
     import bisect
     i = bisect.bisect_left(ds, lo)
     return i < len(ds) and ds[i] <= hi
+
+
+def last_earnings_gap_trading_days(by_symbol: dict[str, list[pd.Timestamp]], symbol: str,
+                                   day: pd.Timestamp,
+                                   trading_days) -> int | None:
+    """「距上一份财报」的**交易日数**（0 = 当天就出过财报）；没有更早的财报 ⇒ None。
+
+    为什么按交易日而不是自然日：机制说的是"信息还在扩散的那几天"，周末不算扩散日；
+    3/5/10 个交易日与自然日的差别在多年样本上不可忽略。
+
+    `None` 的两种来源（没查到更早的财报 / 符号根本不在日历里）在本项目里是**同一个
+    意思**：无法认定它"刚出过财报"。调用方按保守方向用 —— 不要把它当成"刚出过"。
+
+    `trading_days` 是面板的交易日轴（升序去重的日期数组）；不在轴上的日期 ⇒ None。
+    """
+    ds = by_symbol.get(symbol)
+    if not ds:
+        return None
+    day = pd.Timestamp(day)
+    i = bisect.bisect_right(ds, day)
+    if i == 0:
+        return None
+    last = ds[i - 1]
+    axis = np.asarray(pd.to_datetime(pd.unique(trading_days)))
+    axis = np.sort(axis)
+    a = int(np.searchsorted(axis, np.datetime64(last), side="left"))
+    b = int(np.searchsorted(axis, np.datetime64(day), side="left"))
+    if a >= len(axis) or b >= len(axis) or axis[a] != np.datetime64(last) \
+            or axis[b] != np.datetime64(day):
+        return None                      # 日期不在交易日轴上（数据缺口）⇒ 不猜
+    return b - a
 
 
 def main() -> int:

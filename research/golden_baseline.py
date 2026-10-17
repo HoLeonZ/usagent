@@ -142,6 +142,9 @@ def run_preset(case: dict, panel: pd.DataFrame,
         sig = signals.select_entries(
             ind, start_date=case["start"], end_date=case["end"],
             regime_df=reg if preset.get("regime") else None, **preset["signal"])
+    # 事件过滤与 CLI 走**同一个入口**（`signals.apply_event_filters`）——
+    # 两处实现会让载体锁住的曲线与 CLI 跑的不是同一条（§6 的老毛病）。
+    sig = signals.apply_event_filters(sig, preset, trading_days=np.sort(ind["date"].unique()))
     res = broker.simulate(preset, sig, ind, start=case["start"], end=case["end"],
                           cost_bps_roundtrip=preset_cost(case["preset"]))
     return res, sig
