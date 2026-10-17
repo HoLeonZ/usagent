@@ -29,6 +29,17 @@ FAST=(-q
   research/tests/test_lock_coverage.py
   research/tests/test_golden_fixture_lock.py)
 
+# 解释器自检（2026-10-17 实测教训）：仓库把依赖钉在 requirements.txt，但**没有任何东西**
+# 保证 shell 里的 `python3` 就是装过它们的那个 —— PATH 一变它可能落到系统 python，
+# 于是报错是 "No module named 'numpy'"，而真正该说的是"你用错了解释器"。
+if ! "$PY" -c "import numpy, pandas" >/dev/null 2>&1; then
+  _exe=$("$PY" -c 'import sys;print(sys.executable)' 2>/dev/null || echo "$PY")
+  echo "[preflight] ✗ 解释器里没有 numpy/pandas：${_exe}"
+  echo "           依赖钉在 requirements.txt —— 用 PY=... 指向装过它们的解释器，例如："
+  echo "             PY=<venv>/bin/python3 bash tools/preflight.sh"
+  exit 1
+fi
+
 echo "[preflight] 快检（卫生 / 契约 / 覆盖判据 / 离线行为锁）"
 "$PY" -m pytest "${FAST[@]}" || { echo "[preflight] ✗ 快检未过 —— 不要提交"; exit 1; }
 
