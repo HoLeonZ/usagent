@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path("/Users/zhl/code/usagent")
+ROOT = Path(__file__).resolve().parents[1]        # 模块相对 —— 不许写死本机绝对路径
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "src"))
 
 from research import golden_baseline as G, indicators, metrics, overlay   # noqa: E402

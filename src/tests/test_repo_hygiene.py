@@ -40,11 +40,24 @@ FORBIDDEN = [
 
 
 def _tracked_text_files():
+    """被跟踪的文本文件 + **已暂存但还没提交**的新文件。
+
+    为什么要并上"已暂存"（2026-10-17 实测教训）：`git ls-files` 看不到刚写好、还没
+    `git add` 的新文件。于是存在这条缝 —— 先跑测试（绿）→ 再 `git add` 一个新文件 →
+    提交。提交后的状态**从未被这道护栏看过**，而它就是被提交的那个状态。
+    （实际发生过一次：`research/preset_ranking.py` 写死了本机绝对路径，测试跑在它
+    入索引之前，于是"596 passed"放行了一个红着的提交。）
+    """
     import subprocess
-    out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True)
-    if out.returncode != 0:
-        return []
-    return [ROOT / p for p in out.stdout.splitlines() if p.endswith(TEXT_SUFFIXES)]
+
+    def _git(*args):
+        out = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+        return out.stdout.splitlines() if out.returncode == 0 else []
+
+    paths = set(_git("ls-files"))
+    # --diff-filter=ACMR：新增/复制/改动/改名，排除删除（删掉的文件读不到）
+    paths |= set(_git("diff", "--cached", "--name-only", "--diff-filter=ACMR"))
+    return [ROOT / p for p in sorted(paths) if p.endswith(TEXT_SUFFIXES)]
 
 
 def test_no_machine_specific_paths_in_tracked_files():
@@ -87,3 +100,23 @@ def test_run_daily_does_not_hardcode_an_interpreter():
     src = (ROOT / "src" / "run_daily.sh").read_text()
     assert 'PY="${PY:-python3}"' in src, "run_daily.sh 必须让调用方可以覆盖解释器"
     assert not re.search(r"^PY=/", src, re.M), "仍然写死了 PY 的绝对路径"
+
+
+def test_staged_but_uncommitted_files_are_also_scanned(tmp_path, monkeypatch):
+    """提交前就要抓：**已暂存、未提交**的新文件也必须被扫。
+
+    这正是漏过一次的那道缝：先跑测试（绿）→ 再 `git add` 一个新文件 → 提交，
+    于是"被提交的那个状态"从未被这道护栏看过。实测发生过（`research/preset_ranking.py`
+    写死了本机绝对路径，而 596 passed 的测试跑在它入索引之前）。
+    """
+    import subprocess
+
+    import src.tests.test_repo_hygiene as H          # noqa: N813
+
+    monkeypatch.setattr(H, "ROOT", tmp_path)         # _git() 在调用时读模块全局
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    bad = tmp_path / "bad.py"
+    bad.write_text('ROOT = "/Users/someone/code/usagent"\n', encoding="utf-8")
+    subprocess.run(["git", "add", "bad.py"], cwd=tmp_path, check=True)   # 只暂存，不提交
+
+    assert bad in H._tracked_text_files(), "已暂存未提交的新文件必须被扫到"
