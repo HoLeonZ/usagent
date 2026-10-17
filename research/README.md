@@ -105,12 +105,37 @@ gap 跳过止损按开盘价成交;成交量上限 `Bar_Volume × 10%`,超出 IO
 | `signals.py` | A~F 六条件 | 参数区间 fail-fast;信号集为空要抛错不静默 |
 | `broker.py` | 执行语义 | **权益 = cash + qty×close**(hiagent 曾把建仓名义额计入两次) |
 | `metrics.py` | 窗口 / E[R] / DSR / beta 归因 | DSR 单位一致性(年化 vs 逐期) |
-| `presets.py` | **交付物** | `n_comparisons` 与负面证据必须同时存在 |
+| `preset_defs/<name>.py` | **一条 preset 一个文件**（交付物） | `NAME`/`PRESET`/`VERDICT`/`LOCK_WINDOW` 全必填；`PRESET` 里不许再写一份 `verdict` |
+| `presets.py` | 注册表 + 兼容门面（扫描 `preset_defs/`） | `n_comparisons` 与负面证据必须同时存在；装载违规在 import 期抛 |
+| `preset_registry.py` | 装载契约 | 文件名≠`NAME`、缺 `VERDICT`/`LOCK_WINDOW`、没就离线锁表态 ⇒ fail-fast |
+| `family_defs/<id>.py` | **一个族一个文件**（声明） | `GRID` 不能为空（预注册纪律）；没有网格要写 `GRID_EXEMPT_REASON` |
+| `family_masks.py` | 各族共用的掩码函数（15 族 = 10 个函数） | 掩码 docstring 就是机制叙述（报告取它第一行当族名） |
+| `families.py` | 注册表 + 兼容门面（扫描 `family_defs/`） | 排序分降序 ⇒ 「越小越优先」的族必须取负；对照臂与正题网格必须等大 |
 | `wfv_search.py` | **预注册的 WFV 搜索**(协议写在模块 docstring 里,跑之前定稿) | §5(b):训练窗取参、测试窗报数、一次性 holdout、n_trials 如实累计 |
 | `golden_baseline.py` | 交易列表/权益曲线的 sha256 基线 | **§6 的行为锁**:任何改动只要改了成交清单就会红 |
 | `run_baseline.py` | CLI | R 退化时拒绝报告 t 值;结果 JSON 带数据 vintage |
 | `core/costs.py` | 费用/流动性/滑点常数 | **§2(b):全仓唯一定义** |
 | `core/preset_contract.py` | 「引擎读哪些键」的声明 | §2(a):preset 缺键/未知键 ⇒ fail-fast;所有入口共用 `resolve()` |
+
+### 新增一条 preset / 一个族 = 新增一个文件（2026-10-17 注册表重构）
+
+```python
+# 一条 preset：新增 research/preset_defs/<name>.py
+NAME = "<name>"                     # 必须与文件名一致
+PRESET = {...}                      # 只用引擎已知的键（core/preset_contract 检查）
+VERDICT = """..."""                 # §5：负面证据与参数**同时**记录
+LOCK_WINDOW = ("2024-04-10", "2026-10-17")    # 行为锁用绝对坐标，不许从数据派生
+FIXTURE_WINDOW = ("2024-01-01", "2025-01-01") # 或 FIXTURE_EXEMPT_REASON="为什么不入离线锁"
+
+# 一个族：新增 research/family_defs/<id>.py
+ID = "<id>"
+def mask(ind, p): ...               # 或者 from research.family_masks import mask_x as mask
+GRID = {...}                        # 预注册网格（跑之前定稿）；参考族用 GRID_EXEMPT_REASON
+```
+
+**不必**再改 `presets.py` / `families.py` / `golden_baseline.py`：注册表扫描目录，
+行为锁用例从注册表派生。这一点是有测试守着的 —— 新 preset 只要存在就**默认在锁里**
+（没有基线时锁会直接要你生成，而不是静默跳过它）。
 
 ---
 

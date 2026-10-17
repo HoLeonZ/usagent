@@ -265,11 +265,92 @@
 | **F3b** 把 `state_flip` 两臂改成只差一个变量 | 需要**重跑**（一次新搜索，n_trials 记账）—— 属研究决策 |
 | **G7** 实盘/前向验证闭环 | 需要**持续运行的实盘或 paper** |
 
-**四道验证（全部绿）**：
+**四道验证（重构前，全部绿）**：
   * `pytest research/tests src/tests` → **527 passed, 0 failed, 0 skipped**；
   * `validate.py`（真数据）→ **18/18 通过**；
   * 真数据行为锁 `test_golden_trades` → **14 passed**（不是 skip）；
   * 离线行为锁 `test_golden_fixture_lock` → 5 passed（任何机器可跑，1 秒）。
+
+## 注册表重构 —— preset / family（2026-10-17）
+
+**动机不是"文件太大"**：新增一条 preset 要改**现有文件**，族型还要再改 `families.py`
+四处；而漏掉 `golden_baseline.CASES` **什么都不会发生** —— 新 preset 就是默认不在任何
+护栏里。这与本仓库反复吃亏的另一类缺陷同源：**声明了却没人读 / 有两条路径**。
+
+设计与验收判据：`docs/superpowers/specs/2026-10-17-preset-family-registry-design.md`。
+
+三段，逐段提交、逐段跑判据：
+
+1. **`58c2e37` preset 注册表**：定义体 → `research/preset_defs/<name>.py`（一条一个文件）；
+   `presets.py` 退化为「扫描 + 校验 + 门面」，外部 20 多处调用点一行未改；共享常量收成
+   一处（`preset_common` —— 此前 `RISK_LIMITS`/`V21_*` 在 `presets.py` 与 `signals.py`
+   各有一份，正是 §2(b)「常数恰好定义一次」禁止的形态）。
+   装载违规（文件名≠`NAME`、缺 `VERDICT`、缺 `LOCK_WINDOW`、一份事实写两处）在 **import
+   期**就抛 —— 它们的共同后果正是上面那种致命方式。
+2. **`879578f` family 注册表**：族的**声明** → `research/family_defs/<id>.py`；掩码 →
+   `research/family_masks.py`（15 个族共用 10 个掩码，逐族复制会得到 5 份必须手工同步的
+   副本 —— §2(b) 这次针对的是一整个函数）；`MIN_PRICE`/`above_price_floor` →
+   `universe.py`（它本来属于"算不算机会集"，也避免循环依赖）。原符号名
+   `_mask_sf_stress`/`_mask_sf_calm` 按门面再导出 ⇒ F3 那两条护栏测试**一个字未改**。
+3. **`fffd984` 行为锁覆盖**：`CASES` 与离线锁用例**从注册表派生**；`LOCK_EXEMPT`
+   （空 = 全都锁，且不许无声变长）；每个 preset 必须就离线锁表态（`FIXTURE_WINDOW` /
+   `FIXTURE_EXEMPT_REASON` / 二者都不给 ⇒ import 期抛错）。
+
+**判据 1（唯一的硬证据）：行为完全未变**
+
+  * 7 个 `trades_sha256` 与 7 个 `equity_sha256` 与重构前的基线**逐字节相同**
+    （`c6ef9203…` / `6ab77c97…` / `cdca9be6…` / `9c08fb33…` / `9e5e1921…` /
+    `4ba62d2d…` / `9c85e163…`），全程**没有**跑过 `--regen`；
+  * 搬迁**逐项相等**：15 个族的网格 / 网格大小 / `FIXED` / 排序分 / 状态门 / 对照臂 /
+    参考族与原件一致，含 10 个掩码的**字节码哈希**与 docstring（掩码是搬迁，不是重写）；
+  * 离线锁的 3 份基线只改了 `case=` 元数据行（`git mv` + 一行），sha 行逐字未动。
+
+**判据 4（实操验收）**：临时新增 `preset_defs/zz_probe_v1.py` 与 `family_defs/zz.py`，
+**各只碰一个文件** ⇒ 前者被自动纳入行为锁，并且**锁当场向它索要基线**
+（"新东西默认在护栏里"有牙的证据）；后者自动进入 `NEW_FAMILIES` 且 `grid_size` 可算。
+验完两个探针删除，全量复验绿。
+
+**有意为之的两处差异（非行为差异）**
+
+  * `NEW_FAMILIES` 的顺序从"MASK 表书写顺序"变为"定义体文件名排序" —— 只影响
+    `family_search` 报告里族的先后，数字不变；写成排序而不是"碰巧的顺序"，是为了新增
+    文件时报告不会无声改变。
+  * `FIXED` 现在每族都有一项（原件里 `xs_flow` 漏写、`str` 写成 `{}`）—— 只有 `select`
+    按 `.get(fid, {})` 读它。
+
+**已知边界（不夸大）**
+
+  * 重构只消除"改现有文件"，**不消除"必须想清楚"**：新 preset 仍要显式声明
+    `n_comparisons` / `validated` / `verdict` / `LOCK_WINDOW`，族仍要声明 `GRID`
+    （预注册纪律不变）；
+  * 它**不**保证新 preset 的统计有效性 —— 那要靠 §5 的判据与既有的 `n_trials` 记账；
+  * `test_presets.py` 的纪律断言**仍只测默认 preset**（不动它，避免把"默认 preset"
+    这个概念搅浑）；
+  * 一处测试改了**范围**（判据强度不变、略有加强）：A4 的源码级守卫原先只扫
+    `families.py`，掩码搬走后它会变成**空断言** —— 现在扫 `families.py` +
+    `family_masks.py`。守卫的范围必须跟着代码走，否则它变成"守着一个空文件"；
+  * 迁移工具本身吃过一次亏并已修（值得留档）：`ast` 的列号是 **UTF-8 字节偏移**（按字符
+    用会删错区间，中文最多的那条 verdict 直接删坏），且第一版脚本**生成了 4 个文件却没有
+    编译过任何一个**。现在每一步产物都过「编译 + `import` + 与原件逐项相等」三道校验。
+
+**四道验证（重构后）**
+
+  * `pytest research/tests src/tests` → **556 passed, 0 failed, 0 skipped**；
+  * `validate.py`（真数据）→ **18/18 通过**；
+  * 真数据行为锁 `test_golden_trades` → **14 passed**（不是 skip）；
+  * 离线行为锁 `test_golden_fixture_lock` → **6 passed**（任何机器可跑，约 1 秒）。
+
+### 新 preset / 新族的落地路径（重构买到的）
+
+```
+# 一条 preset：新增 research/preset_defs/<name>.py
+#   声明 NAME / PRESET / VERDICT / LOCK_WINDOW (+ FIXTURE_WINDOW 或 FIXTURE_EXEMPT_REASON)
+#   —— 不改 presets.py，也不改 golden_baseline.py
+# 一个族：新增 research/family_defs/<id>.py
+#   声明 ID / mask / GRID (+ 可选 FIXED / SCORE_COL / SCORE_NEGATED / NEEDS_REGIME /
+#   CONTROL / REFERENCE / GRID_EXEMPT_REASON)
+#   —— 不改 families.py
+```
 
 ## 每轮 tick 的固定流程
 
