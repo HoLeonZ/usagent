@@ -2,7 +2,9 @@
 
 「Nasdaq 上市股票 → 周线趋势 → 单腿期权」这条链路的数据底座。**只做取数与落盘，不做交易。**
 
-数据源全部是合规的公开接口（Yahoo Finance via yfinance + marketdata.app），不碰券商通道。
+数据源是**公开、无鉴权的行情接口**：`yfinance`（Yahoo）与 `stockanalysis.com`（备用源，
+本机 Yahoo 被边缘封锁时走它）。两条路径都不碰券商通道。
+⚠️ 本文此前写「+ marketdata.app」——那只是当年评估过的备选，代码里**零命中**（2026-10-17 审计）。
 
 ---
 
@@ -22,7 +24,9 @@ usagent/
   data/
     usagent.db                 # SQLite，全部数据
     universe_nasdaq_all.json   # Nasdaq 全量普通股 3,030 只（含市值/价格）
-    universe_oi100.csv         # 期权 OI>=100 的 596 只  ← 默认工作池
+    universe_oi100.csv         # 期权 OI>=100 的 596 只（**已不是工作池**：见下）
+                               # 工作池 = universe_nasdaq_all.json（3,030 只）——
+                               # 每日任务、校验闸门、引擎三处共用 config.DAILY_UNIVERSE
     universe_tight.csv         # 再叠加价差<=3tick 且 <=15% 的 49 只
   src/
     config.py           # 全部可调参数集中在这里
@@ -60,8 +64,8 @@ $PY -c "import yfinance, pandas; print(yfinance.__version__, pandas.__version__)
 ```bash
 cd <仓库根>
 
-# 1) 3 年日线全量回补（596 只约 35 分钟；每只 ~3-5s，这是 Yahoo 的固有速度）
-$PY -u src/download_ohlcv.py --universe oi100
+# 1) 3 年日线全量回补（全池 3,030 只；实测单只中位 ~1.3s ⇒ 串行约 60-70 分钟）
+$PY -u src/download_ohlcv.py --universe all --source stockanalysis
 
 # 2) 抓一次当日期权链快照（596 只约 110 分钟）
 $PY -u src/snapshot_options.py --universe oi100
@@ -69,8 +73,8 @@ $PY -u src/snapshot_options.py --universe oi100
 # 3) 算 IV / IV Rank
 $PY -u src/derive_iv.py
 
-# 4) 校验
-$PY -u src/validate.py
+# 4) 校验（**目标池 = 引擎真正读的那一份**；机器可读结论可选）
+$PY -u src/validate.py --universe all --json logs/checks.json
 ```
 
 **中途被限流或断网没关系** —— 全部写入都是幂等的（`INSERT OR REPLACE`），
@@ -81,8 +85,41 @@ $PY -u src/validate.py
 ## 每日运行
 
 ```bash
-bash src/run_daily.sh
+bash src/run_daily.sh --dry-run     # 先看今天的计划（池子 / 源 / 命令行）
+bash src/run_daily.sh               # 跑；任一阶段失败 ⇒ 非零退出 + 告警
+python3 src/obs.py --tail 10        # 最近 10 行运行台账（logs/runs.jsonl）
+python3 src/obs.py --alerts         # 只看告警（logs/alerts.jsonl）
 ```
+
+主体在 **`src/daily.py`**（2026-10-17 机构就绪审计后从 shell 搬进来的）。三件事变了：
+
+1. **池子与数据源来自 `src/config.py` 单一来源**：此前这里写死 `--universe oi100`（596 只），
+   而引擎与面板读**全库 3,030 只** ⇒ 每日任务不覆盖真正的机会集，且"数据新鲜"判的是全库
+   `MAX(date)`（由那 596 只决定）⇒ **判据看不见这件事**。现在每日任务、校验闸门、引擎共用
+   `config.DAILY_UNIVERSE` / `DAILY_SOURCE`。
+2. **每一步留痕**：`logs/runs.jsonl` 一行一阶段（时间 / git sha / 成败 / 耗时 / 校验结论），
+   失败另写 `logs/alerts.jsonl` 并打印到 stderr；可选投递到 `$USAGENT_ALERT_WEBHOOK`
+   （**地址只从环境变量读，不落仓库**）。
+3. **"失败继续跑后续步骤"是有意为之**：取数失败时仍要跑校验，才能区分"取数没跑成"与
+   "库真的坏了"。退出码仍是任一步失败即非零。
+
+**成本（实测）**：全池 3,030 只、`--recent 10` 增量，单只中位 ~1.25s ⇒ 串行约 **63 分钟**。
+cron 定在北京 10:00，而链路的入场价钉在美东 T+1 开盘（北京 21:30）⇒ **余量约 11 小时**，
+串行可接受。下一步优化（单独一轮，它要动数据层的取数路径）：给 `download_ohlcv` 加
+`--workers N`（6 并发实测 ≈ 11 分钟）。
+
+### 提交前：让"红着提交"不发生
+
+```bash
+bash tools/install_git_hooks.sh     # 装 pre-commit（调用 tools/preflight.sh，<5 秒）
+bash tools/preflight.sh --full      # 想跑全量时
+```
+
+`tools/preflight.sh` 跑：仓库卫生（机器相关路径 / 写死解释器 / 依赖钉版）、装载契约、
+覆盖判据、**离线行为锁**。它存在的直接原因（2026-10-17 审计）：CI 早就有，但**没有任何东西
+强制它** —— 实测因此红着提交过一次（写死本机路径的文件在"596 passed"之后才 `git add`）。
+⚠️ 诚实边界：本地钩子能被 `--no-verify` 绕过，也管不到别人的克隆。**真正的强制是远端的分支
+保护 + 必过检查**（仓库设置，不是代码）。
 
 挂 cron（**先确认时点，见下**）：
 

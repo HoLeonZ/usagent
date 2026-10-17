@@ -21,6 +21,8 @@ if str(SRC) not in sys.path:
 
 import db  # noqa: E402
 import trading_calendar as TC  # noqa: E402
+# validate 现在是 CLI（--universe/--json）⇒ 测试必须显式给它 argv，
+# 不能让它去读 sys.argv（在 pytest 下那是测试自己的参数）。
 import validate  # noqa: E402
 
 RECENT = TC.expected_sessions(date(2026, 9, 1), date(2026, 10, 16))
@@ -59,7 +61,7 @@ def _jump_check() -> tuple[bool, str]:
 def _run(tmp_path, monkeypatch, **kw) -> dict[str, tuple[bool, str]]:
     _seed(tmp_path, monkeypatch, **kw)
     validate.CHECKS.clear()
-    validate.main()
+    validate.main([])
     return _checks()
 
 
@@ -124,7 +126,7 @@ def test_split_event_explains_the_jump(tmp_path, monkeypatch):
         con.execute("UPDATE ohlcv SET splits=10.0 WHERE symbol='AAA' AND date=?",
                     (RECENT[n // 2].isoformat(),))
     validate.CHECKS.clear()
-    validate.main()
+    validate.main([])
     assert "池内 0 只" in _jump_check()[1], _jump_check()[1]
 
 
@@ -135,7 +137,7 @@ def test_extra_non_session_date_is_flagged(tmp_path, monkeypatch):
         con.execute("INSERT INTO ohlcv (symbol,date,open,high,low,close,volume,dividends,"
                     "splits,fetched_at) VALUES ('AAA','2026-10-17',100,101,99,100,1e6,0,0,'x')")
     validate.CHECKS.clear()
-    validate.main()
+    validate.main([])
     assert not _checks()["无「不该有数据」的日期（周末/休市）"][0]
 
 
@@ -154,7 +156,7 @@ def test_truncated_tail_is_detected_for_in_pool_names(tmp_path, monkeypatch):
         con.execute("DELETE FROM ohlcv WHERE symbol='AAA' AND date >= ?",
                     (RECENT[-10].isoformat(),))
     validate.CHECKS.clear()
-    validate.main()
+    validate.main([])
     got = _checks()
     ok, detail = got["池内无序列尾部截断（缺 ≥5 个交易日）"]
     assert not ok, detail

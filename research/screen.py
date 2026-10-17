@@ -298,6 +298,10 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--family-size", type=int, default=None,
                     help="本次比较的族规模(默认=层级数);换 horizon/窗口再跑要自己加进去")
+    ap.add_argument("--out", default=None, metavar="PATH",
+                    help="把结论写成**带凭证的产物**（ts/git sha/数据 vintage + 清单 + 同层基准率）；"
+                         "不写就只打印。凭证是「这份数字是哪份代码+哪份数据算的」的唯一答案")
+    ap.add_argument("--note", default="", help="写进凭证产物的备注（例如为什么要跑这一次）")
     ap.add_argument("--start", default="2024-04-09", help="测量起点(预热之后)")
     ap.add_argument("--end", default="2026-10-14")
     a = ap.parse_args()
@@ -310,6 +314,10 @@ def main() -> int:
     if a.measure:
         m = measure(ind, a.horizon, lo=a.start, hi=a.end, family_size=a.family_size)
         _print_measure(m)
+        if a.out:
+            _write_artifact(a.out, ind=ind, kind="measure", as_of=None, tier=None,
+                            horizon=a.horizon, window=[a.start, a.end],
+                            table=m, note=a.note)
         return 0
 
     as_of = a.as_of or str(ind["date"].max().date())
@@ -335,12 +343,50 @@ def main() -> int:
                   "不要把它当作看涨理由。")
         elif not np.isfinite(t) or abs(t) < t_crit:
             print("  ⚠️ 该层与股票池基准**无统计差别** —— 筛出来的票不比随机票更好。"
-                  "\n     它的价值在于把 596 只收窄到几十只供你过目,不在于预测方向。"
+                  "\n     它的价值在于把整个池子收窄到几十只供你过目,不在于预测方向。"
                   "\n     方向判断得由你补。(见 README「这个工具不做什么」)")
         else:
             print("  ℹ️ 该层历史上优于基准,但注意:n/h 的重叠采样已按 sqrt(h) 折减,"
                   "\n     且样本只覆盖一段上涨市,不代表未来。")
+    if a.out:
+        _write_artifact(a.out, ind=ind, kind="candidates", as_of=as_of, tier=a.tier,
+                        horizon=a.horizon, window=[a.start, a.end], table=c,
+                        benchmark=(None if row.empty else row.iloc[0].to_dict()),
+                        base_mean=float(base), note=a.note)
     return 0
+
+
+def _write_artifact(path, *, ind, kind, as_of, tier, horizon, window, table,
+                    benchmark=None, base_mean=None, note="") -> None:
+    """决策凭证落盘（2026-10-17 机构就绪审计的第 ③ 项）。
+
+    为什么必须有：实测这个工具此前只 `print()`（`grep -cE "to_csv|json.dump|write_text"`
+    = 0），于是从"信号"到"下单"这一段**没有任何可对账的凭证** —— 事后既答不出
+    "这 20 只是哪份代码 + 哪份数据算的"，也无法把实现与当时的判断比。
+    凭证字段刻意少而硬：时间（带时区）、代码版本、数据 vintage；再叠上这次的口径与参数。
+    """
+    import json
+    from pathlib import Path
+
+    import obs                                   # src/ 已在 sys.path（research/__init__ 的垫片）
+    from research.panel import data_vintage
+
+    payload = {
+        "schema": "usagent.screen.artifact/v1",
+        "kind": kind,
+        "manifest": obs.manifest(data_vintage=data_vintage(ind)),
+        "params": {"tier": tier, "as_of": as_of, "horizon": horizon, "window": window},
+        "note": note,
+        "base_mean": base_mean,
+        "benchmark": benchmark,
+        "n_rows": int(len(table)),
+        "table": json.loads(table.to_json(orient="records")),
+    }
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=1, default=str),
+                   encoding="utf-8")
+    print(f"\n（凭证产物已写 {out}：含 ts / git sha / 数据 vintage）")
 
 
 if __name__ == "__main__":

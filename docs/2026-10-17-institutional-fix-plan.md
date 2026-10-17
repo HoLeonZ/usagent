@@ -615,6 +615,48 @@ ohlcv_restatement/option_chain/vintage_log —— **没有任何 positions/cash/
 自动降级/退役**、关键人风险（规范文件不入库、无第二执行者）、投资者关系与基金会计（NAV/费率/
 高水位）、券商账户规则（PDT / 购买力 / 时段）。
 
+## 机构就绪 —— "不卡决策"的四项已落地（2026-10-17）
+
+按审计给出的"立刻可做"清单执行（每一项都带证据；卡决策的仍然卡着，见上一节的 12 步顺序）：
+
+**① 门禁变强制**
+  * `tools/preflight.sh`：卫生 / 装载契约 / 覆盖判据 / **离线行为锁**，实测 **61 passed / 1.2s**
+    —— 快到能被 pre-commit 忍受；
+  * `tools/install_git_hooks.sh`：装 `.git/hooks/pre-commit`（逻辑入库、钩子只调用它，
+    因为 `.git/` 不入库）；已在本机装上并实跑通过；
+  * CI 增加"快检先行"一步，与本地跑**同一个脚本**（两条入口一套口径）；
+  * ⚠️ 诚实边界（写进 CI 与 README）：本地钩子可被 `--no-verify` 绕过，
+    **真正的强制是远端分支保护 + 必过检查** —— 那是仓库设置，不是代码。
+
+**② 生产入口与机会集对齐**
+  * `config.DAILY_UNIVERSE = "all"` / `DAILY_SOURCE = "stockanalysis"` / `DAILY_RECENT_DAYS = 10`
+    成为**单一来源**；`run_daily.sh` 退化为一层壳，主体进 `src/daily.py`；
+  * `validate.py` 的"目标池"改为可配 + 默认取 `config.DAILY_UNIVERSE`，并把覆盖率检查改成
+    **池内感知**（只有"此刻可交易"的名字缺数据才判失败；池外缺的照旧打印在 detail 里）。
+    实测：`目标池: all (3030 只)`…`覆盖目标池（池内）— 缺 2 只（池内 0 / 池外 2）`，18/18 通过
+    —— 此前这条闸门只盖住 596 只（约 20% 的面板）；
+  * 实测成本（不是估）：全池 3,030 只、10 天窗口，单只中位 **1.25s** ⇒ 串行 ~63 分钟；
+    cron 北京 10:00 vs 入场价钉在美东 T+1 开盘 ⇒ **余量 ~11 小时**，串行可接受。
+    `download_ohlcv` **没有** `--workers` 参数（文档里那行示例是陈旧的）⇒ 并发化是下一轮
+    单独做的事（6 并发 ≈ 11 分钟），它要动数据层取数路径，不在"立刻可做"里赶。
+
+**③ 决策凭证落盘**
+  * `research/screen.py --out PATH`：写出带 **ts（带时区）+ git sha + 数据 vintage** 的产物
+    （清单 + 同层基准率 + 口径参数 + 备注），schema `usagent.screen.artifact/v1`；
+  * 此前 `grep -cE "to_csv|json.dump|write_text" research/screen.py` = **0** ——
+    从"信号"到"下单"这一段没有任何可对账的凭证；
+  * 顺带修掉一处事实不符：README 曾写数据源含 `marketdata.app`（代码里**零命中**）。
+
+**④ 观测与告警出口**
+  * `src/obs.py`：运行台账 `logs/runs.jsonl`（一阶段一行：时间/git sha/成败/耗时/校验结论）、
+    告警 `logs/alerts.jsonl`（+ stderr，可选 `$USAGENT_ALERT_WEBHOOK` 投递，**地址不落仓库**）；
+  * 纪律：**观测失败不许把主流程弄挂**（写不进去只留一句 stderr）—— 有测试钉住；
+  * `daily.py` 把校验的机器可读结论接进台账（passed/total/failed 名单）。
+
+**仍未做（按依赖顺序）**：`--workers` 并发化（工程，下一轮）→ 业务与法律边界（**卡你决策**）
+→ 券商接入 + OMS → 成交回报与对账 → 独立风控与 kill switch → 盘中参考价与下单前预检
+→ 灰度回滚 + runbook → **最后才判策略**。
+
 ## 每轮 tick 的固定流程
 
 1. `git log --oneline -8` + 本文件，确认上轮进度。

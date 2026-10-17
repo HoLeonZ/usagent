@@ -2,20 +2,37 @@
 
 每一类数据都做「结构性断言 + 分布检查」，不通过就非零退出，便于挂进 cron 告警。
 
-用法：python src/validate.py
+用法：
+    python src/validate.py                      # 默认按 config.DAILY_UNIVERSE 校验
+    python src/validate.py --universe all       # 显式指定目标池
+    python src/validate.py --json logs/checks.json   # 另写一份机器可读的结论（供告警/台账）
+
+⚠️ 「目标池」默认值必须是**引擎真正读的那一份**（2026-10-17 机构就绪审计）：
+此前它写死 `oi100`（596 只），而引擎与面板读全库 3028 只 ⇒ 这条闸门只盖住约 20% 的面板，
+且"数据新鲜/覆盖率"这两个最该有牙的检查都建在 596 只之上。默认值现在来自
+`config.DAILY_UNIVERSE`（每日任务与校验共用一处声明）。
 """
 from __future__ import annotations
 
+import argparse
+import json
 import sys
+import time
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 
 import db
-from config import COLLECT_OPTIONS, load_universe
+from config import COLLECT_OPTIONS, DAILY_UNIVERSE, load_universe
 from trading_calendar import expected_sessions, last_session_on_or_before
 
 CHECKS: list[tuple[str, bool, str]] = []
+
+# `--json` 的输出路径（None = 不写）。用模块级变量是因为 `_summary()` 在多个提前返回点
+# 被调用，而报告要在**任何**返回路径上落盘（否则"提前退出"那条路径正好是没凭证的那条）。
+_JSON_OUT: Path | None = None
+_UNIVERSE_NAME: str = DAILY_UNIVERSE
 
 # 「池内」= 最近 60 个交易日的成交额均值 ≥ 研究池门槛（与 research/universe.DEFAULT_SPEC
 # 同一个量级）。用它把"可疑但反正不会交易的名字"与"会进研究结论的名字"分开 ——
@@ -74,9 +91,19 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
 
 
-def main() -> int:
-    uni = load_universe("oi100")
-    print(f"目标池: oi100 ({len(uni)} 只)\n")
+def main(argv: list[str] | None = None) -> int:
+    global _JSON_OUT, _UNIVERSE_NAME
+    ap = argparse.ArgumentParser(description="数据校验（结构性断言 + 分布检查）")
+    ap.add_argument("--universe", default=DAILY_UNIVERSE, choices=["all", "oi100", "tight"],
+                    help="目标池：默认取 config.DAILY_UNIVERSE（= 引擎真正读的那一份）")
+    ap.add_argument("--json", default=None, metavar="PATH",
+                    help="另写一份机器可读的结论（passed/total/failed/逐项），供告警与台账")
+    a = ap.parse_args(argv)
+    _UNIVERSE_NAME = a.universe
+    _JSON_OUT = Path(a.json) if a.json else None
+
+    uni = load_universe(a.universe)
+    print(f"目标池: {a.universe} ({len(uni.symbols)} 只)\n")
     db.init()
 
     with db.session() as con:
@@ -224,12 +251,22 @@ def main() -> int:
               + f"{sorted(set(b_list))[:6]} ｜ 判定需要公司行动数据源；"
                 f"本轮处置是「不交易那一天」，不是「修价格」")
 
-        # 覆盖率
+        # 覆盖率：目标池里哪些名字在 coverage 表里没有记录。
+        # ⚠️ 池内感知（2026-10-17）：把"缺的名字"分成"此刻可交易"与"反正不会交易"两类，
+        # **只有池内缺名字才算失败** —— 否则把目标池从 596 扩到 3030 之后，那些早就
+        # 退市/改名、注定没有数据的名字会让这条闸门每天报红，运维层很快就会训练出
+        # "反正每天都红"的疲劳（本文件顶部那条 doctrine 就是为这个写的）。
+        # 池外缺多少照旧打印在 detail 里 —— 不静默，只是不判死。
         cov = {r[0] for r in con.execute(
             "SELECT symbol FROM coverage WHERE kind='ohlcv'")}
         missing = sorted(set(uni.symbols) - cov)
-        check("覆盖目标池", not missing,
-              f"缺 {len(missing)} 只" + (f"（例：{missing[:8]}）" if missing else ""))
+        if missing:
+            in_pool, out_pool, _empty = _pool_view(missing, pool)
+            detail = (f"缺 {len(missing)} 只（池内 {len(in_pool)} / 池外 {out_pool}）"
+                      + (f"｜池内示例 {in_pool[:6]}" if in_pool else ""))
+            check("覆盖目标池（池内）", not in_pool, detail)
+        else:
+            check("覆盖目标池（池内）", True, f"目标池 {len(uni.symbols)} 只全部覆盖")
 
         # 公司行动是否真的抓到（3 年内必然有分红/拆股）
         ev = con.execute("SELECT COUNT(*) FROM ohlcv WHERE dividends>0 OR splits>0").fetchone()[0]
@@ -345,9 +382,34 @@ def _summary() -> int:
         print("失败项:")
         for n, _, d in failed:
             print(f"  - {n}: {d}")
-        return 1
-    print("全部通过")
-    return 0
+    else:
+        print("全部通过")
+    _write_report()
+    return 1 if failed else 0
+
+
+def _write_report() -> None:
+    """把结论写成机器可读的一份（`--json`）。落盘失败**不改变退出码** ——
+    报告是观测，不该因为它写不出来就把"数据是好的"说成"校验失败"。"""
+    if _JSON_OUT is None:
+        return
+    failed = [c for c in CHECKS if not c[1]]
+    payload = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "universe": _UNIVERSE_NAME,
+        "passed": len(CHECKS) - len(failed),
+        "total": len(CHECKS),
+        "failed": [n for n, _, _ in failed],
+        "checks": [{"name": n, "ok": bool(ok), "detail": d} for n, ok, d in CHECKS],
+    }
+    try:
+        _JSON_OUT.parent.mkdir(parents=True, exist_ok=True)
+        _JSON_OUT.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                             encoding="utf-8")
+        print(f"（机器可读结论已写 {_JSON_OUT}）")
+    except OSError as exc:
+        print(f"（写 {_JSON_OUT} 失败：{type(exc).__name__}: {exc} —— 不影响退出码）",
+              file=sys.stderr)
 
 
 if __name__ == "__main__":
