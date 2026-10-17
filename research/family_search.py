@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from research import broker, families as F, indicators, metrics, panel as mod_panel
+from research import overlay as overlay_fn
 from research import presets, regime, search_12m as S, wfv_search as W
 
 logger = logging.getLogger("family_search")
@@ -142,7 +143,11 @@ def overlay(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None) -> di
     for lo, hi in windows_:
         sig = (F.select(ind, family_id, fparams or {}, lo, hi, reg=reg)
                if family_id is not None else None)
-        if sig is not None and sig.empty:
+        if sig is None:
+            raise ValueError("overlay() 必须给 family_id 或一段现成的信号表 —— "
+                             "`family_id=None` 曾经把 sig=None 交给 broker，那条路是死的。"
+                             "preset 请改用 research.overlay.excess_vs_pool()")
+        if sig.empty:
             benchs.append(_bench_cagr(reg, lo, hi))
             continue
         res = broker.simulate(S.make_preset(cfg or {}), sig, ind, start=lo, end=hi,
@@ -152,15 +157,11 @@ def overlay(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None) -> di
         if len(eq) < 3:
             benchs.append(_bench_cagr(reg, lo, hi))
             continue
-        sret = eq["equity"].pct_change().fillna(0.0)
-        w = eq["exposure"].shift(1).fillna(0.0)          # 前一日敞口(因果)
-        b = bret.reindex(eq.index).fillna(0.0)
-        ov = (w * sret + (1.0 - w) * b)
-        days = (eq.index[-1] - eq.index[0]).days
-        c = float((1.0 + ov).prod() ** (365.25 / days) - 1.0) if days > 0 else float("nan")
-        outs.append(c)
+        # 公式的**唯一定义**在 research/overlay.py —— 这里只做逐窗折算与折叠。
+        o = overlay_fn.overlay_from_equity(eq, bret)
+        outs.append(o["cagr"])
         benchs.append(_bench_cagr(reg, lo, hi))
-        expos.append(float(w.mean()))
+        expos.append(o["exposure"])
     if not outs:
         return {"cagr": None, "bench": None, "excess": None, "n": 0}
     cb = float(np.nanmean(benchs)) if benchs else float("nan")
