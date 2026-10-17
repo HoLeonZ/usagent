@@ -1,4 +1,4 @@
-"""筛选器 —— 把 596 只收窄成人能过目的候选,并**同时报告这组条件的历史基准率**。
+"""筛选器 —— 把 整个池子收窄成人能过目的候选,并**同时报告这组条件的历史基准率**。
 
 为什么这个工具长这样(读之前先读这段)
 ======================================
@@ -317,7 +317,9 @@ def main() -> int:
         if a.out:
             _write_artifact(a.out, ind=ind, kind="measure", as_of=None, tier=None,
                             horizon=a.horizon, window=[a.start, a.end],
-                            table=m, note=a.note)
+                            table=m, note=a.note,
+                            params={"family_size": a.family_size,
+                                    "universe": str(mod_universe.DEFAULT_SPEC)})
         return 0
 
     as_of = a.as_of or str(ind["date"].max().date())
@@ -352,12 +354,52 @@ def main() -> int:
         _write_artifact(a.out, ind=ind, kind="candidates", as_of=as_of, tier=a.tier,
                         horizon=a.horizon, window=[a.start, a.end], table=c,
                         benchmark=(None if row.empty else row.iloc[0].to_dict()),
-                        base_mean=float(base), note=a.note)
+                        base_mean=float(base), note=a.note,
+                        params={"family_size": a.family_size, "top": a.top,
+                                "universe": str(mod_universe.DEFAULT_SPEC)})
     return 0
 
 
+def _nan_safe(obj):
+    """把 NaN/±Inf 变成 None —— 否则 `json.dumps` 会写出裸 `NaN`，那不是合法 JSON。
+
+    对抗核验实测：窄窗口上 benchmark/base_mean 是裸 `float('nan')`，产物因此**不是合法 JSON**
+    （严格解析器直接报错），而 pandas 的 `to_json` 那条路会写成 null ⇒ 同一个文件里两种写法。
+    """
+    if isinstance(obj, float):
+        return None if (obj != obj or obj in (float("inf"), float("-inf"))) else obj
+    if isinstance(obj, dict):
+        return {k: _nan_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_nan_safe(v) for v in obj]
+    return obj
+
+
+def _artifact_valid(kind: str, table, benchmark, base_mean) -> tuple[bool, str]:
+    """产物里的数**是否足以支撑判读**。不够就显式标出来 —— 不许让下游把"有凭证"当成
+    "凭证可信"（对抗核验：窄窗口上 stdout 说"样本不足,无法评估"，产物却照样写、照样打印
+    "凭证产物已写"，只有一堆 NaN）。"""
+    import math
+    def _finite(x) -> bool:
+        try:
+            return x is not None and math.isfinite(float(x))
+        except (TypeError, ValueError):
+            return False
+    if len(table) == 0:
+        return False, "空表：本次没有产出任何行"
+    if kind == "candidates":
+        if benchmark is None:
+            return False, "该层没有可比基准行（样本不足或该层为空）"
+        if not _finite(benchmark.get("mean")):
+            return False, "该层的基准均值不是有限数（样本不足）"
+        return True, ""
+    if not any(_finite(v) for v in (table["mean"] if "mean" in table else [])):
+        return False, "表里没有任何有限均值（样本不足）"
+    return True, ""
+
+
 def _write_artifact(path, *, ind, kind, as_of, tier, horizon, window, table,
-                    benchmark=None, base_mean=None, note="") -> None:
+                    benchmark=None, base_mean=None, note="", params=None) -> None:
     """决策凭证落盘（2026-10-17 机构就绪审计的第 ③ 项）。
 
     为什么必须有：实测这个工具此前只 `print()`（`grep -cE "to_csv|json.dump|write_text"`
@@ -371,22 +413,32 @@ def _write_artifact(path, *, ind, kind, as_of, tier, horizon, window, table,
     import obs                                   # src/ 已在 sys.path（research/__init__ 的垫片）
     from research.panel import data_vintage
 
-    payload = {
+    valid, reason = _artifact_valid(kind, table, benchmark, base_mean)
+    payload = _nan_safe({
         "schema": "usagent.screen.artifact/v1",
         "kind": kind,
         "manifest": obs.manifest(data_vintage=data_vintage(ind)),
-        "params": {"tier": tier, "as_of": as_of, "horizon": horizon, "window": window},
+        # 参数要够复核判词：漏了 family_size 就复原不出 t 门槛（对抗核验实测）
+        "params": {"tier": tier, "as_of": as_of, "horizon": horizon, "window": window,
+                   **(params or {})},
+        "valid": valid,
+        "invalid_reason": reason,
         "note": note,
         "base_mean": base_mean,
         "benchmark": benchmark,
         "n_rows": int(len(table)),
         "table": json.loads(table.to_json(orient="records")),
-    }
+    })
     out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=1, default=str),
-                   encoding="utf-8")
-    print(f"\n（凭证产物已写 {out}：含 ts / git sha / 数据 vintage）")
+    text = json.dumps(payload, ensure_ascii=False, indent=1, default=str, allow_nan=False)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        # 写失败要说人话并**非零退出**：用户显式要了凭证却没有凭证，不是"无害的观测失败"
+        raise SystemExit(f"凭证写入失败 {out}：{type(exc).__name__}: {exc}") from exc
+    mark = "" if valid else f"（⚠️ 无效读数：{reason}）"
+    print(f"\n（凭证产物已写 {out}：含 ts / git sha / 数据 vintage{mark}）")
 
 
 if __name__ == "__main__":

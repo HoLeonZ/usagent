@@ -62,3 +62,56 @@ def test_artifact_defaults_are_honest_when_absent(tmp_path):
                        table=pd.DataFrame([{"symbol": "AAA"}]))
     d = json.loads(out.read_text(encoding="utf-8"))
     assert d["benchmark"] is None and d["base_mean"] is None and d["note"] == ""
+
+
+# ---------------------------------------------------------------- 对抗核验后的加固
+#
+# 2026-10-17 核验实测到的三个问题：产物含裸 NaN（不是合法 JSON）、窄窗口下"凭证已写"
+# 与"读数无效"混为一谈、参数缺 family_size（复原不出 t 门槛）。下面三道测试钉住修复。
+
+def _artifact(tmp_path, **kw):
+    ind = _ind()
+    out = tmp_path / "a.json"
+    args = dict(ind=ind, kind="candidates", as_of="2024-06-03", tier="t", horizon=18,
+                window=["a", "b"], table=pd.DataFrame([{"symbol": "AAA"}]))
+    args.update(kw)
+    SC._write_artifact(out, **args)
+    return out
+
+
+def test_artifact_is_always_strict_json(tmp_path):
+    """含 NaN 的读数必须写成 null —— 裸 `NaN` 不是合法 JSON（严格解析器会报错）。"""
+    import math
+    out = _artifact(tmp_path, benchmark={"mean": float("nan"), "n": 0},
+                    base_mean=float("nan"))
+    text = out.read_text(encoding="utf-8")
+    assert "NaN" not in text and "Infinity" not in text
+    d = json.loads(text, parse_constant=lambda c: (_ for _ in ()).throw(AssertionError(c)))
+    assert d["benchmark"]["mean"] is None and d["base_mean"] is None
+    assert math.isnan(float("nan"))                       # 顺手说明这不是精度问题
+
+
+def test_invalid_measurement_is_marked_and_printed(tmp_path, capsys):
+    """读数无效时必须**标出来**（产物里 valid=false + 一句理由，stdout 也要提示），
+    不许把"有凭证"与"凭证可信"混为一谈。"""
+    out = _artifact(tmp_path, kind="measure", tier=None, as_of=None,
+                    table=pd.DataFrame([{"tier": "x", "mean": float("nan")}]),
+                    benchmark=None, base_mean=None)
+    d = json.loads(out.read_text(encoding="utf-8"))
+    assert d["valid"] is False and d["invalid_reason"]
+    assert "无效读数" in capsys.readouterr().out
+
+
+def test_valid_measurement_has_no_warning(tmp_path, capsys):
+    out = _artifact(tmp_path, kind="measure", tier=None, as_of=None,
+                    table=pd.DataFrame([{"tier": "base", "mean": 0.01}]))
+    d = json.loads(out.read_text(encoding="utf-8"))
+    assert d["valid"] is True and d["invalid_reason"] == ""
+    assert "无效读数" not in capsys.readouterr().out
+
+
+def test_extra_params_reach_the_artifact(tmp_path):
+    """判词用的族规模必须进凭证 —— 否则事后复原不出 t 门槛。"""
+    out = _artifact(tmp_path, params={"family_size": 12, "top": 20, "universe": "liquidity"})
+    d = json.loads(out.read_text(encoding="utf-8"))
+    assert d["params"]["family_size"] == 12 and d["params"]["top"] == 20

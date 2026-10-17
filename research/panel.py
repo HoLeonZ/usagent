@@ -110,7 +110,7 @@ def load_full_panel(
                 # 立刻抛,但也要抛得可行动)。
                 raise PanelError(
                     f"读不到 ohlcv 表({exc})—— data/*.db 不随仓库分发,先跑取数:\n"
-                    f"    python src/download_ohlcv.py --universe oi100 --as-of <YYYY-MM-DD>\n"
+                    f"    python src/download_ohlcv.py --universe all --as-of <YYYY-MM-DD>\n"
                     f"    (--as-of 钉住数据 vintage;窗口与命令见 research/README.md 的「复现」)"
                 ) from exc
             symbols = [r[0] for r in rows]

@@ -22,6 +22,7 @@ import pandas as pd
 
 from core.preset_contract import (INDICATOR_PRICE_ADJUST, describe_engine_spec,
                                    spec_header)
+import obs   # src/ 已在 sys.path（research/__init__ 的垫片）
 from research import broker, indicators, metrics, panel as panel_mod, presets, regime, signals
 from research.broker import trade_fingerprint
 from research.panel import data_vintage
@@ -197,7 +198,12 @@ def run(args) -> dict:
            "trades_sha256": trade_fingerprint(tr),
            # 数据 vintage:让每个被报告的数字可追溯到一份具体的数据快照。
            # 没有它,「当前代码 + 一条命令」复现不出任何历史数字(§0/§7)。
+           # 数据 vintage 保持**顶层**（既有接口：测试与下游都按这个键读；不许为了好看挪窝）。
            "data_vintage": data_vintage(ind),
+           # 代码侧的凭证（2026-10-17 对抗核验：只有 vintage 答不出"哪份代码算的"）——
+           # ts 带时区 + git sha + **工作区是否脏**（脏树上 sha 相同、代码不同）。
+           # 两份事实各一处，不互为副本。
+           "manifest": obs.manifest(),
            "avoid_earnings": bool(args.avoid_earnings),
            "n_signals": len(sig), "metrics": {k: _fmt(v) for k, v in res["metrics"].items()},
            "cagr": _fmt(cg), "benchmark_total": _fmt(bench_tot),

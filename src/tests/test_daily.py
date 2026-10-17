@@ -101,3 +101,31 @@ def test_metrics_from_checks_parses_and_tolerates_garbage(tmp_path):
     bad.write_text("{ 不是 json", encoding="utf-8")
     assert daily._metrics_from_checks(bad) is None
     assert daily._metrics_from_checks(tmp_path / "missing.json") is None
+
+
+def test_stale_artifact_is_not_attributed_to_this_run(tmp_path, monkeypatch):
+    """**上一次**的校验结论不许被当成本次的 —— 失败步骤的台账里不该出现 checks_*。
+
+    对抗核验实测：产物写失败时旧文件会留在磁盘上，于是"步骤失败(ok=false)"那一行
+    却带着上一次的 passed=18/18 —— 自相矛盾，而且事后无法分辨。
+    """
+    import json
+    import obs as obs_mod
+    monkeypatch.setattr(obs_mod, "RUN_LOG", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(obs_mod, "ALERT_LOG", tmp_path / "alerts.jsonl")
+    art = tmp_path / "checks.json"
+    art.write_text(json.dumps({"passed": 18, "total": 18, "failed": []}), encoding="utf-8")
+    monkeypatch.setattr(daily, "CHECKS_JSON", art)
+
+    def _fake_run(argv, **kw):
+        name = " ".join(argv)
+        if "validate.py" in name:                 # 校验步失败，且**没有**重写产物
+            return _CP(1, "坏了")
+        return _CP(0, "")
+
+    monkeypatch.setattr(daily.subprocess, "run", _fake_run)
+    assert daily.main(["--quiet"]) == 1
+    runs = [json.loads(x) for x in (tmp_path / "runs.jsonl").read_text().splitlines()]
+    step2 = [r for r in runs if "校验" in r["stage"]][0]
+    assert step2["ok"] is False
+    assert "checks_passed" not in step2, "把上一次的结论当成本次的了"

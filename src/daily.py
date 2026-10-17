@@ -79,6 +79,13 @@ def run_step(step: dict, *, python: str, verbose: bool) -> bool:
     """跑一步，记台账；失败则告警。返回是否成功。"""
     name, argv = step["stage"], step["argv"]
     print(f"--- {name}")
+    # 先删掉这一步的产物：否则"步骤失败"时，台账会把**上一次**的结论当成本次的
+    # （对抗核验实测：写入失败时 validate 会把旧文件留在磁盘上，旧结论与 ok=false 自相矛盾）
+    for art in step.get("artifacts", []):
+        try:
+            Path(art).unlink(missing_ok=True)
+        except OSError as exc:
+            obs.alert("warn", f"{name}：旧产物删不掉", f"{art}: {exc}")
     t0 = time.time()
     try:
         p = subprocess.run(argv, cwd=REPO, capture_output=True, text=True)
@@ -96,6 +103,12 @@ def run_step(step: dict, *, python: str, verbose: bool) -> bool:
     ok = p.returncode == 0
     fields = {"exit_code": p.returncode, "argv": argv}
     for art in step.get("artifacts", []):
+        # 只认**这一次**写出来的产物（mtime 早于本步开始的，一律不采信）
+        try:
+            if Path(art).stat().st_mtime < t0:
+                continue
+        except OSError:
+            continue
         m = _metrics_from_checks(art)
         if m:
             fields.update(m)

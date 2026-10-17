@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,7 +23,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-TEXT_SUFFIXES = (".md", ".py", ".sh", ".txt", ".yaml", ".yml", ".toml", ".cfg")
+# 扫描面（2026-10-17 对抗核验：此前只有 8 种后缀 ⇒ 坏路径写进 .json/.html/无扩展名文件
+# 一律看不见）。宁可多扫几个文本后缀，也别让"换个扩展名就能溜过去"。
+TEXT_SUFFIXES = (".md", ".py", ".sh", ".txt", ".yaml", ".yml", ".toml", ".cfg",
+                 ".json", ".csv", ".html", ".ini", ".env", ".sql", ".ipynb")
 
 # 唯一豁免：本文件。它**必须**写出这些模式才能定义它们（正则字面量与 docstring 里
 # 各一份）。豁免名单只允许这一个，且由 test_the_allowlist_is_exactly_one_file 钉住 ——
@@ -36,7 +40,24 @@ FORBIDDEN = [
      "本仓库的绝对路径 —— 换台机器就失效（用相对路径或 <仓库根>）"),
     (re.compile(r"PY=/opt/homebrew|PY=/usr/local|PY=/Users/"),
      "写死的解释器路径 —— 用 ${PY:-python3} 让调用方覆盖"),
+    # 2026-10-17 对抗核验：上面那条只认 `PY=<绝对路径>` 这一种拼法，
+    # `exec /opt/homebrew/bin/python3` 这类**裸的绝对解释器路径**照样溜过去。
+    (re.compile(r"(?<![\w./])/(?:opt/homebrew|usr/local|Users/[^/\s]+)/[^\s]*?/?(?:python[0-9.]*|python3)"),
+     "写死的解释器绝对路径（不限于 PY= 形式）—— 用 ${PY:-python3}"),
 ]
+
+
+def _clean_git_env() -> dict:
+    """去掉继承来的 GIT_* —— 让 git 只按 cwd 发现仓库。
+
+    为什么必须有：`GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` 一旦被
+    导出（linked worktree 里的钩子就是这种环境），在别处跑的 `git init` / `git add` 会作用到
+    **那个**仓库上 —— 实测能把共享 .git/config 的 core.bare 写成 true，让主工作区不可用。
+    """
+    import os
+    return {k: v for k, v in os.environ.items()
+            if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                         "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")}
 
 
 def _tracked_text_files():
@@ -60,6 +81,21 @@ def _tracked_text_files():
     return [ROOT / p for p in sorted(paths) if p.endswith(TEXT_SUFFIXES)]
 
 
+def _index_text(rel: str) -> str | None:
+    """取**索引里**那份内容（= 将要被提交的那份）。看不见索引就返回 None。
+
+    为什么必须读索引（2026-10-17 对抗核验实测）：此前只从索引取**文件名**，内容却读工作区
+    ⇒「`git add` 一个带违规的文件、再把工作区改回干净」能让护栏放行，而**提交进历史的是
+    违规那一份**（实测复现）。要守住"被提交的状态"，就必须读索引的内容。
+    """
+    try:
+        out = subprocess.run(["git", "show", f":{rel}"], cwd=ROOT,
+                             capture_output=True, text=True, env=_clean_git_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
 def test_no_machine_specific_paths_in_tracked_files():
     files = _tracked_text_files()
     if not files:
@@ -69,14 +105,20 @@ def test_no_machine_specific_paths_in_tracked_files():
     for f in files:
         if f.resolve() in _ALLOWLIST:
             continue
+        rel = str(f.relative_to(ROOT))
+        copies: list[tuple[str, str]] = []
         try:
-            text = f.read_text(encoding="utf-8")
+            copies.append(("工作区", f.read_text(encoding="utf-8")))
         except (UnicodeDecodeError, FileNotFoundError):
-            continue
-        for pat, why in FORBIDDEN:
-            for m in pat.finditer(text):
-                line = text[:m.start()].count("\n") + 1
-                hits.append(f"{f.relative_to(ROOT)}:{line}: {m.group(0)!r} —— {why}")
+            pass
+        idx = _index_text(rel)
+        if idx is not None:
+            copies.append(("索引", idx))
+        for where, text in copies:
+            for pat, why in FORBIDDEN:
+                for m in pat.finditer(text):
+                    line = text[:m.start()].count("\n") + 1
+                    hits.append(f"{rel}:{line}[{where}]: {m.group(0)!r} —— {why}")
     assert not hits, "仓库里出现机器相关的绝对路径：\n" + "\n".join(hits)
 
 
@@ -114,7 +156,13 @@ def test_staged_but_uncommitted_files_are_also_scanned(tmp_path, monkeypatch):
     import src.tests.test_repo_hygiene as H          # noqa: N813
 
     monkeypatch.setattr(H, "ROOT", tmp_path)         # _git() 在调用时读模块全局
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    # ⚠️ **必须清掉继承来的 GIT_\* 环境变量**（2026-10-17 对抗核验抓到的**破坏性**回归）：
+    # linked worktree 里 git 会向钩子导出 GIT_DIR=<repo>/.git/worktrees/<name>；测试若带着
+    # 这个变量在 tmp 目录里 `git init`，git 会顺着 commondir 写回**共享**的 .git/config
+    # （core.bare = true）⇒ 主工作区随后 git status/add/checkout 全部 fatal，要手工修配置。
+    # 实测在三个独立副本上复现过。凡是在临时目录里跑 git 的测试都必须清环境。
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True,
+                   env=_clean_git_env())
     bad = tmp_path / "bad.py"
     bad.write_text('ROOT = "/Users/someone/code/usagent"\n', encoding="utf-8")
     subprocess.run(["git", "add", "bad.py"], cwd=tmp_path, check=True)   # 只暂存，不提交

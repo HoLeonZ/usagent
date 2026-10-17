@@ -163,6 +163,16 @@ $PY -m research.screen --measure --horizon 5     # 换持有期
 再跑一次,族就更大 —— 用 `--family-size` 把它累加进去(例如 4 层 × 3 个 horizon → 12,
 门槛 2.865)。输出里会同时印出当前族规模与门槛。
 
+### 凭证落盘（`--out`）
+
+```bash
+$PY -m research.screen --tier trend_pullback --out results/candidates.json --note "为什么跑这一次"
+```
+
+产物带 **ts（带时区）/ git sha / 工作区是否脏 / 数据 vintage** + 口径参数 + 清单 + 同层基准率，
+并标 `valid`：读数无效（样本不足/基准不是有限数）时写成 `valid=false` 并给理由 ——
+不许把「有凭证」与「凭证可信」混为一谈。
+
 ### 这个工具不做什么
 
 **它不预测方向。** 判据是「相对全池基准、并已按重叠采样折减的 t 值」。截至 2026-10-14,

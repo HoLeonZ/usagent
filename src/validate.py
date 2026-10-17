@@ -251,22 +251,34 @@ def main(argv: list[str] | None = None) -> int:
               + f"{sorted(set(b_list))[:6]} ｜ 判定需要公司行动数据源；"
                 f"本轮处置是「不交易那一天」，不是「修价格」")
 
-        # 覆盖率：目标池里哪些名字在 coverage 表里没有记录。
-        # ⚠️ 池内感知（2026-10-17）：把"缺的名字"分成"此刻可交易"与"反正不会交易"两类，
-        # **只有池内缺名字才算失败** —— 否则把目标池从 596 扩到 3030 之后，那些早就
-        # 退市/改名、注定没有数据的名字会让这条闸门每天报红，运维层很快就会训练出
-        # "反正每天都红"的疲劳（本文件顶部那条 doctrine 就是为这个写的）。
-        # 池外缺多少照旧打印在 detail 里 —— 不静默，只是不判死。
-        cov = {r[0] for r in con.execute(
+        # 覆盖率：**声明的目标池**里，哪些名字"从没被尝试取过"。
+        #
+        # ⚠️ 判据在 2026-10-17 被对抗核验纠正过一次，值得留档：第一版写成"缺 coverage
+        # 且落在池内才失败"，而 `coverage` 是从 ohlcv 反推的（`refresh_coverage` 按 ohlcv
+        # 分组），"池内"也是对 ohlcv 分组得到的 ⇒ pool ∩ missing ≡ ∅，那条检查在真库上
+        # **恒绿** —— 我把一道活的检查改成了空断言（本仓库最忌讳的形态）。
+        #
+        # 真正会坏、而且真的发生过的事故是：**声明的池子变大了，每日任务却没去取新名字**
+        # （审计第 ② 项就是它：每日刷 596 只、声明 3030 只）。所以判死条件是
+        # "缺数据 **且** fetch_log 里从来没有它的记录" —— 即**从没尝试过**。
+        # 尝试过但取到空的（厂商没数据）只进 detail，不判死（避免对退市/改名名字产生告警疲劳）。
+        declared = set(uni.symbols)
+        covered = {r[0] for r in con.execute(
             "SELECT symbol FROM coverage WHERE kind='ohlcv'")}
-        missing = sorted(set(uni.symbols) - cov)
-        if missing:
-            in_pool, out_pool, _empty = _pool_view(missing, pool)
-            detail = (f"缺 {len(missing)} 只（池内 {len(in_pool)} / 池外 {out_pool}）"
-                      + (f"｜池内示例 {in_pool[:6]}" if in_pool else ""))
-            check("覆盖目标池（池内）", not in_pool, detail)
+        attempted = {r[0] for r in con.execute("SELECT DISTINCT symbol FROM fetch_log")}
+        if not attempted:
+            # 全新/合成库：一条取数记录都没有 ⇒ "从没尝试"无法归因（每个名字都符合），
+            # 判死只会把"还没取过数"说成"数据缺失"。这里显式记一条、写清为什么。
+            check("覆盖声明的目标池（从没尝试过的名字）", True,
+                  "fetch_log 为空（全新或合成库）—— 无法归因，不判死")
         else:
-            check("覆盖目标池（池内）", True, f"目标池 {len(uni.symbols)} 只全部覆盖")
+            missing = sorted(declared - covered)
+            never_tried = [s for s in missing if s not in attempted]
+            empty_tried = [s for s in missing if s in attempted]
+            check("覆盖声明的目标池（从没尝试过的名字）", not never_tried,
+                  f"声明 {len(declared)} 只；缺数据 {len(missing)} 只"
+                  f"（从没尝试 {len(never_tried)} / 尝试过但无数据 {len(empty_tried)}）"
+                  + (f"｜从没尝试的示例 {never_tried[:8]}" if never_tried else ""))
 
         # 公司行动是否真的抓到（3 年内必然有分红/拆股）
         ev = con.execute("SELECT COUNT(*) FROM ohlcv WHERE dividends>0 OR splits>0").fetchone()[0]

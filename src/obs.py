@@ -1,10 +1,14 @@
 """运行观测、告警出口与**决策凭证** —— 最小可用的一层。
 
 为什么需要它（2026-10-17 机构就绪审计的第 ④ 项，实测证据）：
-`logs/` 是空目录；`run_daily.sh` 失败只 echo 到 stdout；`grep -rniE 监控|告警|值班` 全仓
-0 命中。于是"跑完了"与"跑失败了"在一周后无法区分，而**任何一个"今天的候选清单"都没有
-时间戳 / git sha / 数据 vintage**（`research/screen.py` 只 `print()`）⇒ 从信号到下单这一段
-没有任何可对账的凭证。
+`logs/` 是空目录；`run_daily.sh` 失败只 echo 到 stdout；**没有任何步骤级的运行台账**，
+也**没有任何投递目标**（默认部署下告警等于不告警）。于是"跑完了"与"跑失败了"在一周后
+无法区分。
+⚠️ 更正一处我写错的动机（2026-10-17 对抗核验）：这里原先写「`grep -rniE 监控|告警|值班`
+全仓 0 命中」——**是假的**，改动前的父提交上命中 13 行 / 7 个文件（`README.md`、
+`validate.py`、`download_ohlcv.py` 里都在谈"接告警"）。真实的缺口不是"没人提过告警"，
+而是"**有告警的想法、没有告警的机制**"。把它写成"零命中"是拿一个不成立的事实支撑结论 ——
+本仓库正是为根除这种写法才建的台账。
 
 这一层只做三件事，三件都是线上化的前置：
   1. **运行台账**：每步一行 JSONL（时间 / git sha / 阶段 / 成败 / 耗时 / 关键指标）；
@@ -45,21 +49,49 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
+def _clean_git_env() -> dict:
+    """去掉继承来的 GIT_*：git 只按 cwd（= 本模块所在仓库）发现仓库。
+
+    为什么必须有（2026-10-17 对抗核验抓到的**破坏性**回归）：linked worktree 里 git 会向
+    子进程导出 `GIT_DIR=<主仓>/.git/worktrees/<name>`。带着它跑 `git init`（测试里会）能
+    顺着 commondir 写回**共享**的 `.git/config`（core.bare=true），让主工作区不可用 ——
+    三个独立副本上都复现过。观测层问的永远是"本模块所在仓库"，所以环境必须清干净。
+    """
+    return {k: v for k, v in os.environ.items()
+            if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                         "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")}
+
+
+def _git(*args: str) -> str:
+    try:
+        out = subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True,
+                             timeout=10, env=_clean_git_env())
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def git_sha(short: bool = True) -> str:
     """当前 HEAD 的 sha；不在 git 工作区或没有 git 时返回 "unknown"（不抛）。"""
-    args = ["git", "rev-parse", "--short" if short else "--verify", "HEAD"]
-    if not short:
-        args = ["git", "rev-parse", "HEAD"]
-    try:
-        out = subprocess.run(args, cwd=REPO, capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else "unknown"
+    sha = _git("rev-parse", "--short" if short else "--verify", "HEAD")
+    return sha or "unknown"
+
+
+def git_dirty() -> bool | None:
+    """工作区是否有未提交改动。None = 判不出来（不是 git 仓库）。
+
+    为什么需要它：只有 sha 答不出"跑的是不是这份代码" —— 脏工作区上 `rev-parse HEAD`
+    照样返回同一个 sha（对抗核验实测：往被测文件里追一行注释，sha 不变）。
+    "哪份代码算的"这句话在脏树上不成立，所以要把脏这件事**记下来**。
+    """
+    if not _git("rev-parse", "--git-dir"):
+        return None                       # 不是 git 仓库 ⇒ 答不出，就不说"干净"
+    return bool(_git("status", "--porcelain"))
 
 
 def manifest(**extra) -> dict:
     """一份决策产物的凭证头。字段刻意少而硬：时间、代码版本、解释器、解释器版本。"""
-    m = {"ts": now_iso(), "git_sha": git_sha(),
+    m = {"ts": now_iso(), "git_sha": git_sha(), "git_dirty": git_dirty(),
          "python": sys.version.split()[0], "platform": platform.system()}
     m.update({k: v for k, v in extra.items() if v is not None})
     return m
@@ -77,7 +109,7 @@ def log_run(stage: str, ok: bool, *, seconds: float | None = None,
     """记一行运行台账。**任何调用者都不要吞这里的异常**？不 —— 这里是观测层，
     观测不能把主流程弄挂：写失败只在 stderr 留一句（见 `_safe`）。"""
     rec = {"kind": "run", "stage": stage, "ok": bool(ok), "ts": now_iso(),
-           "git_sha": git_sha()}
+           "git_sha": git_sha(), "git_dirty": git_dirty()}
     if seconds is not None:
         rec["seconds"] = round(float(seconds), 3)
     if exit_code is not None:
@@ -94,14 +126,21 @@ def alert(level: str, title: str, detail: str = "", **fields) -> Path | None:
     `level` ∈ {"warn","error"}。返回落盘路径（写失败返回 None）—— 观测层不抛。
     """
     rec = {"kind": "alert", "level": level, "title": title, "detail": detail[:4000],
-           "ts": now_iso(), "git_sha": git_sha()}
+           "ts": now_iso(), "git_sha": git_sha(), "git_dirty": git_dirty()}
     rec.update({k: v for k, v in fields.items() if v is not None})
     path = _safe(_append, ALERT_LOG, rec)
-    print(f"[ALERT/{level}] {title} {detail}", file=sys.stderr)
+    _safe(_stderr, f"[ALERT/{level}] {title} {detail}")
     url = os.environ.get(WEBHOOK_ENV, "").strip()
     if url:
-        _safe(_post, url, rec)
+        # 投递失败必须与"落盘失败"区分开（否则台账答不出"这条告警有没有送到人"）
+        if _safe(_post, url, rec) is None:
+            _safe(_append, ALERT_LOG, {**rec, "kind": "alert_delivery_failed",
+                                       "ts": now_iso()})
     return path
+
+
+def _stderr(msg: str) -> None:
+    print(msg, file=sys.stderr)
 
 
 def _post(url: str, rec: dict) -> None:
@@ -115,9 +154,14 @@ def _safe(fn, *args):
     """观测层的所有副作用都从这里过：失败只留痕，不冒泡。"""
     try:
         return fn(*args)
-    except (OSError, ValueError, urllib.error.URLError) as exc:      # noqa: BLE001
-        print(f"[obs] 观测写入失败（不影响主流程）: {type(exc).__name__}: {exc}",
-              file=sys.stderr)
+    except Exception as exc:                                        # noqa: BLE001
+        # 连 stderr 也可能写不出去（磁盘满 / 管道断）—— 那一层再兜一次，
+        # 因为"观测把主流程弄挂"是这一层最不能犯的错（对抗核验点名要查这条）。
+        try:
+            print(f"[obs] 观测写入失败（不影响主流程）: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+        except Exception:                                           # noqa: BLE001
+            pass
         return None
 
 

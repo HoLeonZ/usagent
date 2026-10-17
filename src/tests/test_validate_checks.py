@@ -161,3 +161,67 @@ def test_truncated_tail_is_detected_for_in_pool_names(tmp_path, monkeypatch):
     ok, detail = got["池内无序列尾部截断（缺 ≥5 个交易日）"]
     assert not ok, detail
     assert "AAA" in detail
+
+
+# ---------------------------------------------------------------- 覆盖率判据的**承重性**
+#
+# 2026-10-17 对抗核验抓到：这道检查的第一版写成"缺 coverage 且落在池内才失败"，
+# 而 coverage 是从 ohlcv 反推的、池内也是对 ohlcv 分组的 ⇒ pool ∩ missing ≡ ∅
+# ⇒ 在真库上**恒绿**（把活的检查改成空断言）。下面两道测试就是防它再退化。
+
+class _FakeUniverse:
+    def __init__(self, symbols):
+        self.symbols = tuple(symbols)
+
+
+def _coverage_check() -> tuple[bool, str]:
+    hits = [(ok, d) for n, ok, d in validate.CHECKS if "从没尝试过" in n]
+    assert hits, f"没有找到覆盖率检查项：{[n for n, _, _ in validate.CHECKS]}"
+    return hits[0]
+
+
+def test_coverage_check_fails_for_a_name_never_attempted(tmp_path, monkeypatch):
+    """声明池里有一个"从没被尝试取过"的名字 ⇒ **必须红**（这正是每日刷 596 只、
+    声明 3030 只那类事故的形状）。"""
+    _seed(tmp_path, monkeypatch, basis=_flat(["AAA"], len(RECENT)))
+    with db.session() as con:
+        # 取过 AAA（ok），但 BBB 连一条 fetch_log 都没有 ⇒ 从没尝试
+        db.log(con, "r1", "2026-10-16T00:00:00+00:00", "ohlcv", "AAA", "ok")
+    monkeypatch.setattr(validate, "load_universe",
+                        lambda name: _FakeUniverse(["AAA", "BBB"]))
+    validate.CHECKS.clear()
+    validate.main([])
+    ok, detail = _coverage_check()
+    assert ok is False, detail
+    assert "BBB" in detail and "从没尝试 1" in detail
+
+
+def test_coverage_check_does_not_red_on_attempted_but_empty(tmp_path, monkeypatch):
+    """尝试过但厂商没给数据（退市/改名）⇒ **不判死**，只进 detail。
+
+    这是有意的取舍：否则那些注定没有数据的名字会让这条闸门每天报红，
+    运维层很快就会训练出"反正每天都红"的疲劳（本文件顶部那条 doctrine）。
+    """
+    _seed(tmp_path, monkeypatch, basis=_flat(["AAA"], len(RECENT)))
+    with db.session() as con:
+        db.log(con, "r1", "2026-10-16T00:00:00+00:00", "ohlcv", "AAA", "ok")
+        db.log(con, "r1", "2026-10-16T00:00:00+00:00", "ohlcv", "GONE", "empty")
+    monkeypatch.setattr(validate, "load_universe",
+                        lambda name: _FakeUniverse(["AAA", "GONE"]))
+    validate.CHECKS.clear()
+    validate.main([])
+    ok, detail = _coverage_check()
+    assert ok is True, detail
+    # 合成库里 coverage 表是空的 ⇒ AAA 也算"缺数据"；要证的是**没有"从没尝试"** ⇒ 不红
+    assert "从没尝试 0" in detail and "尝试过但无数据" in detail
+
+
+def test_coverage_check_is_informational_on_a_fresh_db(tmp_path, monkeypatch):
+    """fetch_log 为空（全新/合成库）⇒ 不判死，但**要写清为什么**（不许静默通过）。"""
+    _seed(tmp_path, monkeypatch, basis=_flat(["AAA"], len(RECENT)))
+    monkeypatch.setattr(validate, "load_universe",
+                        lambda name: _FakeUniverse(["AAA", "BBB"]))
+    validate.CHECKS.clear()
+    validate.main([])
+    ok, detail = _coverage_check()
+    assert ok is True and "fetch_log 为空" in detail

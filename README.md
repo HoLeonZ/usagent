@@ -25,8 +25,10 @@ usagent/
     usagent.db                 # SQLite，全部数据
     universe_nasdaq_all.json   # Nasdaq 全量普通股 3,030 只（含市值/价格）
     universe_oi100.csv         # 期权 OI>=100 的 596 只（**已不是工作池**：见下）
-                               # 工作池 = universe_nasdaq_all.json（3,030 只）——
-                               # 每日任务、校验闸门、引擎三处共用 config.DAILY_UNIVERSE
+                               # 取数名单 = universe_nasdaq_all.json（3,030 只）——
+                               # 每日任务与校验闸门共用 config.DAILY_UNIVERSE；
+                               # ⚠️ 引擎**不读这个配置**：它读库（SELECT DISTINCT symbol
+                               # FROM ohlcv），再逐日按流动性过滤 ⇒ 最后一日真正可交易约 690 只
     universe_tight.csv         # 再叠加价差<=3tick 且 <=15% 的 49 只
   src/
     config.py           # 全部可调参数集中在这里
@@ -104,7 +106,7 @@ python3 src/obs.py --alerts         # 只看告警（logs/alerts.jsonl）
    "库真的坏了"。退出码仍是任一步失败即非零。
 
 **成本（实测）**：全池 3,030 只、`--recent 10` 增量，单只中位 ~1.25s ⇒ 串行约 **63 分钟**。
-cron 定在北京 10:00，而链路的入场价钉在美东 T+1 开盘（北京 21:30）⇒ **余量约 11 小时**，
+cron 定在北京 10:00，而链路的入场价钉在美东 T+1 开盘（北京 21:30 夏令时 / 22:30 冬令时）⇒ **余量 ≥ 11 小时**，
 串行可接受。下一步优化（单独一轮，它要动数据层的取数路径）：给 `download_ohlcv` 加
 `--workers N`（6 并发实测 ≈ 11 分钟）。
 
@@ -115,7 +117,7 @@ bash tools/install_git_hooks.sh     # 装 pre-commit（调用 tools/preflight.sh
 bash tools/preflight.sh --full      # 想跑全量时
 ```
 
-`tools/preflight.sh` 跑：仓库卫生（机器相关路径 / 写死解释器 / 依赖钉版）、装载契约、
+`tools/preflight.sh` 跑（实测整脚本 ≈2-3 秒）：仓库卫生（机器相关路径 / 写死解释器 / 依赖钉版）、装载契约、
 覆盖判据、**离线行为锁**。它存在的直接原因（2026-10-17 审计）：CI 早就有，但**没有任何东西
 强制它** —— 实测因此红着提交过一次（写死本机路径的文件在"596 passed"之后才 `git add`）。
 ⚠️ 诚实边界：本地钩子能被 `--no-verify` 绕过，也管不到别人的克隆。**真正的强制是远端的分支
