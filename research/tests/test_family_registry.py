@@ -47,6 +47,24 @@ def test_empty_grid_fails_fast(tmp_path):
         R.load_one(_w(tmp_path, "zz", GOOD.replace('GRID = {"a": [1, 2]}', "GRID = {}")))
 
 
+def test_empty_grid_is_allowed_only_with_an_explicit_reason(tmp_path):
+    """参考族不参与搜索 ⇒ 它**没有**网格是事实，不是疏忽；但必须明写理由。
+
+    没有这条出口，唯一的替代做法是给它编一个假网格 —— 那才是真正的坏味道。
+    """
+    got = R.load_one(_w(tmp_path, "zz", GOOD.replace(
+        'GRID = {"a": [1, 2]}', 'GRID_EXEMPT_REASON = "参考族，不参与搜索"')))
+    assert got["grid"] == {} and got["grid_exempt"] == "参考族，不参与搜索"
+
+    with pytest.raises(ValueError, match="不知道该信哪个"):
+        R.load_one(_w(tmp_path, "zz", GOOD + '\nGRID_EXEMPT_REASON = "又想要网格又想要豁免"'))
+
+    # 空理由不算理由
+    with pytest.raises(ValueError, match="GRID"):
+        R.load_one(_w(tmp_path, "zz", GOOD.replace(
+            'GRID = {"a": [1, 2]}', "GRID_EXEMPT_REASON = '   '")))
+
+
 def test_load_dir_skips_private_files(tmp_path):
     _w(tmp_path, "_private", GOOD.replace('ID = "zz"', 'ID = "_private"'))
     _w(tmp_path, "zz", GOOD)

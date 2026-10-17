@@ -325,3 +325,25 @@ def attach(panel: pd.DataFrame, spec: UniverseSpec | None) -> pd.DataFrame:
             "universe 模式为 'all'（%s）—— 回测池 = DB 里恰好有的标的，"
             "存在幸存者/前视偏差，不能当作机会集口径", s.note or "未声明")
     return out
+
+
+# ---------------------------------------------------------------- 价格下限（审计 A4）
+MIN_PRICE = 1.0   # 价格下限:低于 $1 的票在美股里有额外的交易机制噪声(应声股/退市)
+
+
+def above_price_floor(ind: pd.DataFrame) -> pd.Series:
+    """价格下限判据 —— **必须落在 as-traded 价轴（`raw_close`）上**。
+
+    为什么（审计 A4）：`MIN_PRICE` 是**绝对美元数**，而 `close` 是**分红回补价**
+    （`series.daily(adjust="total")`）。回补因子在 T 日包含了 **T 之后**的所有分红，
+    所以「T 日价格 ≥ $1」这件事会变成"未来分红的函数"——与 panel.py 已经修掉的
+    `amount` 是**同一类未来函数**（那边实测 740 个就绪格的判定被翻转）。
+    同一行的流动性门槛（`amount60`）本来就是 raw 轴，这里此前不一致。
+
+    `raw_close` 缺列时**抛错**而不是退回复权轴：静默退化正是这条缺陷的成因。
+    """
+    if "raw_close" not in ind.columns:
+        raise ValueError(
+            "价格下限必须用 as-traded 价（raw_close），但面板里没有这一列 —— "
+            "请用 panel.load_full_panel() 载入；不许回退到复权价（那是未来函数，审计 A4）")
+    return ind["raw_close"] >= MIN_PRICE

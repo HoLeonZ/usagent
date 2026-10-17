@@ -102,12 +102,20 @@ def test_price_floor_fails_fast_without_the_raw_axis():
 
 
 def test_no_family_compares_the_floor_against_the_adjusted_axis():
-    """源码级护栏：不许再出现 `ind["close"] >= MIN_PRICE` 这种写法。"""
+    """源码级护栏：不许再出现 `ind["close"] >= MIN_PRICE` 这种写法。
+
+    2026-10-17 族注册表重构后掩码函数搬到了 `family_masks.py`（族的**声明**在
+    `family_defs/<id>.py`）。守卫的**范围跟着代码走** —— 否则它会在搬走之后变成
+    空断言，而那正是这条护栏当初要防的失效方式。两个文件都扫。
+    """
     from pathlib import Path
-    src = (Path(F.__file__)).read_text(encoding="utf-8")
-    assert 'ind["close"] >= MIN_PRICE' not in src, \
-        "价格下限又比回复权价了 —— 那是未来函数（审计 A4）"
-    assert src.count("above_price_floor(ind)") >= 5, "五处调用点都应当走同一个 helper"
+    files = [Path(F.__file__), Path(F.__file__).with_name("family_masks.py")]
+    for p in files:
+        src = p.read_text(encoding="utf-8")
+        assert 'ind["close"] >= MIN_PRICE' not in src, \
+            f"价格下限又比回复权价了（{p.name}）—— 那是未来函数（审计 A4）"
+    assert sum(p.read_text(encoding="utf-8").count("above_price_floor(ind)")
+               for p in files) >= 5, "五处调用点都应当走同一个 helper"
 
 
 # ---------------------------------------------------------------- 预注册网格（F1）

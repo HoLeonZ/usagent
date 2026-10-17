@@ -8,7 +8,8 @@
 护栏里，或者网格能被事后改动。搬成一个文件后，"这个族是什么"只有一处。
 
 违规一律 fail-fast（§0），其中 `GRID` 为空必须抛：预注册网格是**纪律**（§5 迭代记账），
-不是可选项 —— 允许空网格，等于允许"先看结果再决定搜什么"。
+不是可选项 —— 允许空网格，等于允许"先看结果再决定搜什么"。唯一的例外要**明写理由**
+（`GRID_EXEMPT_REASON`）：参考族 `upb_ref` 不参与搜索，它没有网格不是疏忽而是事实。
 """
 from __future__ import annotations
 
@@ -38,14 +39,19 @@ def load_one(path: Path) -> dict:
         raise ValueError(f"{path.name} 必须定义可调用的 mask(ind, p) —— "
                          f"族的核心就是这个判定函数")
     grid = dict(getattr(mod, "GRID", {}) or {})
-    if not grid:
+    exempt = (getattr(mod, "GRID_EXEMPT_REASON", "") or "").strip()
+    if not grid and not exempt:
         raise ValueError(f"{path.name}: GRID 不能为空 —— 预注册网格是纪律（§5）："
                          f"允许空网格等于允许事后决定搜什么")
+    if grid and exempt:
+        raise ValueError(f"{path.name}: 既有 GRID 又声明 GRID_EXEMPT_REASON —— "
+                         f"读了不知道该信哪个")
     return {
         "id": mod.ID,
         "mask": fn,
         "fixed": dict(getattr(mod, "FIXED", {}) or {}),
         "grid": grid,
+        "grid_exempt": exempt or None,
         "score_col": getattr(mod, "SCORE_COL", None),
         "score_negated": bool(getattr(mod, "SCORE_NEGATED", False)),
         "needs_regime": bool(getattr(mod, "NEEDS_REGIME", False)),
