@@ -469,7 +469,15 @@ async function loadCatalog() {
   if (CAT.train) TRAIN = CAT.train;                // 出处：wfv_search 的搜索期
   $("banner").innerHTML = `目录：<b>${CAT.presets.length}</b> 条 preset · <b>${CAT.families.length}</b> 个族 ·
     其中 <b>${CAT.notes.holdout_presets}</b> 条 preset 的声明窗口含 holdout 天数（标红）。
-    族的参数默认=网格中点，可在卡片里改（只列网格上的取值）；${esc(CAT.notes.multiplicity)}`
+    族的参数默认=网格中点，可在卡片里改（只列网格上的取值）；${esc(CAT.notes.multiplicity)}
+    ${CAT.data_through ? ` · 数据覆盖到 <b>${esc(CAT.data_through.last_date)}</b>
+      （${CAT.data_through.symbols} 个标的；今天 ${new Date().toISOString().slice(0, 10)}，
+      ${CAT.data_through.days_ago} 天前）`
+      + (CAT.data_through.days_ago >= 5
+         ? `<div class="warn">⚠️ 已经 ${CAT.data_through.days_ago} 天没有新数据了（自然日差 ≥5 就提示，
+            周末正常不算）—— 可能需要跑一次取数：
+            <code>python src/download_ohlcv.py --source stockanalysis --universe all</code></div>`
+         : "") : ""}`
     + ((CAT.stale_defs || []).length
         ? `<div class="warn">⚠️ 这些定义体在<b>服务启动之后</b>被改过，服务读的还是旧值：
            <code>${CAT.stale_defs.map(esc).join("</code> <code>")}</code> ——

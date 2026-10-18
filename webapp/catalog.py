@@ -108,6 +108,8 @@ def build() -> dict:
         # 页面里剩下的 FULL（训练窗起点 .. 数据末端）是**视图默认值**，不是台账里的事实，
         # 所以不上行 —— 但它的按钮 title 始终印出"按下去会设成哪两天"，不会撒谎。
         "holdout": list(HOLDOUT),
+        # 数据覆盖到哪一天（拿多新的数据跑的结论）—— 只读装饰，取不到就不显示
+        "data_through": data_through(),
         # 启动之后被动过的定义体：服务读的是旧值 —— 摆到界面上，别让人在"改了没反应"里打转
         "stale_defs": stale_definitions(),
         "train": [W.SEARCH_LO, W.SEARCH_HI],
@@ -119,6 +121,41 @@ def build() -> dict:
             "multiplicity": "每点一次运行都会进台账；DSR 的 k 随之为涨（§5 迭代记账）",
         },
     }
+
+
+def data_through() -> dict | None:
+    """价格数据**覆盖到哪一天** —— 让人一眼看出"这份结论是拿多新的数据跑的"。
+
+    用 coverage 表的 MAX(last_date)（实测 9 毫秒；直接对 ohlcv 做 MIN/MAX 要 ~1 秒，
+    每次打开页面都付不起）。与真跑一次得到的池子末端逐字一致（实测都是 2026-10-16）。
+
+    ⚠️ 两条必须守住的：
+      1) 只在**文件存在**时查 —— `sqlite3.connect` 会为不存在的路径凭空建一个空库文件，
+         CI 上就会留下一个假的 data/usagent.db；
+      2) `days_ago` 只是自然日差，**不判"是不是交易日"**（周末差 2 天完全正常）——
+         所以界面只在差得离谱时才提示，而不是把每个周末都报成陈旧。
+    """
+    try:
+        import db as dbmod
+    except Exception:                                  # noqa: BLE001 —— 没有 db 模块就静默跳过
+        return None
+    try:
+        import sqlite3
+        import datetime
+        p = Path(dbmod.DB_PATH)
+        if not p.is_file():
+            return None
+        with sqlite3.connect(f"file:{p}?mode=ro", uri=True) as con:
+            row = con.execute("SELECT MAX(last_date), COUNT(*) FROM coverage "
+                              "WHERE kind='ohlcv'").fetchone()
+        last = row[0] if row else None
+        if not last:
+            return None
+        d = datetime.date.fromisoformat(str(last)[:10])
+        return {"last_date": d.isoformat(), "symbols": int(row[1] or 0),
+                "days_ago": (datetime.date.today() - d).days}
+    except Exception:                                  # noqa: BLE001 —— 只读装饰，出错就别显示
+        return None
 
 
 def stale_definitions(started_at: float | None = None) -> list[str]:

@@ -56,6 +56,28 @@ def test_family_default_params_are_the_grid_midpoint():
     assert e["default_params"] == {k: v[len(v) // 2] for k, v in e["grid"].items()}
 
 
+def test_data_through_is_cheap_safe_and_never_creates_a_database(tmp_path, monkeypatch):
+    """数据新鲜度探针：**只读**、便宜、且绝不凭空建库。
+
+    最后那条是给自己立的规矩：`sqlite3.connect(path)` 会为不存在的路径**建一个空库文件** ——
+    如果这里图省事直接 connect，CI 上就会留下一个假的 data/usagent.db，而它看起来像一个
+    "空的数据集"（比报错更难查）。所以必须先判文件存在，且用只读 URI 连。
+    """
+    import db as dbmod
+    missing = tmp_path / "nope" / "usagent.db"
+    monkeypatch.setattr(dbmod, "DB_PATH", missing)
+    assert catalog.data_through() is None
+    assert not missing.parent.exists(), "不许凭空建目录/建库"
+
+    # 真库（合成市场）在时：要么给得出，要么老实说没有 —— 给了就必须是这三件事
+    db_file = FX.build(tmp_path / "fixture.db")
+    monkeypatch.setattr(dbmod, "DB_PATH", db_file)
+    got = catalog.data_through()
+    if got is not None:
+        assert set(got) == {"last_date", "symbols", "days_ago"}, got
+        assert got["days_ago"] >= 0 and got["symbols"] >= 0
+
+
 def test_catalog_flags_definitions_changed_after_the_process_started(tmp_path, monkeypatch):
     """改了定义体、服务没重启 ⇒ 服务读的是旧值，界面必须**主动说**，不能只靠一句提示。
 
@@ -506,6 +528,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "定义体在服务启动后被改过要主动警告（不只是提示）": "CAT.stale_defs",
         "逐笔 CSV 下载（报告是给人看的，这份给脚本）": "st.trades_csv",
         "历史报告列表里的逐笔 CSV 列": "r.has_trades",
+        "数据覆盖到哪天（拿多新的数据跑的结论）": "数据覆盖到",
+        "数据陈旧时才提示，并给出取数命令": "download_ohlcv.py",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
