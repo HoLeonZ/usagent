@@ -224,6 +224,41 @@ def test_the_hint_about_k_matches_the_k_that_was_actually_used(offline):
         st2["metrics"]["k_breakdown"]["declared_or_grid"] + 0
 
 
+def test_every_run_leaves_a_machine_readable_trades_csv(offline):
+    """报告是给人看的；逐笔那 20 列必须还有一份**脚本能直接读**的。
+
+    此前只有 1.9MB 的自包含 HTML —— 想把逐笔拿去做别的计算只能从 HTML 里抠。
+    这里连"真的能读"都测了（`read_csv(comment="#")`），因为一份带注释行的 CSV 如果
+    注释写得不规矩，等于没导出。
+    """
+    import pandas as pd
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert st["status"] == "done", st.get("error")
+    csv = offline / f"web_trades_{st['id']}.csv"
+    assert csv.is_file(), "没有逐笔 CSV"
+    text = csv.read_text(encoding="utf-8")
+    head = [ln for ln in text.splitlines() if ln.startswith("#")]
+    assert len(head) >= 5 and any("as-traded" in h for h in head), head   # 口径必须随文件走
+    assert any("read_csv" in h for h in head), "要告诉读者怎么读"
+    df = pd.read_csv(csv, comment="#")
+    assert len(df) == st["metrics"]["n_trades"], "CSV 行数与成交笔数不一致"
+    for col in ("entry_date", "exit_date", "symbol", "exit_reason", "entry_price",
+                "exit_price", "net_pnl", "net_return"):
+        assert col in df.columns, f"少了 {col}"
+    assert st["trades_csv"] == f"/api/trades/{st['id']}.csv"
+
+
+def test_trades_csv_route_serves_only_known_jobs(http, tmp_path, monkeypatch):
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    (tmp_path / "web_trades_abc123def456.csv").write_text(
+        "# usagent 逐笔明细\nentry_date,exit_date\n2025-01-02,2025-01-03\n", encoding="utf-8")
+    code, body = _get(http + "/api/trades/abc123def456.csv")
+    assert code == 200 and body.decode().startswith("# usagent")
+    assert _get(http + "/api/trades/deadbeefdead.csv")[0] == 404, "不存在的任务要 404"
+    assert _get(http + "/api/trades/..%2F..%2Fetc%2Fpasswd.csv")[0] == 404, "路径不许拼"
+
+
 def test_unknown_strategy_and_bad_window_surface_as_errors(offline):
     st = _wait(jobs.submit({"kind": "preset", "id": "nope_v9",
                             "lo": WIN[0], "hi": WIN[1]})["id"])
@@ -469,6 +504,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "改完定义体要说清「要重启服务」（注册表启动时读一次）": "srchint-",
         "holdout 的次数要显眼（一句没有计数的纪律等于没有纪律）": "只准读一次",
         "定义体在服务启动后被改过要主动警告（不只是提示）": "CAT.stale_defs",
+        "逐笔 CSV 下载（报告是给人看的，这份给脚本）": "st.trades_csv",
+        "历史报告列表里的逐笔 CSV 列": "r.has_trades",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]

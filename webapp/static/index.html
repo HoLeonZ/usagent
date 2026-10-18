@@ -630,11 +630,13 @@ function keyOf(r) {
 function renderReports() {
   if (!REPORTS.length) { $("reports_body").innerHTML = `<div class="sub">（盘上还没有报告）</div>`; return; }
   $("reports_body").innerHTML = `<table class="ledger"><thead><tr><th>时间</th><th>策略</th>
-    <th>窗口</th><th>参数</th><th>大小</th><th>打开</th></tr></thead><tbody>${REPORTS.map(r => `<tr>
+    <th>窗口</th><th>参数</th><th>大小</th><th>打开</th><th>逐笔</th></tr></thead><tbody>${REPORTS.map(r => `<tr>
       <td>${new Date(r.mtime * 1000).toLocaleString().slice(0, 19)}</td>
       <td>${esc(r.name)}</td><td>${esc((r.window || []).join(".."))}</td>
       <td><code class="p">${esc(paramsOf(r.params))}</code></td><td>${r.kb} KB</td>
       <td><a href="/report-file/${esc(r.file)}" target="_blank">打开报告</a></td>
+      <td>${r.has_trades ? `<a href="/api/trades/${esc(r.job_id)}.csv" download>CSV</a>`
+                         : '<span class="sub">—</span>'}</td>
     </tr>`).join("")}</tbody></table>`;
 }
 function paramsOf(p) {
@@ -806,6 +808,10 @@ async function poll(jobId, kind, id) {
         `<div><span>${lab}</span><b class="${c}">${val}</b></div>`).join("")}</div>
       <div class="bar"><a href="${st.report}" target="_blank"><button>在新窗口打开逐笔报告</button></a>
         <a href="${st.report}" download><button class="mini">下载报告 HTML</button></a>
+        ${st.trades_csv ? `<a href="${esc(st.trades_csv)}" download>
+          <button class="mini" title="逐笔那 20 列（成交价/出场原因/滑点/穿价…）的机器可读版，
+含窗口/成本/价格口径的注释行；pandas.read_csv(..., comment='#') 可直接读">
+          下载逐笔 CSV</button></a>` : ""}
         <span class="sub">报告自包含（无外链、无脚本）—— 下面就是它；它也进了「历史报告」</span></div>
       <iframe src="${st.report}" loading="lazy"></iframe>`;
   }

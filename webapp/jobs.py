@@ -294,6 +294,12 @@ def _run(job_id: str) -> None:
             _step(job, f"渲染报告（{report.stat().st_size/1024:.0f} KB）", t0)
 
             t0 = time.perf_counter()
+            trades_csv = RESULTS / f"web_trades_{job_id}.csv"
+            n_csv = write_trades_csv(trades_csv, res["trades"], job_id=job_id, name=name,
+                                     lo=lo, hi=hi, spec=resolve(P), n_trials=k)
+            _step(job, f"导出逐笔 CSV（{n_csv} 行）", t0)
+
+            t0 = time.perf_counter()
             rec = {"ts": obs.now_iso(), "git_sha": obs.git_sha(), "kind": kind,
                    "strategy_id": f"{kind}:{ident}", "name": name, "window": [lo, hi],
                    # 记**实际生效**的参数：族型 runner 会用网格中点那一组，
@@ -326,6 +332,7 @@ def _run(job_id: str) -> None:
                         "hint": hint + (f"；运气对照已跑 {ctl_runs} 次" if ctl_runs
                                        else "；运气对照**未跑**（报告里会写明）"),
                         "report": f"/report/{job_id}", "report_path": str(report),
+                        "trades_csv": f"/api/trades/{job_id}.csv",
                         "selfcheck": problems})
     except Cancelled:
         # 取消**不写台账**：没有结果被看到，就不算一次被看过的试验（k 只数看过的）
@@ -341,6 +348,42 @@ def _run(job_id: str) -> None:
                     strategy=f"{req.get('kind')}:{req.get('id')}", detail=job["error"])
     finally:
         job["seconds"] = round(time.perf_counter() - t_all, 2)
+
+
+TRADES_CSV_COLS = ["entry_date", "exit_date", "symbol", "exit_reason", "entry_price",
+                   "exit_price", "size", "hold_days", "gross_pnl", "dividends", "fees",
+                   "net_pnl", "net_return", "atr_pct", "exit_trigger", "sl_width",
+                   "tp_width", "risk_amount", "sizing_cap", "risk_frac", "sl_penetration"]
+
+
+def write_trades_csv(path: Path, trades: pd.DataFrame, *, job_id: str, name: str,
+                     lo: str, hi: str, spec: dict, n_trials: int) -> int:
+    """把逐笔写成 CSV —— 报告是给人看的，**这份是给脚本/表格看的**。
+
+    为什么必须有：报告是 1.9MB 的自包含 HTML，逐笔那 24 列只存在于它的 `<table>` 里；
+    想把这些数字拿去做别的计算（换个口径统计、画别的图、和别的策略对齐）此前只能从 HTML
+    里抠。数据本来就在手上（`res["trades"]`），存一份成本几乎为零。
+
+    口径必须随文件走：前面几行 `#` 注释写清窗口、成本、价格口径与 k —— 一份没有口径的
+    数字表会被当成"可以直接算的东西"，而这里的成交价是 **as-traded**（§3(b) 的双轨），
+    拿复权价去对会差一截。（`pandas.read_csv(..., comment="#")` 能直接吃掉这些注释行。）
+    """
+    cols = [c for c in TRADES_CSV_COLS if c in trades.columns]
+    head = [
+        f"# usagent 逐笔明细 · {name}",
+        f"# 任务 {job_id} ｜ 窗口 {lo}..{hi}（左闭右开）｜ 成交 {len(trades)} 笔",
+        f"# 价格口径：成交价/止损止盈触发/盈亏一律 as-traded（§3(b) 双轨）；"
+        f"atr_pct 等指标列为当日 as-traded 派生量",
+        f"# 成本：双边 {spec.get('cost_bps_roundtrip')!r}bp ｜ 滑点 scale="
+        f"{spec.get('atr_slip_scale')!r} ｜ n_trials(k)={int(n_trials)}",
+        f"# 这是机器可读件；人看的版本是同一 job 的报告 HTML（含 K 线/指标/判词）",
+        "# 读法：pandas.read_csv(path, comment='#')",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write("\n".join(head) + "\n")
+        trades[cols].to_csv(fh, index=False)
+    return len(trades)
 
 
 def _bench_series(reg: pd.DataFrame, eq: pd.DataFrame) -> pd.Series:

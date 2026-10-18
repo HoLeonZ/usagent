@@ -16,6 +16,7 @@
     GET  /api/reports       盘上已有的报告（结果可回访，不必为了看一眼而重跑）
     GET  /api/source/<kind>/<id>   只读地取定义体源码（开发时最常跳的地方）
     GET  /report/<id>       平台生成的回测报告（id = 任务 id）
+    GET  /api/trades/<id>.csv   逐笔明细 CSV（机器可读；人看的那份仍是报告）
     GET  /report-file/<名>  盘上任何一份报告（含 CLI `--out` 生成的）—— 只认 results/ 下
                             的 `<名>.html`，不拼目录（越界必须 400/404）
 
@@ -143,6 +144,8 @@ class Handler(BaseHTTPRequestHandler):
                 hexid = re.fullmatch(r"web_report_([0-9a-f]{6,32})\.html", f.name)
                 jid = hexid.group(1) if hexid else None
                 out.append({"job_id": jid, "file": f.name,
+                            "has_trades": bool(jid) and
+                            (RESULTS / f"web_trades_{jid}.csv").is_file(),
                             "name": name.group(1) if name else "?",
                             "window": [win.group(1), win.group(2)] if win else None,
                             # 参数不是从报告里正则抓的，是按 job_id 回读台账（见 params_by_job）
@@ -167,6 +170,13 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             st = jobs.status(m.group(1))
             return self._json(200 if st else 404, st or {"error": "未知任务"})
+        m = re.fullmatch(r"/api/trades/([0-9a-f]{6,32})\.csv", p)
+        if m:
+            # 逐笔明细的机器可读件（报告是给人看的那些：K 线/指标/判词；这份给脚本与表格）
+            f = RESULTS / f"web_trades_{m.group(1)}.csv"
+            if not f.is_file():
+                return self._json(404, {"error": "这次运行没有逐笔 CSV（可能早于该功能）"})
+            return self._send(200, f.read_bytes(), "text/csv; charset=utf-8")
         m = re.fullmatch(r"/report-file/([A-Za-z0-9_.-]{1,120}\.html)", p)
         if m:
             # 按**文件名**打开一份报告：CLI `--out` 的产物不是任务 id，用不了 /report/<id>。
