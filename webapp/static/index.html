@@ -369,6 +369,7 @@ let TOTAL = 0;                    // 盘上台账**总共**几条（表只显示
 let BYSTRAT = {};                 // 每条策略全文运行次数（与 k 同一个计数）
 let LAST = {};                    // 每条策略最近一次运行的读数（卡片上显示"现在是多少"）
 let HOULDOUT_TOUCHES = 0;         // 台账里碰过 holdout 的运行次数（"只准读一次"的计数）
+let CUR_SHA = "", CUR_DIRTY = null;   // 当前代码版本（§6 归因：sha 单独不够，脏树要一起看）
 let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
                     catch (e) { return null; } })();
 function applyPoolHint() {
@@ -575,6 +576,7 @@ async function refreshLedger() {
     RUNS = rr.runs || []; TOTAL = rr.total || RUNS.length;
     BYSTRAT = rr.by_strategy || {};
     HOULDOUT_TOUCHES = rr.holdout_touches || 0;
+    CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
     REPORTS = (await (await fetch("/api/reports")).json()).reports || [];
   } catch (exc) {
     $("ledger").innerHTML = `<div class="sub neg">读台账失败：${esc(exc.message)} —— 刷新页面重试</div>`;
@@ -589,7 +591,7 @@ function renderLedger() {
   // 它与报告摘要里那个 tot−bench 的「超额」**不是同一个量**（实测同一 job −19.59% vs −43.93pp）。
   const cols = [["ts","时间"],["strategy_id","策略"],["window","窗口"],["params","参数"],
                 ["n_trades","笔数"],["excess","曝光匹配超额"],["d_excess","Δ超额（同配置）"],
-                ["dsr","DSR"],["n_trials_k","k"],["note","备注"]];
+                ["dsr","DSR"],["n_trials_k","k"],["git_sha","代码"],["note","备注"]];
   if (!RUNS.length) {
     $("ledger").innerHTML = `<div class="sub">还没有运行记录 —— 在上面任一策略卡片上点「回测」。</div>`;
     return;
@@ -600,8 +602,12 @@ function renderLedger() {
   // 重构再跑一次同配置、确认没动行为"的那条路。不同窗口/不同参数的对比靠上面的筛选看。
   const prev = {};
   [...RUNS].sort((a, b) => (a.ts > b.ts ? 1 : -1)).forEach(r => {
-    const k = keyOf(r); if (k in prev && r.excess != null && prev[k] != null) r._d = r.excess - prev[k];
-    if (r.excess != null) prev[k] = r.excess;
+    const k = keyOf(r);
+    if (k in prev && r.excess != null && prev[k].excess != null) {
+      r._d = r.excess - prev[k].excess;
+      r._dsha = prev[k].sha;      // 比的那一次是什么代码版本 —— Δ 怎么读离不开它
+    }
+    if (r.excess != null) prev[k] = {excess: r.excess, sha: r.git_sha};
   });
   const strat = $("lf") ? $("lf").value : "";
   const shown = strat ? RUNS.filter(r => r.strategy_id === strat) : RUNS;
@@ -626,6 +632,9 @@ function renderLedger() {
       ${opts.map(([s, n]) => `<option value="${esc(s)}"${s === strat ? " selected" : ""}>${esc(s)}（${n}）</option>`).join("")}
     </select>
     <a href="/api/runs.csv" download><button class="mini">导出全部 CSV</button></a>
+    当前代码 <b>${esc(CUR_SHA || "?")}</b>${CUR_DIRTY
+      ? '<span class="warn">（工作区有未提交改动 —— 现在跑出来的结果标注不了确定的代码版本）</span>'
+      : ""} ·
     <span class="sub">Δ = 与 <b>同一配置</b>（同策略 + 同参数 + <b>同窗口</b>）的上一次比。
       引擎是确定性的 ⇒ 同配置重跑应当差 0；<b>不是 0 就说明变的东西在配置之外</b>（数据换了或代码改了）。</span>`;
   // 列头用**真按钮**：原来的 `<th onclick>` 键盘 Tab 够不到（实测 tabIndex=-1），
@@ -646,11 +655,16 @@ function renderLedger() {
       <td>${r.n_trades ?? "—"}</td>
       <td class="${(r.excess || 0) >= 0 ? "pos" : "neg"}">${pct(r.excess)}</td>
       <td class="${r._d ? ((r._d > 0 ? "pos" : "neg")) : "sub"}" title="${r._d == null
-            ? "这个配置还没有跑过第二次" : "同配置重跑：差 0 说明行为没变；不是 0 就是数据或代码变了"}">${
+            ? "这个配置还没有跑过第二次"
+            : (r._dsha && r._dsha !== r.git_sha
+               ? "与上一次同配置比 —— 而且那次是另一个代码版本（" + r._dsha + "）：差 0 说明"
+                 + "那次改动没动行为，不是 0 说明它动了"
+               : "同配置重跑：差 0 说明行为没变；不是 0 就是数据或代码变了")}">${
             r._d == null ? '<span class="sub">（第一次）</span>'
             : (r._d === 0 ? '<span class="sub">0.00pp（行为一致）</span>'
                           : (r._d > 0 ? "+" : "") + (r._d * 100).toFixed(2) + "pp")}</td>
-      <td>${num(r.dsr)}</td><td>${r.n_trials_k ?? "—"}</td><td>${esc((r.note || "").slice(0, 24))}</td>
+      <td>${num(r.dsr)}</td><td>${r.n_trials_k ?? "—"}</td><td>${codeCell(r)}</td>
+      <td>${esc((r.note || "").slice(0, 24))}</td>
       <td>${r.job_id ? `<a href="/report/${esc(r.job_id)}" target="_blank">打开</a>` : "—"}</td>
     </tr>`).join("")}</tbody></table>`;
 }
@@ -685,6 +699,26 @@ function renderReports() {
       <td>${r.has_trades ? `<a href="/api/trades/${esc(r.job_id)}.csv" download>CSV</a>`
                          : '<span class="sub">—</span>'}</td>
     </tr>`).join("")}</tbody></table>`;
+}
+// 「代码」列：这次是哪份代码跑的。
+// 为什么必须显眼：台账里已经混着好几个 sha（改一次代码跑一次就多一个），而"同配置重跑
+// Δ=0"这条判词**只有在同一份代码下**才等于"行为没变"；跨版本时它反而成了"那次改动没动
+// 行为"的证据 —— 但读的人得先知道比的是两个版本。sha 单独也不够：脏工作区照样返回同一个
+// sha（§6 归因，`obs.git_dirty` 的 docstring 就是这么写的）。
+function codeCell(r) {
+  const sha = r.git_sha || "?";
+  const stale = CUR_SHA && sha !== CUR_SHA && sha !== "unknown";
+  const flags = [stale ? "旧于当前" : "", r.git_dirty ? "脏树" : ""].filter(Boolean).join(" · ");
+  // ⚠️ 老记录里**没有** git_dirty 这个字段（它是后加的）——不能因此说"当时工作区干净"，
+  // 那是把一个未知说成了已知（实测 12 个旧 sha 全都没有该字段）。
+  const why = stale
+    ? `这次是旧代码（${sha}）下跑的；当前是 ${CUR_SHA} —— 两者不保证可比`
+    : (r.git_dirty === true
+        ? "跑的时候工作区有未提交改动 ⇒ 这次结果标注不了确定的代码版本"
+        : r.git_dirty === false ? "与当前代码同一版本，且当时工作区干净"
+                                : "与当前代码同一版本（当时的记录早于「工作区是否干净」这个字段，无从判断）");
+  return `<span class="${stale || r.git_dirty ? "sub" : ""}" title="${esc(why)}">${esc(sha)}${
+    flags ? `<span class="sub">（${esc(flags)}）</span>` : ""}</span>`;
 }
 function paramsOf(p) {
   if (!p || !Object.keys(p).length) return "（在定义体里）";

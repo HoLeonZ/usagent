@@ -47,6 +47,7 @@ for _p in (str(ROOT), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import obs                                            # noqa: E402
 from webapp import catalog, jobs                     # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -125,6 +126,9 @@ class Handler(BaseHTTPRequestHandler):
                                     # 纪律计数：碰过 holdout 的次数（卡片上那句"只准读一次"
                                     # 必须有个数字，否则它只是句口号）
                                     "holdout_touches": catalog.holdout_touches(allruns),
+                                    # 当前代码版本：界面据此把"旧代码下跑的"那几次标出来
+                                    # （sha 单独不够 —— 脏工作区同样返回一个 sha）
+                                    "git_sha": obs.git_sha(), "git_dirty": obs.git_dirty(),
                                     # 卡片「已跑 N 次」与筛选下拉都按**全文**数 —— 它们与
                                     # DSR 的 k 是同一个计数，不能受"表只显示 30 条"影响
                                     "by_strategy": jobs.counts_by_strategy()})
@@ -135,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
             rows = jobs.all_runs()
             cols = ["ts", "strategy_id", "window", "params", "n_trades", "excess", "dsr",
                     "n_trials_k", "prior_runs", "control_runs", "seconds", "note",
-                    "job_id", "git_sha", "kind", "name"]
+                    "job_id", "git_sha", "git_dirty", "kind", "name"]
             buf = _io.StringIO()
             w = _csv.writer(buf)
             w.writerow(cols + ["excess_pct"])

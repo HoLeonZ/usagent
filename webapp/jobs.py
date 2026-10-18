@@ -300,7 +300,11 @@ def _run(job_id: str) -> None:
             _step(job, f"导出逐笔 CSV（{n_csv} 行）", t0)
 
             t0 = time.perf_counter()
-            rec = {"ts": obs.now_iso(), "git_sha": obs.git_sha(), "kind": kind,
+            # ⚠️ sha 与"脏不脏"必须**一起**记（obs.git_dirty 的 docstring 讲得很清楚：
+            # 脏工作区上 rev-parse HEAD 照样返回同一个 sha ⇒ 只记 sha 答不出"跑的是不是
+            # 这份代码"）。台账里已经混着 12 个不同的 sha 了，而页面上此前一个字都不显示。
+            rec = {"ts": obs.now_iso(), "git_sha": obs.git_sha(),
+                   "git_dirty": obs.git_dirty(), "kind": kind,
                    "strategy_id": f"{kind}:{ident}", "name": name, "window": [lo, hi],
                    # 记**实际生效**的参数：族型 runner 会用网格中点那一组，
                    # 只记 req["params"]（可能是 None）等于没记（实测发现的）。

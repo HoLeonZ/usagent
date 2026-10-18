@@ -179,6 +179,31 @@ def _wait(job_id: str, timeout: float = 120.0) -> dict:
     raise AssertionError("任务超时")
 
 
+def test_every_run_records_which_code_produced_it(offline):
+    """**§6 归因**：一次运行必须能回答"它是哪份代码算的"。
+
+    只记 sha 不够 —— 脏工作区上 `rev-parse HEAD` 照样返回同一个 sha（`obs.git_dirty` 的
+    docstring 讲的就是这件事），所以脏不脏要一起记。台账里混着多个 sha 是常态：改一次代码
+    跑一次就多一个，而"同配置重跑 Δ=0 ⇒ 行为没变"这句判词只有在**同一份代码**下才成立。
+    """
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert st["status"] == "done", st.get("error")
+    rec = [json.loads(x) for x in (offline / "web_runs.jsonl").read_text().splitlines()][-1]
+    assert "git_sha" in rec and rec["git_sha"], rec
+    assert "git_dirty" in rec, "脏不脏没记 ⇒ 脏树上算出来的结果标注不了确定版本"
+    assert rec["git_dirty"] in (True, False, None)
+
+
+def test_runs_route_publishes_the_current_code_version(http, tmp_path, monkeypatch):
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    monkeypatch.setattr(jobs, "RUNS_LEDGER", tmp_path / "web_runs.jsonl")
+    d = json.loads(_get(http + "/api/runs")[1])
+    assert d["git_sha"], "当前代码版本没发出来"
+    assert "git_dirty" in d
+    assert d["git_sha"] == obs.git_sha()
+
+
 def test_a_run_goes_all_the_way_and_lands_in_the_ledger(offline):
     job = jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
                        "lo": WIN[0], "hi": WIN[1], "note": "测试"})
@@ -551,6 +576,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "首次使用的入门块（三步 + 六个词）": 'id="firsttime"',
         "入门块默认收起（老手不必每次多滚一屏）": 'class="ft">',
         "入门块说清第一次要 30–70 秒（否则像挂了）": "第一次要 30–70 秒",
+        "台账「代码」列（哪份代码跑的）": '["git_sha","代码"]',
+        "台账顶栏写当前代码版本": "当前代码 <b>",
+        "旧版本运行与脏树都要标出来": "function codeCell(", 
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
