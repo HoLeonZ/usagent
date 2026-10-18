@@ -232,6 +232,22 @@ function paramTable(e) {
   </table>`;
 }
 
+// 卡片上的「最近一次」读数。⚠️ 它**不是**"这条策略的水平" —— 那是最近一次运行（可能是个
+// 刻意选的怪窗口、也可能是刚改过参数的样子）。所以窗口和 k 必须一起显示，读者才能判断
+// 这次比的是什么；跨窗口的数字不可直接比（台账那边同样的规矩）。
+function lastRunLine(e) {
+  const r = LAST[e.kind + ":" + e.id];
+  if (!r) return `<div class="sub">还没跑过 —— 上面的「回测」跑一次，这里会显示最近一次的读数。</div>`;
+  const when = (r.ts || "").slice(0, 16).replace("T", " ");
+  const ex = r.excess == null ? "—" : (r.excess * 100).toFixed(2) + "%";
+  const cls = (r.excess || 0) >= 0 ? "pos" : "neg";
+  return `<div class="sub">最近一次（${esc(when)}）：曝光匹配超额 <b class="${cls}">${ex}</b>
+    · DSR ${r.dsr == null ? "—" : Number(r.dsr).toFixed(3)} · k ${r.n_trials_k ?? "—"}
+    · 窗口 ${esc((r.window || []).join(".."))}
+    ${r.job_id ? `· <a href="/report/${esc(r.job_id)}" target="_blank">报告</a>` : ""}
+    <br><span class="sub">⚠️ 这是<b>最近一次</b>的读数，不是这条策略的水平；跨窗口的数字不能直接比。</span></div>`;
+}
+
 function card(e, runCount) {
   const w = (e.kind === "preset") ? e.window : FULL;
   const held = overlaps(w, HOLDOUT);
@@ -240,11 +256,14 @@ function card(e, runCount) {
     ? `<div class="verdict ${verdict ? "" : "none"}">${verdict ? esc(verdict) : "（本策略没有声明负面证据 —— §5 要求负面证据与参数同时记录）"}</div>`
     : `<div class="verdict none">族本身没有 VERDICT（它是候选机制，不是交付物）。跑出来的报告会就地写明这一点。</div>`;
   const a = `${e.kind}-${e.id}`;
-  return `<div class="card" id="${a}" data-runs="${runCount || 0}" data-held="${held ? 1 : 0}">
+  const _last = LAST[e.kind + ":" + e.id];
+  return `<div class="card" id="${a}" data-runs="${runCount || 0}" data-held="${held ? 1 : 0}"
+    data-last="${_last && _last.excess != null ? _last.excess : ""}">
     <h3><a href="#${a}">${esc(e.name)}</a></h3>
     <p class="mech">${esc(e.kind === "preset" ? (e.is_cli_default ? "preset · CLI 默认" : "preset")
       : "族 · " + e.mechanism)}</p>
     ${paramTable(e)}
+    ${lastRunLine(e)}
     ${familyParamControls(e)}
     ${e.kind === "family" && e.grid_size ? `<div class="sub">本族有 <b>${e.grid_size}</b> 组预注册参数：
       <b>这一页一次只跑一组</b>（k 记的是 ${e.grid_size} —— 一次搜索的完整空间）。
@@ -303,6 +322,7 @@ function revalidate(kind, id) {
 // （只在本次标签页里 —— 这是"这次会话说的话"，不是需要落盘的产物）。
 let TOTAL = 0;                    // 盘上台账**总共**几条（表只显示最近 30 条）
 let BYSTRAT = {};                 // 每条策略全文运行次数（与 k 同一个计数）
+let LAST = {};                    // 每条策略最近一次运行的读数（卡片上显示"现在是多少"）
 let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
                     catch (e) { return null; } })();
 function applyPoolHint() {
@@ -372,6 +392,11 @@ function applyCardSort() {
     if (mode === "runs") cards.sort((a, b) => Number(b.dataset.runs || 0) - Number(a.dataset.runs || 0)
                                             || name(a).localeCompare(name(b), "zh"));
     else if (mode === "name") cards.sort((a, b) => name(a).localeCompare(name(b), "zh"));
+    else if (mode === "last") {
+      // 没跑过的排最后（空字符串 → -Infinity），而不是当成 0 —— 0 会混进"正好不赚不亏"里
+      const v = (c) => c.dataset.last === "" ? -Infinity : Number(c.dataset.last);
+      cards.sort((a, b) => v(b) - v(a) || name(a).localeCompare(name(b), "zh"));
+    }
     cards.forEach(c => g.appendChild(c));           // 按新顺序重挂（default 时就是原顺序）
   });
 }
@@ -431,6 +456,11 @@ async function loadCatalog() {
   // 卡片上的「已跑 N 次」必须与 DSR 的 k 用同一个计数（都按**全文台账**数）——
   // 此前这里数的是 /api/runs 的末 30 条，到第 31 次运行时界面会说"已跑 30"而 k 已是 31。
   const runs = rr.by_strategy || {};
+  // 每条策略**最近一次**的读数。为什么放在卡片上：开发时第一个问题是"现在哪条最好"，
+  // 而此前卡片只有参数、没有任何测出来的东西 —— 那个排名只存在于一个命令行工具里
+  // （rank_strategies），页面上看不到。这些数字全都已经在台账里，不新增任何计算。
+  LAST = {};
+  (rr.runs || []).forEach(r => { if (!(r.strategy_id in LAST)) LAST[r.strategy_id] = r; });
   $("content").innerHTML =
     `<div class="bar" id="cbar">
        <span class="sub">视图：</span>
@@ -438,6 +468,7 @@ async function loadCatalog() {
          <option value="default">注册表顺序</option>
          <option value="runs">跑得多的在前</option>
          <option value="name">按名字</option>
+         <option value="last">按最近一次超额（高的在前）</option>
        </select>
        <label class="sub"><input type="checkbox" id="cf-run" onchange="applyFilter()"> 只看跑过的</label>
        <label class="sub"><input type="checkbox" id="cf-held" onchange="applyFilter()"> 只看含 holdout 的窗口</label>

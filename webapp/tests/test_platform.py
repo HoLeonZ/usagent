@@ -409,6 +409,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "运行中可取消（粗粒度，界面写明）": "function cancelJob(",
         "取消的终止态有专门分支（否则会掉进 metrics 渲染）": 'st.status === "cancelled"',
         "取消说清「不进台账」": "已取消的运行<b>不进台账</b>",
+        "卡片显示最近一次读数（开发时第一个问题是「哪条最好」）": "function lastRunLine(",
+        "读数写清是「最近一次」而不是策略水平": "不是这条策略的水平",
+        "可按最近一次超额排序（没跑过的排最后）": 'data-last=',
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
