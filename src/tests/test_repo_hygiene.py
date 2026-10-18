@@ -144,6 +144,20 @@ def test_run_daily_does_not_hardcode_an_interpreter():
     assert not re.search(r"^PY=/", src, re.M), "仍然写死了 PY 的绝对路径"
 
 
+def test_preflight_finds_an_interpreter_instead_of_assuming_the_first_one():
+    """preflight 必须在 PATH 上**找**有依赖的解释器，而不是假定第一个 `python3` 就是。
+
+    为什么这条是行为锁而不是洁癖（2026-10-18 实测）：pre-commit 钩子不继承你 shell 里的
+    `PY=...`（那是命令前缀，不是导出）。本机 `which -a python3` 第一个是 /usr/bin/python3
+    （无 numpy）⇒ 钩子把一个**环境问题**报成红，于是每次提交都被挡下；而被一个永远挡人的
+    钩子挡住，正确反应会退化成 `--no-verify` —— 那等于把全部护栏一起关掉，比没有钩子更糟。
+    这条断言钉的就是"去找、并说出选中的那个"。
+    """
+    src = (ROOT / "tools" / "preflight.sh").read_text()
+    assert "type -a -p python3" in src, "preflight 没有沿着 PATH 去找能用的解释器"
+    assert 'echo "[preflight] 解释器：' in src, "换解释器这件事不能静默（要打印选中的那个）"
+
+
 def test_staged_but_uncommitted_files_are_also_scanned(tmp_path, monkeypatch):
     """提交前就要抓：**已暂存、未提交**的新文件也必须被扫。
 
