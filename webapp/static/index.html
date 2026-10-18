@@ -469,7 +469,12 @@ async function loadCatalog() {
   if (CAT.train) TRAIN = CAT.train;                // 出处：wfv_search 的搜索期
   $("banner").innerHTML = `目录：<b>${CAT.presets.length}</b> 条 preset · <b>${CAT.families.length}</b> 个族 ·
     其中 <b>${CAT.notes.holdout_presets}</b> 条 preset 的声明窗口含 holdout 天数（标红）。
-    族的参数默认=网格中点，可在卡片里改（只列网格上的取值）；${esc(CAT.notes.multiplicity)}`;
+    族的参数默认=网格中点，可在卡片里改（只列网格上的取值）；${esc(CAT.notes.multiplicity)}`
+    + ((CAT.stale_defs || []).length
+        ? `<div class="warn">⚠️ 这些定义体在<b>服务启动之后</b>被改过，服务读的还是旧值：
+           <code>${CAT.stale_defs.map(esc).join("</code> <code>")}</code> ——
+           重启服务才会生效（注入环境变量 <code>PYTHONDONTWRITEBYTECODE=1</code> 可以避免
+           另一类"改回去了却仍读到旧值"的字节码缓存问题）。</div>` : "");
   const rr = await (await fetch("/api/runs")).json();
   // 卡片上的「已跑 N 次」必须与 DSR 的 k 用同一个计数（都按**全文台账**数）——
   // 此前这里数的是 /api/runs 的末 30 条，到第 31 次运行时界面会说"已跑 30"而 k 已是 31。

@@ -14,9 +14,13 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# 本模块被加载的时刻 ≈ 服务启动时刻（服务一启动就 import 它）——"定义体在此之后被改过"
+# 就是对它比。用一个模块级常量而不是到处传时间戳：它只有一个来源。
+_PROCESS_START = time.time()
 for _p in (str(ROOT), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -104,6 +108,8 @@ def build() -> dict:
         # 页面里剩下的 FULL（训练窗起点 .. 数据末端）是**视图默认值**，不是台账里的事实，
         # 所以不上行 —— 但它的按钮 title 始终印出"按下去会设成哪两天"，不会撒谎。
         "holdout": list(HOLDOUT),
+        # 启动之后被动过的定义体：服务读的是旧值 —— 摆到界面上，别让人在"改了没反应"里打转
+        "stale_defs": stale_definitions(),
         "train": [W.SEARCH_LO, W.SEARCH_HI],
         "presets": presets_list,
         "families": fams,
@@ -113,6 +119,26 @@ def build() -> dict:
             "multiplicity": "每点一次运行都会进台账；DSR 的 k 随之为涨（§5 迭代记账）",
         },
     }
+
+
+def stale_definitions(started_at: float | None = None) -> list[str]:
+    """比"服务启动时刻"更新的定义体文件 —— 改了它们但还没重启，服务读的是旧值。
+
+    为什么值得单独一个函数：这条路**静默**（改了没反应）且现在页面上只写了句提示。
+    实测过的更坏版本：同秒内改动又改回、长度不变时，Python 连 .pyc 都认为有效，
+    于是进程用的是**不存在于仓库里的值**（见 webapp/server.py 顶部那段注记）。
+    这里只做一件事：把"哪些文件在启动之后动过"摆到界面上，让人自己决定要不要重启。
+    """
+    t0 = started_at if started_at is not None else _PROCESS_START
+    out = []
+    for sub in ("preset_defs", "family_defs"):
+        d = ROOT / "research" / sub
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.py")):
+            if f.stat().st_mtime > t0:
+                out.append(f"research/{sub}/{f.name}")
+    return out
 
 
 def holdout_touches(runs: list[dict]) -> int:

@@ -233,16 +233,26 @@ def _run(job_id: str) -> None:
             job["pool_range"] = [str(panel_mod.first_signal_date(panel).date()),
                                  str(axis[-1].date())]
 
+            # k 的规则**只写一次**，提示与 DSR 的 k 都用它 —— 分头写必然各自漂移（下面那条注释
+            # 记的就是这么漂出去的一次）。
+            declared = (int(families.grid_size(ident) or 1) if kind == "family"
+                        else int(P.get("n_comparisons") or 1))
             t0 = time.perf_counter()
             if P.get("family"):
                 fid = str(P["family"])
                 sig = families.select(ind, fid, dict(P.get("family_params") or {}), lo, hi, reg=reg)
-                hint = "本族网格 %.0f 组 ⇒ DSR 的 k 从这里起算" % (families.grid_size(fid) or 1)
+                # ⚠️ 「用族掩码」**不等于**「k 从网格起算」：已交付的 preset 内部照样用掩码，
+                # 但它的 k 是**声明的 n_comparisons**（那批网格早已计入那次搜索）。验收实测
+                # 这里曾报「本族网格 96 组 ⇒ k 从这里起算」，而同一份报告的 k 是 1622（1614+8）。
+                hint = (f"本族网格 {declared} 组 ⇒ DSR 的 k 从这里起算" if kind == "family"
+                        else f"该 preset 声明 n_comparisons={declared}"
+                             + (f"（内部用族 {fid} 的掩码；那 {families.grid_size(fid)} 组"
+                                f"已计入上面这次声明）" if families.grid_size(fid) else ""))
             else:
                 sig = signals.select_entries(ind, start_date=lo, end_date=hi,
                                              regime_df=reg if P.get("regime") else None,
                                              **P["signal"])
-                hint = "该 preset 声明 n_comparisons=%d" % int(P.get("n_comparisons") or 1)
+                hint = f"该 preset 声明 n_comparisons={declared}"
             _step(job, f"计算信号（{len(sig)} 个候选）", t0)
             _check_cancel(job)
 
@@ -265,9 +275,7 @@ def _run(job_id: str) -> None:
 
             # DSR 的 k：声明/网格数 + **平台已跑次数**（§5 迭代记账，页面也显示它）
             prior = prior_runs(f"{kind}:{ident}")
-            # k = 声明/网格数 + **平台已跑次数**（§5：手动迭代也是优化，必须记账）
-            declared = (int(families.grid_size(ident) or 1) if kind == "family"
-                        else int(P.get("n_comparisons") or 1))
+            # k = 声明/网格数（上面算过的 declared）+ **平台已跑次数**（§5：手动迭代也是优化）
             k = declared + prior
             m = _metrics(res, eq, reg, lo, hi, k)
             m["k_breakdown"] = {"declared_or_grid": declared, "platform_runs_before": prior}

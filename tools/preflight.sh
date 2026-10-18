@@ -50,6 +50,10 @@ if [ -z "$_PICKED" ]; then
   exit 1
 fi
 PY="$_PICKED"
+# 不写/不读字节码缓存：Python 用「源文件 mtime（秒）+ 大小」判断 .pyc 是否有效，于是
+# "在同一秒内改动又改回、且长度不变"会让旧 .pyc 继续被判有效 —— 实测过一次：文件里写着
+# n_comparisons=1614，而进程读到 1615 并静默用了三次（定义体是数据，不是普通代码）。
+export PYTHONDONTWRITEBYTECODE=1
 echo "[preflight] 解释器：$("$PY" -c 'import sys;print(sys.executable)')"
 
 echo "[preflight] 快检（卫生 / 契约 / 覆盖判据 / 离线行为锁）"

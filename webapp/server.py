@@ -34,6 +34,13 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# ⚠️ 关掉字节码写入（2026-10-18 实测踩到）：Python 用「源文件 mtime + 大小」判断 .pyc 是否
+# 还有效，粒度是**秒**。于是"在**同一秒内**把 `preset_defs/x.py` 改动又改回来、且长度不变"
+# 会让旧的 .pyc 继续被判为有效 —— 我自己的验证脚本正好踩出这一幕：文件里写着
+# n_comparisons=1614，而进程读到的是 1615，并且**静默**用了三次。这是长驻开发进程最该防的
+# 一类错（"我改了却没反应"的反面：**没改却生效了旧值**）。不写 .pyc 就没有这个类。
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parents[1]
 for _p in (str(ROOT), str(ROOT / "src")):
     if _p not in sys.path:

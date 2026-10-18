@@ -56,6 +56,23 @@ def test_family_default_params_are_the_grid_midpoint():
     assert e["default_params"] == {k: v[len(v) // 2] for k, v in e["grid"].items()}
 
 
+def test_catalog_flags_definitions_changed_after_the_process_started(tmp_path, monkeypatch):
+    """改了定义体、服务没重启 ⇒ 服务读的是旧值，界面必须**主动说**，不能只靠一句提示。
+
+    这条路是静默的，而且实测有更坏的版本：同秒内改动又改回、文件长度不变时，Python 认为
+    旧 .pyc 仍有效 —— 进程于是用了**仓库里不存在的值**（我自己的验证脚本踩出过这一幕）。
+    """
+    d = tmp_path / "research" / "preset_defs"
+    d.mkdir(parents=True)
+    f = d / "x.py"
+    f.write_text("NAME = 'x'\n", encoding="utf-8")
+    monkeypatch.setattr(catalog, "ROOT", tmp_path)
+    # 比"启动时刻"更旧 ⇒ 不算陈旧
+    assert catalog.stale_definitions(started_at=time.time() + 10) == []
+    # 比"启动时刻"更新 ⇒ 陈旧，且路径是仓库相对形式
+    assert catalog.stale_definitions(started_at=0.0) == ["research/preset_defs/x.py"]
+
+
 def test_catalog_publishes_the_windows_from_their_real_sources():
     """页面上的窗口预设必须**取自出处**，不能在 JS 里抄一份。
 
@@ -184,6 +201,27 @@ def test_cancel_refuses_unknown_or_finished_jobs(offline):
                             "lo": WIN[0], "hi": WIN[1]})["id"])
     assert st["status"] == "done"
     assert jobs.cancel(st["id"]) is False, "已经跑完的任务不该被受理"
+
+
+def test_the_hint_about_k_matches_the_k_that_was_actually_used(offline):
+    """提示里那句「k 从这里起算」必须与 DSR 真正用的 k 是同一个数。
+
+    验收实测漂移过一次：`us_reversal_dip_v1` 是**内部用族掩码的 preset**，提示按"它用了族"
+    报了「本族网格 96 组 ⇒ k 从这里起算」，而 DSR 用的是它声明的 n_comparisons（1614）——
+    同一份报告里 k 是 1622。根因是"用哪条信号路径"和"k 怎么算"两件事被写在同一个分支里。
+    """
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert st["status"] == "done", st.get("error")
+    mb = st["metrics"]["k_breakdown"]
+    declared = mb["declared_or_grid"]
+    assert f"n_comparisons={declared}" in st["hint"], f"提示与 k 不是同一个数：{st['hint']}"
+    assert st["metrics"]["dsr_k"] == declared + mb["platform_runs_before"]
+    # 族型请求才该说"网格组数"
+    st2 = _wait(jobs.submit({"kind": "family", "id": "str",
+                             "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert "本族网格" in st2["hint"] and st2["metrics"]["dsr_k"] == \
+        st2["metrics"]["k_breakdown"]["declared_or_grid"] + 0
 
 
 def test_unknown_strategy_and_bad_window_surface_as_errors(offline):
@@ -430,6 +468,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "顶栏「重新读目录」（页面旧 vs 服务旧要分清）": "reloadCatalog()",
         "改完定义体要说清「要重启服务」（注册表启动时读一次）": "srchint-",
         "holdout 的次数要显眼（一句没有计数的纪律等于没有纪律）": "只准读一次",
+        "定义体在服务启动后被改过要主动警告（不只是提示）": "CAT.stale_defs",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
