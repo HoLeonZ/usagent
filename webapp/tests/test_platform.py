@@ -255,6 +255,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "台账参数列（对比的前提）": '["params","参数"]',
         "台账的「超额」写清是曝光匹配口径": '["excess","曝光匹配超额"]',
         "等待文案可被读屏读到": 'role="status"',
+        "备注输入框（台账那一列原本没人能填）": 'id="note"',
+        "复制的命令带上运气对照开关（否则 CLI 默认跑 200 次）": "--control-runs ${ctl}",
+        "复制的命令产物与平台同一命名空间（跑完页面上看得见）": "web_report_cli_",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
@@ -311,6 +314,28 @@ def test_reports_route_carries_the_params_that_run_used(http, tmp_path, monkeypa
     reps = json.loads(_get(http + "/api/reports")[1])["reports"]
     assert [r["job_id"] for r in reps] == ["deadbeef0001"]
     assert reps[0]["params"] == {"gap5_max": 0.34, "vol_z_min": 0.5}
+
+
+def test_a_report_can_be_opened_by_file_name_not_only_by_job_id(http, tmp_path, monkeypatch):
+    """CLI `--out` 的产物不是任务 id ⇒ 必须能按**文件名**打开，且遍历必须被拒。
+
+    「复制命令」与页面做的事已经逐项对齐（--control-runs/--note/同一个命名空间），
+    但那条命令产出的文件名不是 12 位任务 id，用不了 `/report/<id>`。少了这条路由，
+    复制出来的命令跑完，报告照样在页面上看不见。
+    """
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    made = tmp_path / "web_report_cli_xs_flow_2025-01-01_2025-10-13.html"
+    made.write_text("<!doctype html><title>回测明细 · family:xs_flow</title>"
+                    "<div class='sub'>窗口 2025-01-01 → 2025-10-13</div>", encoding="utf-8")
+    code, body = _get(http + "/report-file/" + made.name)
+    assert code == 200 and "xs_flow" in body.decode()
+    # 它也会出现在「历史报告」里，并且带 file 字段（表格用它拼链接）
+    reps = json.loads(_get(http + "/api/reports")[1])["reports"]
+    assert [r["file"] for r in reps] == [made.name]
+    # 遍历与越界：一律拒（文件名里不许有 /，也不许跳出 results/）
+    assert _get(http + "/report-file/../../etc/passwd")[0] == 404
+    assert _get(http + "/report-file/sub/dir.html")[0] == 404
+    assert _get(http + "/report-file/nope.html")[0] == 404
 
 
 def test_control_arm_can_be_switched_on_and_lands_in_the_report(offline):

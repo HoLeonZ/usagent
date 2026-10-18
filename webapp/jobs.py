@@ -226,8 +226,12 @@ def _run(job_id: str) -> None:
             rec = {"ts": obs.now_iso(), "git_sha": obs.git_sha(), "kind": kind,
                    "strategy_id": f"{kind}:{ident}", "name": name, "window": [lo, hi],
                    # 记**实际生效**的参数：族型 runner 会用网格中点那一组，
-                   # 只记 req["params"]（可能是 None）等于没记（实测发现的）
-                   "params": req.get("params") or (P.get("family_params") or None),
+                   # 只记 req["params"]（可能是 None）等于没记（实测发现的）。
+                   # 信号型 preset 的参数在 P["signal"] 里（不是 family_params）—— 漏了它
+                   # 台账会对这类 preset 一律显示"（在定义体里）"，而参数其实就在手边。
+                   # 与 `_summary` 的取法是同一个并集：族参数与 signal 参数在这一层是同一件事。
+                   "params": (req.get("params") or P.get("family_params")
+                              or P.get("signal") or None),
                    "n_trials_k": k, "prior_runs": prior,
                    "n_trades": m["n_trades"], "excess": m["excess"], "dsr": m["dsr"],
                    # ⚠️ job_id 必须记：报告文件名就是 web_report_<job_id>.html，不记它这条台账

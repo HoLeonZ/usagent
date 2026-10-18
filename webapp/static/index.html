@@ -21,6 +21,8 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,
 .top a.nav:hover{color:var(--fg);border-color:var(--btnb)}
 input[type=search]{background:#0c0f13;color:var(--fg);border:1px solid var(--line);border-radius:6px;
                    padding:5px 9px;font-size:13px;min-width:230px}
+input[type=text]{background:#0c0f13;color:var(--fg);border:1px solid var(--line);border-radius:6px;
+                 padding:5px 9px;font-size:12.5px;min-width:210px}
 h2{font-size:16px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line);
    scroll-margin-top:64px}       /* 常驻顶栏会吃掉锚点落点（审计实测 titleVisible=false） */
 .sub{color:var(--dim);font-size:12.5px}
@@ -86,9 +88,11 @@ table.ledger td{white-space:nowrap}
   <a class="nav" href="#reports">历史报告</a>
   <a class="nav" href="#runs">运行台账</a>
   <input type="search" id="q" placeholder="搜索：名字 / 机制 / 参数…（⌘K 聚焦）">
+  <input type="text" id="note" placeholder="备注（可选：这次改了什么 / 为什么跑）"
+         title="写进台账的备注列。台账是拿来对比两次运行的 —— 没有备注，两次点击在纸面上长得一模一样。">
   <label class="sub" title="同止损止盈、同笔数、随机入场 200 次 ⇒ 这条策略落在随机分布的第几百分位。
-这是把「运气」与「本事」分开的唯一判词；默认关是因为它让每次点击多花约 25 秒。">
-    <input type="checkbox" id="ctl"> 运气对照 200 次（+约 25 秒）</label>
+这是把「运气」与「本事」分开的唯一判词；默认关是因为它让每次点击多花几秒到半分钟（视笔数）。">
+    <input type="checkbox" id="ctl"> 运气对照 200 次（+约 3–26 秒）</label>
   <span class="sub" id="count"></span>
 </div></div></div>
 
@@ -232,11 +236,19 @@ function currentParams(kind, id) {
   return out;
 }
 function cliCmd(kind, id) {
+  // 这条命令必须与"点一下回测"做的事**逐项一致**，否则"界面不是黑箱"就是空话（审计实测
+  // 原本三处不一致：没有 --control-runs ⇒ CLI 默认 200，开关关着也照跑；没有 --note；
+  // --out 用了 report_*.html 而 /api/reports 只认 web_report_* ⇒ 命令的产物页面上看不见）。
   const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
-  const out = `research/results/report_${id}_${lo}_${hi}.html`;
-  if (kind === "preset") return `python3 -m research.render_report --preset ${id} --lo ${lo} --hi ${hi} --out ${out}`;
-  const pr = JSON.stringify(currentParams(kind, id));
-  return `python3 -m research.render_report --family ${id} --params '${pr}' --lo ${lo} --hi ${hi} --out ${out}`;
+  const ctl = $("ctl").checked ? 200 : 0;
+  const note = ($("note") || {}).value || "";
+  // 与平台同一个命名空间（`/api/reports` 会列出来 ⇒ 跑完能在「历史报告」里打开）
+  const out = `research/results/web_report_cli_${id}_${lo}_${hi}.html`.replace(/[^A-Za-z0-9_./-]/g, "");
+  const tail = ` --lo ${lo} --hi ${hi} --control-runs ${ctl} --out ${out}`
+    + (note ? ` --note '${note.replace(/'/g, "")}'` : "");
+  if (kind === "preset") return `python3 -m research.render_report --preset ${id}${tail}`;
+  const pr = JSON.stringify(currentParams(kind, id)).replace(/'/g, "");
+  return `python3 -m research.render_report --family ${id} --params '${pr}'${tail}`;
 }
 function copyCmd(kind, id) {
   const cmd = cliCmd(kind, id), box = $("clip-" + kind + "-" + id);
@@ -349,7 +361,7 @@ function renderReports() {
       <td>${new Date(r.mtime * 1000).toLocaleString().slice(0, 19)}</td>
       <td>${esc(r.name)}</td><td>${esc((r.window || []).join(".."))}</td>
       <td><code class="p">${esc(paramsOf(r.params))}</code></td><td>${r.kb} KB</td>
-      <td><a href="/report/${esc(r.job_id)}" target="_blank">打开报告</a></td>
+      <td><a href="/report-file/${esc(r.file)}" target="_blank">打开报告</a></td>
     </tr>`).join("")}</tbody></table>`;
 }
 function paramsOf(p) {
@@ -383,13 +395,14 @@ async function run(kind, id) {
   if (btn.disabled) return;                       // 双击守卫：一次点击 = 一次提交 = k+1
   const params = currentParams(kind, id);
   const controlRuns = $("ctl").checked ? 200 : 0;
+  const note = ($("note") || {}).value || "";
   $("run").style.display = "block";
   $("runhead").classList.remove("sub");
   $("runhead").innerHTML = `<b>正在回测…</b>`;
   btn.disabled = true; btn.textContent = "回测中…";
   try {
     const r = await fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({kind, id, lo, hi, params, control_runs: controlRuns})});
+      body: JSON.stringify({kind, id, lo, hi, params, control_runs: controlRuns, note})});
     const j = await r.json();
     if (j.error) return fail(`提交失败：${j.error}`, btn);
     T0[j.id] = Date.now();

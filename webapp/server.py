@@ -13,7 +13,9 @@
     GET  /api/runs          台账（含"这条策略已被跑过几次"）
     GET  /api/reports       盘上已有的报告（结果可回访，不必为了看一眼而重跑）
     GET  /api/source/<kind>/<id>   只读地取定义体源码（开发时最常跳的地方）
-    GET  /report/<id>       回测报告（自包含 HTML）
+    GET  /report/<id>       平台生成的回测报告（id = 任务 id）
+    GET  /report-file/<名>  盘上任何一份报告（含 CLI `--out` 生成的）—— 只认 results/ 下
+                            的 `<名>.html`，不拼目录（越界必须 400/404）
 
 用法：
     python3 -m webapp.server                 # 默认 http://127.0.0.1:8765
@@ -82,14 +84,24 @@ class Handler(BaseHTTPRequestHandler):
             # 报告自己就带这两样（title 与副标题），不用另存一份元数据（一份事实一处）。
             out = []
             pj = jobs.params_by_job()          # job_id → 参数（报告里没有参数，台账里有）
-            for f in sorted(RESULTS.glob("web_report_*.html"),
-                            key=lambda x: x.stat().st_mtime, reverse=True)[:50]:
-                head = f.read_text(encoding="utf-8", errors="replace")[:4000]
+            # 平台的产物 **和** CLI `--out` 的产物都要列出来：复制出来的那条命令如果跑完
+            # 在页面上看不见，那"界面不是黑箱"就只是句口号（审计实测 --out 的命名对不上）。
+            files = list(RESULTS.glob("web_report_*.html")) + list(RESULTS.glob("report_*.html"))
+            for f in sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)[:50]:
+                # ⚠️ 读头部不能只取前 N 个字符：CSS 一长，副标题就漂到切片外 —— 实测加了
+                # 打印样式与目录之后，新报告全都解析成 window=None（旧的还能解析，看起来
+                # 像"个别报告有问题"）。这里先把 <style> 整块去掉再取，头部大小与样式无关。
+                txt = f.read_text(encoding="utf-8", errors="replace")
+                txt = re.sub(r"<style>.*?</style>", "", txt, count=1, flags=re.S)
+                head = txt[:4000]
                 name = re.search(r"<title>回测明细 · ([^<]+)</title>", head)
                 win = re.search(r"窗口 ([0-9-]+) → ([0-9-]+)", head)
                 st = f.stat()
-                jid = f.stem.replace("web_report_", "")
-                out.append({"job_id": jid,
+                # job_id **只**对平台自己的产物成立（web_report_<12位hex>.html）。CLI `--out`
+                # 的文件名不是任务 id —— 塞一个假 job_id 进 API 会让调用方以为能按它查任务。
+                hexid = re.fullmatch(r"web_report_([0-9a-f]{6,32})\.html", f.name)
+                jid = hexid.group(1) if hexid else None
+                out.append({"job_id": jid, "file": f.name,
                             "name": name.group(1) if name else "?",
                             "window": [win.group(1), win.group(2)] if win else None,
                             # 参数不是从报告里正则抓的，是按 job_id 回读台账（见 params_by_job）
@@ -114,6 +126,15 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             st = jobs.status(m.group(1))
             return self._json(200 if st else 404, st or {"error": "未知任务"})
+        m = re.fullmatch(r"/report-file/([A-Za-z0-9_.-]{1,120}\.html)", p)
+        if m:
+            # 按**文件名**打开一份报告：CLI `--out` 的产物不是任务 id，用不了 /report/<id>。
+            # 两道校验 —— 名字只允许 [A-Za-z0-9_.-] 且必须以 .html 结尾；解析后父目录必须仍是
+            # 我们自己的 results/（不拼用户输入、不做目录遍历）。
+            f = (RESULTS / m.group(1)).resolve()
+            if f.parent != RESULTS.resolve():
+                return self._json(400, {"error": "报告路径越界"})
+            return self._html(200, f)
         m = re.fullmatch(r"/report/([0-9a-f]{6,32})", p)
         if m:
             jid = m.group(1)
