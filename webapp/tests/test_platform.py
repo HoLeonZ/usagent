@@ -337,6 +337,11 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "台账完整 CSV 导出（表只有 30 条上限）": '/api/runs.csv',
         "台账窗口可点回填到卡片（但不自动跑）": "fillWindow(",
         "台账明说只显示最近 N 条": "表只取最近",
+        "卡片区排序（靠移动 DOM，不重渲 ⇒ 不吞用户输入）": 'id="csort"',
+        "卡片区结构化过滤（只看跑过的 / 只看含 holdout）": 'id="cf-run"',
+        "结构化过滤也算「在筛」（标题不能再说「6 条」）": "filtering = !!(q || onlyRun || onlyHeld)",
+        "台账列头是真按钮（键盘可达）": 'class="thbtn"',
+        "排序状态可被读屏读到": 'aria-sort=',
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]

@@ -46,6 +46,9 @@ td,th{padding:3px 6px;border-bottom:1px solid #20242c;vertical-align:top;text-al
 th{color:var(--dim);font-weight:400}
 td.k{color:var(--dim);width:46%}
 td code.p{color:#9fb3c8;font-size:11.5px}   /* 参数格：等宽、可断，别再把表撑破 */
+button.thbtn{background:none;border:0;padding:0;color:inherit;font:inherit;cursor:pointer}
+button.thbtn:hover{color:var(--fg)}
+button.thbtn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 /* 兜底：将来任何一格再塞进不可断的内容，也只让**这张表**横滚，不再把整页顶破 */
 .scrollx{overflow-x:auto}
 .verdict{margin:9px 0 0;padding:8px 9px;background:#141a16;border-left:3px solid var(--up);
@@ -197,7 +200,7 @@ function card(e, runCount) {
     ? `<div class="verdict ${verdict ? "" : "none"}">${verdict ? esc(verdict) : "（本策略没有声明负面证据 —— §5 要求负面证据与参数同时记录）"}</div>`
     : `<div class="verdict none">族本身没有 VERDICT（它是候选机制，不是交付物）。跑出来的报告会就地写明这一点。</div>`;
   const a = `${e.kind}-${e.id}`;
-  return `<div class="card" id="${a}">
+  return `<div class="card" id="${a}" data-runs="${runCount || 0}" data-held="${held ? 1 : 0}">
     <h3><a href="#${a}">${esc(e.name)}</a></h3>
     <p class="mech">${esc(e.kind === "preset" ? (e.is_cli_default ? "preset · CLI 默认" : "preset")
       : "族 · " + e.mechanism)}</p>
@@ -318,6 +321,20 @@ async function showSrc(kind, id) {
   body.textContent = j.error ? ("读不到：" + j.error) : (j.path + "\n" + "─".repeat(60) + "\n" + j.text);
   body.dataset.loaded = "1";
 }
+// 排序只 reorder DOM。为什么不重渲 #content（那是最省事的写法）：重渲会把用户改过的窗口、
+// 族参数、展开的源码全部重置 —— 本仓库为此吃过一次亏（审计实测），所以这里是 appendChild。
+function applyCardSort() {
+  const mode = ($("csort") || {}).value || "default";
+  document.querySelectorAll("#content .grid").forEach(g => {
+    if (!g._orig) g._orig = [...g.children];        // 第一次调用时记下注册表顺序
+    const name = (c) => (c.querySelector("h3") || {}).textContent || "";
+    const cards = [...g._orig];
+    if (mode === "runs") cards.sort((a, b) => Number(b.dataset.runs || 0) - Number(a.dataset.runs || 0)
+                                            || name(a).localeCompare(name(b), "zh"));
+    else if (mode === "name") cards.sort((a, b) => name(a).localeCompare(name(b), "zh"));
+    cards.forEach(c => g.appendChild(c));           // 按新顺序重挂（default 时就是原顺序）
+  });
+}
 function applyFilter() {
   const q = ($("q").value || "").trim().toLowerCase();
   let shown = 0;
@@ -325,8 +342,15 @@ function applyFilter() {
   // "说有 6 条却一条都没显示"（审计实测两个分节标题始终显示）。逐节统计可见卡片。
   const grids = [...document.querySelectorAll("#content .grid")];
   const perGrid = grids.map(() => 0);
+  const onlyRun = ($("cf-run") || {}).checked, onlyHeld = ($("cf-held") || {}).checked;
+  // ⚠️ "在筛"不只是文本框非空 —— 结构化过滤也算。实测踩过：只看跑过的勾上后卡片只剩 3 张，
+  // 分节标题却还写着「（6 条）」（刚给文本搜索修好的那个谎，差点用另一个入口再犯一次）。
+  const filtering = !!(q || onlyRun || onlyHeld);
   document.querySelectorAll(".card").forEach(c => {
-    const hit = !q || c.innerText.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
+    const hitQ = !q || c.innerText.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
+    const hitR = !onlyRun || Number(c.dataset.runs || 0) > 0;
+    const hitH = !onlyHeld || c.dataset.held === "1";
+    const hit = hitQ && hitR && hitH;
     c.style.display = hit ? "" : "none";
     if (hit) { shown++; perGrid[grids.indexOf(c.closest(".grid"))]++; }
   });
@@ -334,11 +358,12 @@ function applyFilter() {
     const h = g.previousElementSibling, cnt = h && h.querySelector(".cnt");
     if (!cnt) return;                       // 总数从元素自己身上读（别从文案里正则回捞）
     const total = h.dataset.total, unit = h.dataset.unit;
-    cnt.textContent = q
+    cnt.textContent = filtering
       ? `（${perGrid[i]} / ${total} 匹配${perGrid[i] ? "" : "：这一节没有命中"}）`
       : `（${total} ${unit}）`;
   });
-  $("count").textContent = q ? `${shown} / ${CAT.presets.length + CAT.families.length} 张卡片匹配` : "";
+  $("count").textContent = filtering
+    ? `${shown} / ${CAT.presets.length + CAT.families.length} 张卡片匹配` : "";
 }
 
 async function loadCatalog() {
@@ -365,7 +390,18 @@ async function loadCatalog() {
   // 此前这里数的是 /api/runs 的末 30 条，到第 31 次运行时界面会说"已跑 30"而 k 已是 31。
   const runs = rr.by_strategy || {};
   $("content").innerHTML =
-    `<h2 id="presets" data-total="${CAT.presets.length}" data-unit="条">交付 preset <span class="cnt">（${CAT.presets.length} 条）</span></h2>
+    `<div class="bar" id="cbar">
+       <span class="sub">视图：</span>
+       <select id="csort" onchange="applyCardSort()" aria-label="卡片排序">
+         <option value="default">注册表顺序</option>
+         <option value="runs">跑得多的在前</option>
+         <option value="name">按名字</option>
+       </select>
+       <label class="sub"><input type="checkbox" id="cf-run" onchange="applyFilter()"> 只看跑过的</label>
+       <label class="sub"><input type="checkbox" id="cf-held" onchange="applyFilter()"> 只看含 holdout 的窗口</label>
+       <span class="sub">（排序只移动卡片，不重渲 —— 你改过的窗口与族参数不会被吞掉）</span>
+     </div>
+     <h2 id="presets" data-total="${CAT.presets.length}" data-unit="条">交付 preset <span class="cnt">（${CAT.presets.length} 条）</span></h2>
      <div class="grid">${CAT.presets.map(e => card(e, runs["preset:" + e.id])).join("")}</div>
      <h2 id="families" data-total="${CAT.families.length}" data-unit="个">策略族（候选机制）<span class="cnt">（${CAT.families.length} 个）</span></h2>
      <div class="grid">${CAT.families.map(e => card(e, runs["family:" + e.id])).join("")}</div>`;
@@ -435,8 +471,12 @@ function renderLedger() {
     <a href="/api/runs.csv" download><button class="mini">导出全部 CSV</button></a>
     <span class="sub">Δ = 与 <b>同一配置</b>（同策略 + 同参数 + <b>同窗口</b>）的上一次比。
       引擎是确定性的 ⇒ 同配置重跑应当差 0；<b>不是 0 就说明变的东西在配置之外</b>（数据换了或代码改了）。</span>`;
+  // 列头用**真按钮**：原来的 `<th onclick>` 键盘 Tab 够不到（实测 tabIndex=-1），
+  // 而"对比两次运行"这件事只有靠排序才能做。aria-sort 让读屏也知道现在按哪列排。
   $("ledger").innerHTML = `<table class="ledger"><thead><tr>${cols.map(([k, lab]) =>
-    `<th onclick="sortLedger('${k}')">${lab}${SORT.key === k ? (SORT.dir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}
+    `<th aria-sort="${SORT.key === k ? (SORT.dir > 0 ? "ascending" : "descending") : "none"}">`
+    + `<button class="thbtn" onclick="sortLedger('${k}')">${lab}${
+        SORT.key === k ? (SORT.dir > 0 ? " ▲" : " ▼") : ""}</button></th>`).join("")}
     <th>报告</th></tr></thead><tbody>${rows.map(r => `<tr>
       <td>${esc((r.ts || "").slice(0, 19))}</td>
       <td><a href="#${esc(r.strategy_id.replace(":", "-"))}" style="color:#cbd5e1">${esc(r.strategy_id)}</a></td>
