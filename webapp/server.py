@@ -81,15 +81,19 @@ class Handler(BaseHTTPRequestHandler):
             # 盘上已有的报告（结果**可以回访**）。截取文件头部把策略名与窗口读回来 ——
             # 报告自己就带这两样（title 与副标题），不用另存一份元数据（一份事实一处）。
             out = []
+            pj = jobs.params_by_job()          # job_id → 参数（报告里没有参数，台账里有）
             for f in sorted(RESULTS.glob("web_report_*.html"),
                             key=lambda x: x.stat().st_mtime, reverse=True)[:50]:
                 head = f.read_text(encoding="utf-8", errors="replace")[:4000]
                 name = re.search(r"<title>回测明细 · ([^<]+)</title>", head)
                 win = re.search(r"窗口 ([0-9-]+) → ([0-9-]+)", head)
                 st = f.stat()
-                out.append({"job_id": f.stem.replace("web_report_", ""),
+                jid = f.stem.replace("web_report_", "")
+                out.append({"job_id": jid,
                             "name": name.group(1) if name else "?",
                             "window": [win.group(1), win.group(2)] if win else None,
+                            # 参数不是从报告里正则抓的，是按 job_id 回读台账（见 params_by_job）
+                            "params": pj.get(jid),
                             "kb": round(st.st_size / 1024), "mtime": int(st.st_mtime)})
             return self._json(200, {"reports": out})
         m = re.fullmatch(r"/api/source/(preset|family)/([A-Za-z0-9_]{1,64})", p)

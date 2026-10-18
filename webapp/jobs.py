@@ -56,6 +56,25 @@ def prior_runs(strategy_id: str) -> int:
     return n
 
 
+def params_by_job() -> dict[str, dict | None]:
+    """job_id → 那一次**实际生效**的族参数（报告列表要显示"这份是哪组参数跑的"）。
+
+    为什么按 job_id 回读台账，而不是从报告 HTML 里正则抓：参数是台账的既定字段
+    （写在 rec["params"]），报告里根本没有它 —— 从渲染产物里反推事实是"一份事实两处"。
+    """
+    out: dict[str, dict | None] = {}
+    if not RUNS_LEDGER.exists():
+        return out
+    for line in RUNS_LEDGER.read_text(encoding="utf-8").splitlines():
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if r.get("job_id"):
+            out[r["job_id"]] = r.get("params")
+    return out
+
+
 def recent_runs(limit: int = 20) -> list[dict]:
     if not RUNS_LEDGER.exists():
         return []
@@ -216,7 +235,10 @@ def _run(job_id: str) -> None:
                    # （拿统计预算买回已经付过费的结果）。审计实测：盘上 6 份报告、界面 0 个入口。
                    "job_id": job_id, "report": f"web_report_{job_id}.html",
                    "control_runs": ctl_runs,
-                   "seconds": job["seconds"], "note": req.get("note", "")}
+                   # ⚠️ 不能写 job["seconds"]：它由 finally 赋值，而这一行在 finally **之前**
+                   # ⇒ 台账 9 条全是 null（记了却永远用不上的字段，审计实测）。就地算。
+                   "seconds": round(time.perf_counter() - t_all, 2),
+                   "note": req.get("note", "")}
             RUNS_LEDGER.parent.mkdir(parents=True, exist_ok=True)
             with RUNS_LEDGER.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")

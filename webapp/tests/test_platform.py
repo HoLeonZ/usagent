@@ -170,6 +170,21 @@ def test_server_serves_the_page_and_the_catalog(http):
     assert len(cat["presets"]) == len(presets.PRESETS)
 
 
+def test_ledger_records_a_real_duration_and_the_params_that_ran(offline):
+    """台账的两个"记了却用不上"的字段：seconds 曾恒为 null、params 有值却没渲染。
+
+    seconds 的坑很典型：那一行在 `finally` **之前**读 `job["seconds"]`，而它正是 finally
+    才赋的值 ⇒ 9 条台账全是 null（实测）。记了却永远用不上的字段比不记更坏 —— 它看起来
+    像"有这件事"，让下一个人以为能拿它做统计。
+    """
+    st = _wait(jobs.submit({"kind": "family", "id": "str",
+                            "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert st["status"] == "done", st.get("error")
+    rec = [json.loads(x) for x in (offline / "web_runs.jsonl").read_text().splitlines()][-1]
+    assert rec["seconds"] is not None and rec["seconds"] > 0, f"seconds 又变成 {rec['seconds']}"
+    assert rec["params"], "族型运行必须记下**实际生效**的那组参数（网格中点）"
+
+
 def test_server_rejects_unknown_paths_and_bad_requests(http):
     assert _get(http + "/nope")[0] == 404
     assert _get(http + "/report/deadbeef")[0] == 404          # 合法 id 但没有报告文件
@@ -230,6 +245,16 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "已用秒数（冷启动不像假死）": "已用 ${el.toFixed(0)}s",
         "锚点不被常驻顶栏吃掉": "scroll-margin-top",
         "运气对照开关（标了耗时，默认关）": 'id="ctl"',
+        # 2026-10-18 第二轮 UX 审计（5 视角并行取证）补的（每条都有实测数字）
+        "长参数串不再撑破整页（实测 2329px→1200px）": "overflow-wrap:anywhere",
+        "宽表只让自己横滚，不顶破整页": 'class="scrollx"',
+        "提交失败不再静默（实测原来永远停在「正在回测…」）": "function fail(msg, btn)",
+        "读目录失败说得出原因并给重试": "读不到目录：",
+        "读台账失败说得出原因": "读台账失败：",
+        "轮询连续失败要明说（不是无声重试）": "读不到任务状态（连续",
+        "台账参数列（对比的前提）": '["params","参数"]',
+        "台账的「超额」写清是曝光匹配口径": '["excess","曝光匹配超额"]',
+        "等待文案可被读屏读到": 'role="status"',
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
@@ -267,6 +292,25 @@ def test_reports_route_lists_past_reports_and_parses_their_header(http, tmp_path
     assert [r["job_id"] for r in reps] == ["abc123def456"], "只该列 web_report_*"
     assert reps[0]["name"] == "family:xs_flow"
     assert reps[0]["window"] == ["2025-01-01", "2025-10-13"]
+
+
+def test_reports_route_carries_the_params_that_run_used(http, tmp_path, monkeypatch):
+    """报告列表要能回答"这份是哪组参数跑出来的" —— 参数**不在报告里**，在台账里。
+
+    所以按 job_id 回读台账，而不是从渲染好的 HTML 里正则抓（那是从产物反推事实，
+    一份事实两处）；实测同一族两次不同参数（{0.34,0.5,0.1} vs {0.2,0,0.05}）在列表上
+    原本完全无法分辨 —— 而这个平台自己就宣传"两条策略的对比看这里"。
+    """
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    (tmp_path / "web_report_deadbeef0001.html").write_text(
+        "<!doctype html><title>回测明细 · family:xs_flow</title>"
+        "<div class='sub'>窗口 2025-01-01 → 2025-10-13 ｜ 成交 33 笔</div>", encoding="utf-8")
+    (tmp_path / "web_runs.jsonl").write_text(json.dumps(
+        {"job_id": "deadbeef0001", "strategy_id": "family:xs_flow", "seconds": 34.3,
+         "params": {"gap5_max": 0.34, "vol_z_min": 0.5}}) + "\n", encoding="utf-8")
+    reps = json.loads(_get(http + "/api/reports")[1])["reports"]
+    assert [r["job_id"] for r in reps] == ["deadbeef0001"]
+    assert reps[0]["params"] == {"gap5_max": 0.34, "vol_z_min": 0.5}
 
 
 def test_control_arm_can_be_switched_on_and_lands_in_the_report(offline):
