@@ -37,6 +37,10 @@ from research import render_report as RR, signals                 # noqa: E402
 RESULTS = ROOT / "research" / "results"
 RUNS_LEDGER = RESULTS / "web_runs.jsonl"
 
+# 平台上的窗口下限（交易日）。CLI 不受这条约束 —— 它不做统计判读。
+MIN_WINDOW_DAYS = 5
+
+
 class Cancelled(Exception):
     """用户取消。**粗粒度**：只在步骤之间检查 —— 取链路与回测都是单次调用，中途打断不了。"""
 
@@ -259,11 +263,19 @@ def _run(job_id: str) -> None:
             # 答案里带上这个池子真正可评估的那段。
             axis = pd.Index(sorted(panel["date"].unique()))
             lo_ts, hi_ts = pd.Timestamp(lo), pd.Timestamp(hi)
-            if not len(axis[(axis >= lo_ts) & (axis < hi_ts)]):
+            n_days = int(len(axis[(axis >= lo_ts) & (axis < hi_ts)]))
+            if not n_days:
                 raise ValueError(
                     f"窗口 {lo}..{hi} 里没有任何交易日 —— 这个池子的数据覆盖 "
                     f"{axis[0].date()} .. {axis[-1].date()}（指标预热完之后可评估的是 "
                     f"{panel_mod.first_signal_date(panel).date()} .. {axis[-1].date()}）")
+            # 太短的窗口此前会**一路跑完**信号与回测，最后在 overlay 里以一条没法行动的错误失败
+            # （审计实测）。这里当场拦下并说清为什么需要这么多天。
+            if n_days < MIN_WINDOW_DAYS:
+                raise ValueError(
+                    f"窗口 {lo}..{hi} 只有 {n_days} 个交易日 —— 至少要 {MIN_WINDOW_DAYS} 个："
+                    f"入场、出场各要一天，结算与敞口统计也各要一天；再短的窗口跑出来的"
+                    f"DSR/超额是在噪声上算的。（要极致短窗请用命令行 render_report。）")
             # 可评估范围**顺带说出来**（不是错误，只是"这一段会空着"）：界面据此在窗口旁边
             # 显示范围，省掉"跑完才发现起点太早/终点超出数据"。
             job["pool_range"] = [str(panel_mod.first_signal_date(panel).date()),

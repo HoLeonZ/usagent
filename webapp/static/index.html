@@ -127,7 +127,10 @@ code{font-size:12px;color:#cbd5e1;overflow-wrap:anywhere}
 /* code 里的东西（命令、文件名、定义体路径）常是**一个超长不可断的 token** —— 实测 390px 视口下
    复制命令里的 --out 文件名有 405px 宽，把整页顶出 47px 横向滚动。机器内容就该在任意处断。 */
 table.ledger{font-size:12.5px}
-table.ledger th{cursor:pointer;user-select:none;white-space:nowrap}
+/* cursor:pointer 只在**真能排序**的表头上有 —— 历史报告那张表的 th 不可排序，
+   但它共用 .ledger 这个类，于是鼠标手势在撒谎（审计实测）。 */
+table.ledger th{white-space:nowrap}
+table.ledger th.sortable{cursor:pointer;user-select:none}
 table.ledger th:hover{color:var(--fg)}
 table.ledger td{white-space:nowrap}
 .clip{background:#0c0f13;border:1px solid var(--line);border-radius:6px;padding:7px 9px;margin-top:8px;
@@ -193,7 +196,10 @@ table.ledger td{white-space:nowrap}
   <div class="ftbody">
     <p><b>引擎在哪儿</b>（改行为都在这些文件里，别在别处改）：</p>
     <dl>
-      <dt>research/broker.py</dt><dd>成交与记账：何时进/出、按什么价成交、费用、现金与持仓</dd>
+      <dt>research/broker.py</dt><dd>成交与记账：何时进/出、按什么价成交、现金与持仓
+        （费用<b>只调用</b>下面那个模块，不定义常数）</dd>
+      <dt>core/costs.py</dt><dd>费用与滑点的常数（<code>COST_BPS_ROUNDTRIP</code> 等）与
+        <code>half_rate()</code> —— 改成本口径改这里</dd>
       <dt>research/signals.py</dt><dd>单个 preset 的入场信号（族型 preset 的入场在掩码里）</dd>
       <dt>research/family_defs/*.py</dt><dd>族的入场掩码（自由 Python）＋ <code>research/families.py</code> 的预注册网格</dd>
       <dt>research/metrics.py</dt><dd>E[R]/胜率/PF/DSR 等指标</dd>
@@ -324,7 +330,11 @@ function paramTable(e) {
       : `<tr><td class="k">信号参数</td><td>${esc(JSON.stringify(st.signal_params))}</td></tr>`;
     return `<table>${rows}${extra}
       <tr><td class="k">试验次数 n_comparisons</td><td>${e.n_comparisons}</td></tr>
-      <tr><td class="k">validated</td><td>${e.validated ? "true" : "false"}</td></tr>
+      <tr><td class="k" title="validated 说的是：这条 preset 有没有被当作「可交易的策略」验证过。
+false 不是「没做完」，而是「如实交付的产物」—— 它带着自己的负面证据（VERDICT），
+用来记录一次被否掉的探索，而不是拿来下单。">validated</td>
+        <td>${e.validated ? "true" : "false"}${e.validated ? ""
+          : ` <span class="sub">（如实交付的产物，不是可交易策略 —— 见下面那条判读）</span>`}</td></tr>
       <tr><td class="k">声明窗</td><td>${esc(e.window.join(" .. "))}${e.touches_holdout
         ? ' <span class="warn">（含 holdout 天数）</span>' : ""}</td></tr>
       <tr><td class="k">定义体</td><td><code>research/preset_defs/${esc(e.id)}.py</code></td></tr>
@@ -333,7 +343,12 @@ function paramTable(e) {
   const grid = Object.entries(e.grid).map(([k, v]) =>
     `<tr><td class="k">${esc(k)}</td><td>${esc(JSON.stringify(v))}</td></tr>`).join("") ||
     "<tr><td>（参考族：无网格，不参与搜索）</td><td></td></tr>";
+  const fixed = Object.entries(e.fixed || {});
   return `<table>${grid}
+    ${fixed.length ? `<tr><td class="k">固定轴</td><td><code class="p">${
+        fixed.map(([k, v]) => k + "=" + JSON.stringify(v)).join(" ")
+      }</code><br><span class="sub">这些参数<b>不参与搜索</b>（被固定在某个取值上）——
+        读网格结果时必须知道这一点：网格里变的是别的轴，它们不是。</span></td></tr>` : ""}
     <tr><td class="k">网格组数</td><td>${e.grid_size}</td></tr>
     <tr><td class="k">排序分</td><td>${esc(e.score_col)}${e.score_negated ? "（取负）" : ""}</td></tr>
     <tr><td class="k">需要 regime</td><td>${e.needs_regime ? "是" : "否"}</td></tr>
@@ -386,7 +401,7 @@ function card(e, runCount) {
     <p class="mech">${esc(e.kind === "preset" ? (e.is_cli_default ? "preset · CLI 默认" : "preset")
       : "族 · " + e.mechanism)}</p>
     ${paramTable(e)}
-    ${lastRunLine(e)}
+    <div id="last-${a}">${lastRunLine(e)}</div>
     ${familyParamControls(e)}
     ${e.kind === "family" && e.grid_size ? `<div class="sub">本族有 <b>${e.grid_size}</b> 组预注册参数：
       <b>这一页一次只跑一组</b>（k 记的是 ${e.grid_size} —— 一次搜索的完整空间）。
@@ -410,7 +425,7 @@ function card(e, runCount) {
 ⚠️ 这个工具固定用 WFV 搜索窗 —— 它与上面那排窗口按钮无关，窗口在这个工具里是写死的（改它会推翻它自己的基线对照）。"
         onclick="copyGridCmd('${e.id}', ${runCount || 0})">复制网格命令</button>` : ""}
       <button class="mini" onclick="showSrc('${e.kind}','${e.id}')">查看定义体</button>
-      <span class="sub">已跑 <b>${runCount || 0}</b> 次</span>
+      <span class="sub" id="cnt-${a}">已跑 <b>${runCount || 0}</b> 次</span>
       <span class="sub poolhint">（池子可评估范围：跑过任意一条后显示）</span>
     </div>
     <div class="clip" id="clip-${a}"></div>
@@ -551,7 +566,16 @@ function applyFilter() {
   document.querySelectorAll(".card").forEach(c => {
     const hitQ = !q || c.innerText.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
     const hitR = !onlyRun || Number(c.dataset.runs || 0) > 0;
-    const hitH = !onlyHeld || c.dataset.held === "1";
+    // 「含 holdout」必须按**当前输入框里**的窗口判（与卡片那句 ⚠ 同一个判据）——
+    // 此前用的是渲染那一刻的窗口，于是改过窗口后同一张卡上两个判据会互相矛盾（审计实测）。
+    let held = c.dataset.held === "1";
+    if (onlyHeld) {
+      const kind = c.id.startsWith("preset-") ? "preset" : "family";
+      const id = c.id.slice(kind.length + 1);
+      const lo = $("lo-" + kind + "-" + id), hi = $("hi-" + kind + "-" + id);
+      held = (lo && hi) ? overlaps([lo.value, hi.value], HOLDOUT) : held;
+    }
+    const hitH = !onlyHeld || held;
     const hit = hitQ && hitR && hitH;
     c.style.display = hit ? "" : "none";
     if (hit) { shown++; perGrid[grids.indexOf(c.closest(".grid"))]++; }
@@ -624,8 +648,9 @@ async function loadCatalog() {
   // 每条策略**最近一次**的读数。为什么放在卡片上：开发时第一个问题是"现在哪条最好"，
   // 而此前卡片只有参数、没有任何测出来的东西 —— 那个排名只存在于一个命令行工具里
   // （rank_strategies），页面上看不到。这些数字全都已经在台账里，不新增任何计算。
-  LAST = {};
-  (rr.runs || []).forEach(r => { if (!(r.strategy_id in LAST)) LAST[r.strategy_id] = r; });
+  // 「最近一次」按**全台账**取（服务端 last_by_strategy）—— 此前从"最近 30 条"里现挑，
+  // 于是第 31 次运行之后，同一张卡会一边说「已跑 31 次」一边把「最近一次」停在更早那次。
+  LAST = rr.last_by_strategy || {};
   $("content").innerHTML =
     `<div class="bar" id="cbar">
        <span class="sub">视图：</span>
@@ -662,6 +687,26 @@ async function reloadCatalog() {
   await loadCatalog();
   await refreshLedger();
   applyPoolHint();
+}
+
+// 就地刷新"读数"：卡片上的「已跑 N 次」与「最近一次」+ 台账 + 历史报告。
+// 为什么不重渲卡片：重渲会吞掉用户改过的窗口与族参数（本仓库为此吃过一次亏）。
+async function refreshReadouts() {
+  const rr = await (await fetch("/api/runs")).json();
+  RUNS = rr.runs || []; TOTAL = rr.total || RUNS.length;
+  BYSTRAT = rr.by_strategy || {}; HOULDOUT_TOUCHES = rr.holdout_touches || 0;
+  CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
+  LAST = rr.last_by_strategy || {};
+  REPORTS = (await (await fetch("/api/reports")).json()).reports || [];
+  document.querySelectorAll("#content .card").forEach(c => {
+    const kind = c.id.startsWith("preset-") ? "preset" : "family";
+    const id = c.id.slice(kind.length + 1);
+    const n = BYSTRAT[kind + ":" + id] || 0;
+    const cnt = $("cnt-" + c.id); if (cnt) cnt.innerHTML = `已跑 <b>${n}</b> 次`;
+    const box = $("last-" + c.id);
+    if (box) box.innerHTML = lastRunLine({ kind, id });      // 复用同一份渲染（口径只有一处）
+  });
+  renderLedger(); renderReports();
 }
 
 async function refreshLedger() {
@@ -726,6 +771,10 @@ function renderLedger() {
       ${opts.map(([s, n]) => `<option value="${esc(s)}"${s === strat ? " selected" : ""}>${esc(s)}（${n}）</option>`).join("")}
     </select>
     <a href="/api/runs.csv" download><button class="mini">导出全部 CSV</button></a>
+    <button class="mini" onclick="refreshReadouts()"
+      title="重新拉台账与报告清单，并就地更新卡片上的「已跑 N 次 / 最近一次」。
+不重渲卡片，所以改过的窗口与族参数不会被吞掉。另一个标签页跑完回来看这里时也要点它。">
+      刷新读数</button>
     当前代码 <b>${esc(CUR_SHA || "?")}</b>${CUR_DIRTY
       ? '<span class="warn">（工作区有未提交改动 —— 现在跑出来的结果标注不了确定的代码版本）</span>'
       : ""} ·
@@ -733,8 +782,17 @@ function renderLedger() {
       引擎是确定性的 ⇒ 同配置重跑应当差 0；<b>不是 0 就说明变的东西在配置之外</b>（数据换了或代码改了）。</span>`;
   // 列头用**真按钮**：原来的 `<th onclick>` 键盘 Tab 够不到（实测 tabIndex=-1），
   // 而"对比两次运行"这件事只有靠排序才能做。aria-sort 让读屏也知道现在按哪列排。
+  if (!rows.length) {
+    // 空表不能一声不吭（审计实测：筛选到一条"运行都在更早记录里"的策略 ⇒ 表格空、零解释）
+    const total = BYSTRAT[strat] || 0;
+    $("ledger").innerHTML = `<div class="sub">${total
+      ? `这条策略共跑过 <b>${total}</b> 次，但都不在最近 ${RUNS.length} 条里（表只显示最近 30 条）。
+         看全部请用上面的「导出全部 CSV」。`
+      : `这条策略还没有运行记录 —— 在它的卡片上点「回测」。</div>`}</div>`;
+    return;
+  }
   $("ledger").innerHTML = `<table class="ledger"><thead><tr>${cols.map(([k, lab]) =>
-    `<th aria-sort="${SORT.key === k ? (SORT.dir > 0 ? "ascending" : "descending") : "none"}">`
+    `<th class="sortable" aria-sort="${SORT.key === k ? (SORT.dir > 0 ? "ascending" : "descending") : "none"}">`
     + `<button class="thbtn" onclick="sortLedger('${k}')">${lab}${
         SORT.key === k ? (SORT.dir > 0 ? " ▲" : " ▼") : ""}</button></th>`).join("")}
     <th>报告</th></tr></thead><tbody>${rows.map(r => `<tr>
@@ -858,6 +916,7 @@ async function run(kind, id) {
   const controlRuns = $("ctl").checked ? 200 : 0;
   const note = ($("note") || {}).value || "";
   $("run").style.display = "block";
+  $("run").setAttribute("tabindex", "-1");   // 可编程聚焦（不进 Tab 序列）
   $("runhead").classList.remove("sub");
   $("runhead").innerHTML = `<b>正在回测…</b>`;
   btn.disabled = true; btn.textContent = "回测中…";
@@ -870,6 +929,8 @@ async function run(kind, id) {
     trackInflight(j.id, true);
     panel(j.id, kind, id, lo, hi, params, controlRuns);
     $("run").scrollIntoView({block: "start"});
+    $("run").focus({preventScroll: true});   // 焦点跟着视图走 —— 否则焦点环停在已滚出屏幕的卡片上，
+                                             // 下一次 Tab 会把视图拽回卡片区（审计实测）
     poll(j.id, kind, id);
   } catch (exc) {
     // 审计实测：把 /api/run 打挂后，页面永远停在「正在回测…」、结果区 0 个面板、
@@ -926,17 +987,32 @@ function fail(msg, btn) {
 const POLLFAIL = {};                              // jobId -> 连续失败次数
 // 步骤区。排队中的任务**一步都还没开始**，此前却把「取链路（首次约 30–70 秒）」当作当前
 // 步骤显示、计时器还在走 ⇒ 看起来像在干活（实际在等锁）。排队时如实说"排队中"。
+// 步骤区渲染。⚠️ 不能每轮（900ms）整块重写：取消按钮就住在里面，重写会把焦点**每秒销毁一次**
+// —— 键盘用户按不到它（审计实测：poll() 无条件 innerHTML 重写，焦点跟丢）。所以：
+// 只有"结构真的变了"（状态/步骤数/当前步骤名）才重建，否则只把计时那个 span 的数字改掉。
+function renderSteps(box, st, jobId, el) {
+  const key = [st.status, (st.steps || []).length, st.step || ""].join("|");
+  const holder = box.querySelector(".jsteps");
+  if (holder.dataset.stepKey === key) {
+    const t = holder.querySelector(".elapsed");
+    if (t) t.textContent = el == null ? "" : el.toFixed(0) + "s";
+    return;
+  }
+  holder.dataset.stepKey = key;
+  holder.innerHTML = stepsHtml(st, jobId, el);
+}
+
 function stepsHtml(st, jobId, el) {
   const done = (st.steps || []).map(s =>
     `<div>✓ ${esc(s.name)} <span class="sub">${s.seconds}s</span></div>`).join("");
   if (st.status === "queued") {
-    return done + `<div>… <b>排队中</b> <span class="sub">服务端一次只跑一个任务 —— 前一个跑完才开始（${
-      el == null ? "" : "已等 " + el.toFixed(0) + "s，"}</span>
+    return done + `<div>… <b>排队中</b> <span class="sub">服务端一次只跑一个任务 —— 前一个跑完才开始（已等 <span class="elapsed">${
+      el == null ? "" : el.toFixed(0) + "s"}</span>，</span>
       <button class="mini" onclick="cancelJob('${esc(jobId || st.id || "")}')">取消</button></div>`;
   }
   if (st.status === "running") {
-    return done + `<div>… ${esc(st.step)} <span class="sub">已用 ${
-      el == null ? "" : el.toFixed(0) + "s，"}</span>
+    return done + `<div>… ${esc(st.step)} <span class="sub">已用 <span class="elapsed">${
+      el == null ? "" : el.toFixed(0) + "s"}</span>，</span>
       <button class="mini" onclick="cancelJob('${esc(jobId || st.id || "")}')">取消</button>
       <span class="sub">粗粒度：当前这一步跑完才停</span></div>`
       + (CANCELREQ.has(jobId) || CANCELREQ.has(st.id)
@@ -1036,7 +1112,7 @@ async function poll(jobId, kind, id) {
       i.id.replace(/^(lo|hi)-(preset|family)-/, "")));
   }
   const el = (Date.now() - (T0[jobId] || Date.now())) / 1000;
-  if (box) box.querySelector(".jsteps").innerHTML = stepsHtml(st, jobId, el);
+  if (box) renderSteps(box, st, jobId, el);
   if (st.status === "running" || st.status === "queued") {
     trackInflight(jobId, true); setTimeout(() => poll(jobId, kind, id), 900); return;
   }
@@ -1045,6 +1121,7 @@ async function poll(jobId, kind, id) {
   // 都会让那张卡的「回测」**永久禁用**——实测就踩到了这个（刷新恢复后卡片一直写着"回测中…"，
   // 而任务早就跑完了）。终态共四条：done / error / cancelled / 任务丢失，一条都不能漏。
   releaseCardBtn(kind, id);
+  refreshReadouts().catch(() => {});        // 跑完立刻把卡片读数与台账刷新（不静默陈旧）
   if (st.status === "error") {
     if (box) box.querySelector(".jbody").innerHTML = `<div class="verdict none">${esc(st.error)}</div>`;
     return;

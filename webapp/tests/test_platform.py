@@ -471,6 +471,19 @@ def test_a_window_with_no_trading_days_fails_fast_and_names_the_range(offline):
     assert not any("计算信号" in s2["name"] for s2 in st["steps"]), st["steps"]
 
 
+def test_a_too_short_window_is_refused_up_front_with_a_reason(offline):
+    """窗口太短要在**体检那一步**就拦下并说清原因。
+
+    此前只挡"一个交易日都没有"，1–2 个交易日的窗口会一路跑完信号与回测，最后在 overlay
+    里以一条没法行动的错误失败（审计实测）—— 而 DSR/超额在那么少的天数上本来也没有意义。
+    """
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": "2024-06-03", "hi": "2024-06-05"})["id"])
+    assert st["status"] == "error", st
+    assert "交易日" in st["error"] and str(jobs.MIN_WINDOW_DAYS) in st["error"], st["error"]
+    assert not any("计算信号" in s2["name"] for s2 in st["steps"]), "不该跑到信号那一步"
+
+
 def test_a_run_reports_the_pool_range_so_the_page_can_warn_before_running(offline):
     """跑过一次之后，页面要知道"这个池子哪一段可评估" —— 据此在窗口旁显示范围并当场预警。"""
     st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
