@@ -113,6 +113,7 @@ table.ledger td{white-space:nowrap}
   ⚠️ 两个「超额」不是同一个量：这里的<b>曝光匹配超额</b>＝按敞口加权的超额（空仓时算 0），
   报告摘要里的「超额」＝自身总收益 − 基准总收益（不按敞口）。同一格子上两者可以差很多，
   别拿这一列去对报告摘要那一行。</div>
+<div id="lbar" class="sub"></div>
 <div id="ledger" class="scrollx"></div>
 
 <h2 id="reports">历史报告</h2>
@@ -156,7 +157,7 @@ function familyParamControls(e) {
       vals.map(v => `<option value='${esc(JSON.stringify(v))}'${JSON.stringify(v) === JSON.stringify(e.default_params[k]) ? " selected" : ""}>${esc(JSON.stringify(v))}</option>`).join("")
     }</select></td></tr>`).join("");
   return `<table>${rows}</table>
-    <div class="sub">族的参数只给**预注册网格**上的取值（默认=中点）。要跑网格之外的值，
+    <div class="sub">族的参数只给<b>预注册网格</b>上的取值（默认=中点）。要跑网格之外的值，
     应先在定义体里改网格并重跑搜索 —— 那是一次新的搜索，n_trials 要跟着涨。</div>`;
 }
 
@@ -257,6 +258,7 @@ function revalidate(kind, id) {
 // 不预取是因为"知道"这件事本身就要求先载面板，而载面板正是那个 30–70 秒的重活。
 // 存进 sessionStorage：刷新一次页面不该把"刚从一次 30 秒的重活里学到的东西"丢掉
 // （只在本次标签页里 —— 这是"这次会话说的话"，不是需要落盘的产物）。
+let TOTAL = 0;                    // 盘上台账**总共**几条（表只显示最近 30 条）
 let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
                     catch (e) { return null; } })();
 function applyPoolHint() {
@@ -379,7 +381,8 @@ async function loadCatalog() {
 
 async function refreshLedger() {
   try {
-    RUNS = (await (await fetch("/api/runs")).json()).runs || [];
+    const rr = await (await fetch("/api/runs")).json();
+    RUNS = rr.runs || []; TOTAL = rr.total || RUNS.length;
     REPORTS = (await (await fetch("/api/reports")).json()).reports || [];
   } catch (exc) {
     $("ledger").innerHTML = `<div class="sub neg">读台账失败：${esc(exc.message)} —— 刷新页面重试</div>`;
@@ -393,29 +396,80 @@ function renderLedger() {
   // 结果在纸面上无法分辨，而这张表就是拿来对比的）。「超额」必须写成「曝光匹配超额」：
   // 它与报告摘要里那个 tot−bench 的「超额」**不是同一个量**（实测同一 job −19.59% vs −43.93pp）。
   const cols = [["ts","时间"],["strategy_id","策略"],["window","窗口"],["params","参数"],
-                ["n_trades","笔数"],["excess","曝光匹配超额"],["dsr","DSR"],["n_trials_k","k"],
-                ["note","备注"]];
+                ["n_trades","笔数"],["excess","曝光匹配超额"],["d_excess","Δ超额（同配置）"],
+                ["dsr","DSR"],["n_trials_k","k"],["note","备注"]];
   if (!RUNS.length) {
     $("ledger").innerHTML = `<div class="sub">还没有运行记录 —— 在上面任一策略卡片上点「回测」。</div>`;
     return;
   }
-  const rows = [...RUNS].sort((a, b) => {
+  // Δ = 与**同一配置**（同策略 + 同参数 + **同窗口**）的上一次比，按时间（不是按当前排序）。
+  // 为什么要算进窗口：只在同配置下这个差才有确定含义 —— 引擎是确定性的，同配置两次应当
+  // 一模一样；若它不是 0，变的东西就在配置**之外**（数据换了、或代码改了）。这正是"改完
+  // 重构再跑一次同配置、确认没动行为"的那条路。不同窗口/不同参数的对比靠上面的筛选看。
+  const prev = {};
+  [...RUNS].sort((a, b) => (a.ts > b.ts ? 1 : -1)).forEach(r => {
+    const k = keyOf(r); if (k in prev && r.excess != null && prev[k] != null) r._d = r.excess - prev[k];
+    if (r.excess != null) prev[k] = r.excess;
+  });
+  const strat = $("lf") ? $("lf").value : "";
+  const shown = strat ? RUNS.filter(r => r.strategy_id === strat) : RUNS;
+  const rows = [...shown].sort((a, b) => {
     let x = a[SORT.key], y = b[SORT.key];
     if (Array.isArray(x)) x = x.join(); if (Array.isArray(y)) y = y.join();
     return (x > y ? 1 : x < y ? -1 : 0) * SORT.dir;
   });
+  const opts = Object.entries(RUNS.reduce((m, r) => (m[r.strategy_id] = (m[r.strategy_id] || 0) + 1, m), {}))
+    .sort((a, b) => b[1] - a[1]);
+  $("lbar").innerHTML = `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
+      ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""} ·
+    <select id="lf" onchange="renderLedger()">
+      <option value="">全部策略</option>
+      ${opts.map(([s, n]) => `<option value="${esc(s)}"${s === strat ? " selected" : ""}>${esc(s)}（${n}）</option>`).join("")}
+    </select>
+    <a href="/api/runs.csv" download><button class="mini">导出全部 CSV</button></a>
+    <span class="sub">Δ = 与 <b>同一配置</b>（同策略 + 同参数 + <b>同窗口</b>）的上一次比。
+      引擎是确定性的 ⇒ 同配置重跑应当差 0；<b>不是 0 就说明变的东西在配置之外</b>（数据换了或代码改了）。</span>`;
   $("ledger").innerHTML = `<table class="ledger"><thead><tr>${cols.map(([k, lab]) =>
     `<th onclick="sortLedger('${k}')">${lab}${SORT.key === k ? (SORT.dir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}
     <th>报告</th></tr></thead><tbody>${rows.map(r => `<tr>
       <td>${esc((r.ts || "").slice(0, 19))}</td>
       <td><a href="#${esc(r.strategy_id.replace(":", "-"))}" style="color:#cbd5e1">${esc(r.strategy_id)}</a></td>
-      <td>${esc((r.window || []).join(".."))}</td>
+      <td>${(r.window || []).length
+            ? `<a href="#${esc(r.strategy_id.replace(":", "-"))}" title="把这张卡的窗口填成这一对日期（不自动跑 —— 跑一次就要记一次 k）"
+                 onclick="fillWindow('${esc(r.strategy_id)}','${esc(r.window[0])}','${esc(r.window[1])}')"
+                 style="color:#cbd5e1">${esc(r.window.join(".."))}</a>`
+            : "—"}</td>
       <td><code class="p">${esc(paramsOf(r.params))}</code></td>
       <td>${r.n_trades ?? "—"}</td>
       <td class="${(r.excess || 0) >= 0 ? "pos" : "neg"}">${pct(r.excess)}</td>
+      <td class="${r._d ? ((r._d > 0 ? "pos" : "neg")) : "sub"}" title="${r._d == null
+            ? "这个配置还没有跑过第二次" : "同配置重跑：差 0 说明行为没变；不是 0 就是数据或代码变了"}">${
+            r._d == null ? '<span class="sub">（第一次）</span>'
+            : (r._d === 0 ? '<span class="sub">0.00pp（行为一致）</span>'
+                          : (r._d > 0 ? "+" : "") + (r._d * 100).toFixed(2) + "pp")}</td>
       <td>${num(r.dsr)}</td><td>${r.n_trials_k ?? "—"}</td><td>${esc((r.note || "").slice(0, 24))}</td>
       <td>${r.job_id ? `<a href="/report/${esc(r.job_id)}" target="_blank">打开</a>` : "—"}</td>
     </tr>`).join("")}</tbody></table>`;
+}
+// 把某张卡的窗口填成这一对日期（不自动提交）：台账里看到"上次用这个窗口跑过"，
+// 能一键填回去 —— 但**跑不跑由人决定**，因为跑一次就要记一次 k（§5）。
+function fillWindow(strategyId, lo, hi) {
+  const [kind, id] = strategyId.split(":");
+  const card = $(kind + "-" + id);
+  if (!card || !$("lo-" + kind + "-" + id)) return;
+  $("lo-" + kind + "-" + id).value = lo; $("hi-" + kind + "-" + id).value = hi;
+  revalidate(kind, id);
+  card.scrollIntoView({block: "start"});
+  const bar = card.querySelector(".bar");
+  const old = bar.querySelector(".filled"); if (old) old.remove();
+  const sp = document.createElement("span");
+  sp.className = "sub filled"; sp.textContent = `← 已填入上次的窗口 ${lo}..${hi}（点「回测」才真的跑）`;
+  bar.appendChild(sp);
+}
+function keyOf(r) {
+  // 同配置 = 策略 + 参数 + 窗口。三个都相同才是"重跑同一个东西"。
+  return r.strategy_id + "|" + JSON.stringify(r.params || null)
+       + "|" + ((r.window || []).join(".."));
 }
 function renderReports() {
   if (!REPORTS.length) { $("reports_body").innerHTML = `<div class="sub">（盘上还没有报告）</div>`; return; }

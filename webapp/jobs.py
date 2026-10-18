@@ -75,17 +75,22 @@ def params_by_job() -> dict[str, dict | None]:
     return out
 
 
-def recent_runs(limit: int = 20) -> list[dict]:
+def all_runs() -> list[dict]:
+    """台账**全部**记录（时间正序）。导 CSV 与"共几条"都从这里来 ——
+    页面上的表只显示最近 30 条，若导出也只用那 30 条，"导出"这两个字就是在骗人。"""
     if not RUNS_LEDGER.exists():
         return []
-    lines = RUNS_LEDGER.read_text(encoding="utf-8").splitlines()[-limit:]
     out = []
-    for ln in reversed(lines):
+    for ln in RUNS_LEDGER.read_text(encoding="utf-8").splitlines():
         try:
             out.append(json.loads(ln))
         except json.JSONDecodeError:
             continue
     return out
+
+
+def recent_runs(limit: int = 20) -> list[dict]:
+    return list(reversed(all_runs()[-limit:]))
 
 
 def _chain_for(P: dict) -> tuple:

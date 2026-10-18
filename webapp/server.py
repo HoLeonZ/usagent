@@ -10,7 +10,8 @@
     GET  /api/catalog       策略目录（preset 参数 / 族网格 / 负面证据）
     POST /api/run           提交回测 {kind,id,lo,hi,params?} → {job id}
     GET  /api/job/<id>      任务状态（steps / metrics / report 链接）
-    GET  /api/runs          台账（含"这条策略已被跑过几次"）
+    GET  /api/runs          台账（最近 30 条 + 总条数）
+    GET  /api/runs.csv      台账**全部**记录的 CSV（页面上的表有 30 条上限）
     GET  /api/reports       盘上已有的报告（结果可回访，不必为了看一眼而重跑）
     GET  /api/source/<kind>/<id>   只读地取定义体源码（开发时最常跳的地方）
     GET  /report/<id>       平台生成的回测报告（id = 任务 id）
@@ -78,7 +79,33 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/catalog":
             return self._json(200, catalog.build())
         if p == "/api/runs":
-            return self._json(200, {"runs": jobs.recent_runs(30)})
+            # 表只显示最近 30 条 —— 但**共几条**要说出来（否则读者以为那就是全部）。
+            runs = jobs.recent_runs(30)
+            return self._json(200, {"runs": runs, "total": len(jobs.all_runs()),
+                                    "shown": len(runs)})
+        if p == "/api/runs.csv":
+            # 完整台账的 CSV（页面上的表有 30 条上限，导出不能跟着被截断）。
+            import csv as _csv
+            import io as _io
+            rows = jobs.all_runs()
+            cols = ["ts", "strategy_id", "window", "params", "n_trades", "excess", "dsr",
+                    "n_trials_k", "prior_runs", "control_runs", "seconds", "note",
+                    "job_id", "git_sha", "kind", "name"]
+            buf = _io.StringIO()
+            w = _csv.writer(buf)
+            w.writerow(cols + ["excess_pct"])
+            for r in rows:
+                w.writerow([json.dumps(r.get(c), ensure_ascii=False) if isinstance(r.get(c), (list, dict))
+                            else r.get(c, "") for c in cols]
+                           + ["" if r.get("excess") is None else round(r["excess"] * 100, 4)])
+            body = buf.getvalue().encode("utf-8-sig")      # BOM：Excel 打开中文不乱码
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", 'attachment; filename="web_runs.csv"')
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            return self.wfile.write(body)
         if p == "/api/reports":
             # 盘上已有的报告（结果**可以回访**）。截取文件头部把策略名与窗口读回来 ——
             # 报告自己就带这两样（title 与副标题），不用另存一份元数据（一份事实一处）。

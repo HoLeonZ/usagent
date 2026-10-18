@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import time
@@ -237,6 +238,20 @@ def test_server_rejects_unknown_paths_and_bad_requests(http):
         assert e.code == 404
 
 
+def test_no_literal_markdown_leaks_into_visible_copy():
+    """页面上的可见文案不许出现 `**` —— 那是 markdown 的强调，浏览器不认识，会原样打出来。
+
+    同一个坑在这个仓库踩过三次（报告层靠 `inline_md` 先转义再做最小 markdown 解决，
+    页面层一直没人管）。这条锁只看**标记之外**的部分：`<script>`（JS 注释里可以有）与
+    `<style>`（CSS 注释里可以有）先剥掉。
+    """
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    body = re.sub(r"<script>.*?</script>", "", html, flags=re.S)
+    body = re.sub(r"<style>.*?</style>", "", body, flags=re.S)
+    offenders = [ln.strip()[:70] for ln in body.splitlines() if "**" in ln]
+    assert not offenders, f"可见文案里有 markdown 的 **：{offenders}"
+
+
 def test_server_binds_localhost_only():
     """**只绑 127.0.0.1**：这个页面能一键跑回测、读本地库、写报告文件。"""
     src = (ROOT / "webapp" / "server.py").read_text(encoding="utf-8")
@@ -297,6 +312,11 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "与池子范围不重叠时当场预警（不必白等一次）": "完全不重叠",
         "族卡的批量入口（整张网格一次跑完）": "copyGridCmd(",
         "族卡说清「网格才是一次搜索」（别把 96 个格点各点一次）": "一次搜索的完整空间",
+        "台账按策略筛选（对比时要能只看两条）": 'id="lf"',
+        "台账 Δ 列（同一配置重跑的对比）": '["d_excess","Δ超额（同配置）"]',
+        "台账完整 CSV 导出（表只有 30 条上限）": '/api/runs.csv',
+        "台账窗口可点回填到卡片（但不自动跑）": "fillWindow(",
+        "台账明说只显示最近 N 条": "表只取最近",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
