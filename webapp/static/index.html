@@ -329,6 +329,7 @@ function revalidate(kind, id) {
 let TOTAL = 0;                    // 盘上台账**总共**几条（表只显示最近 30 条）
 let BYSTRAT = {};                 // 每条策略全文运行次数（与 k 同一个计数）
 let LAST = {};                    // 每条策略最近一次运行的读数（卡片上显示"现在是多少"）
+let HOULDOUT_TOUCHES = 0;         // 台账里碰过 holdout 的运行次数（"只准读一次"的计数）
 let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
                     catch (e) { return null; } })();
 function applyPoolHint() {
@@ -521,6 +522,7 @@ async function refreshLedger() {
     const rr = await (await fetch("/api/runs")).json();
     RUNS = rr.runs || []; TOTAL = rr.total || RUNS.length;
     BYSTRAT = rr.by_strategy || {};
+    HOULDOUT_TOUCHES = rr.holdout_touches || 0;
     REPORTS = (await (await fetch("/api/reports")).json()).reports || [];
   } catch (exc) {
     $("ledger").innerHTML = `<div class="sub neg">读台账失败：${esc(exc.message)} —— 刷新页面重试</div>`;
@@ -560,8 +562,13 @@ function renderLedger() {
   const opts = Object.entries(Object.keys(BYSTRAT).length
       ? BYSTRAT : RUNS.reduce((m, r) => (m[r.strategy_id] = (m[r.strategy_id] || 0) + 1, m), {}))
     .sort((a, b) => b[1] - a[1]);
+  // holdout 是"只准读一次"的那扇门 —— 它的次数必须显眼：卡片上写着的规矩，
+  // 这里给出被跨过几次（>0 就标黄），而不是让它当一句口号
+  const ht = HOULDOUT_TOUCHES > 0
+    ? ` · <span class="warn">其中 <b>${HOULDOUT_TOUCHES}</b> 次运行的窗口碰了 holdout（§5：只准读一次）</span>`
+    : ` · 碰过 holdout 的运行：<b>0</b> 次`;
   $("lbar").innerHTML = `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
-      ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""} ·
+      ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""}${ht} ·
     <select id="lf" onchange="renderLedger()">
       <option value="">全部策略</option>
       ${opts.map(([s, n]) => `<option value="${esc(s)}"${s === strat ? " selected" : ""}>${esc(s)}（${n}）</option>`).join("")}

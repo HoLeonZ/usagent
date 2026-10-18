@@ -81,9 +81,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, catalog.build())
         if p == "/api/runs":
             # 表只显示最近 30 条 —— 但**共几条**要说出来（否则读者以为那就是全部）。
-            runs = jobs.recent_runs(30)
-            return self._json(200, {"runs": runs, "total": len(jobs.all_runs()),
+            runs, allruns = jobs.recent_runs(30), jobs.all_runs()
+            return self._json(200, {"runs": runs, "total": len(allruns),
                                     "shown": len(runs),
+                                    # 纪律计数：碰过 holdout 的次数（卡片上那句"只准读一次"
+                                    # 必须有个数字，否则它只是句口号）
+                                    "holdout_touches": catalog.holdout_touches(allruns),
                                     # 卡片「已跑 N 次」与筛选下拉都按**全文**数 —— 它们与
                                     # DSR 的 k 是同一个计数，不能受"表只显示 30 条"影响
                                     "by_strategy": jobs.counts_by_strategy()})

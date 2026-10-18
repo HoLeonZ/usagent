@@ -73,6 +73,21 @@ def test_catalog_publishes_the_windows_from_their_real_sources():
     assert "if (CAT.train) TRAIN = CAT.train" in html
 
 
+def test_holdout_touches_counts_what_the_page_warns_about():
+    """卡片上写着「只准读一次」，那就得给出**被跨过几次** —— 否则它只是句口号。
+
+    这条计数要覆盖**全台账**（不是显示的那 30 条）：它是纪律计数，不是表的一部分。
+    """
+    ho = tuple(catalog.HOLDOUT)
+    rows = [{"window": [ho[0], ho[1]]},                 # 完全落在 holdout 里
+            {"window": ["2024-01-01", "2025-01-01"]},   # 不碰
+            {"window": ["2025-10-01", "2025-10-20"]},   # 边跨过去
+            {"window": None},                           # 老记录可能没有窗口
+            {}]
+    assert catalog.holdout_touches(rows) == 2, catalog.holdout_touches(rows)
+    assert catalog.holdout_touches([]) == 0
+
+
 def test_catalog_flags_windows_that_touch_the_holdout():
     ho = tuple(catalog.HOLDOUT)
     assert catalog._overlaps(("2025-01-01", "2026-01-01"), ho) is True
@@ -414,6 +429,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "可按最近一次超额排序（没跑过的排最后）": 'data-last=',
         "顶栏「重新读目录」（页面旧 vs 服务旧要分清）": "reloadCatalog()",
         "改完定义体要说清「要重启服务」（注册表启动时读一次）": "srchint-",
+        "holdout 的次数要显眼（一句没有计数的纪律等于没有纪律）": "只准读一次",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
@@ -451,6 +467,19 @@ def test_reports_route_lists_past_reports_and_parses_their_header(http, tmp_path
     assert [r["job_id"] for r in reps] == ["abc123def456"], "只该列 web_report_*"
     assert reps[0]["name"] == "family:xs_flow"
     assert reps[0]["window"] == ["2025-01-01", "2025-10-13"]
+
+
+def test_runs_route_counts_holdout_touches_over_the_whole_ledger(http, tmp_path, monkeypatch):
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    monkeypatch.setattr(jobs, "RUNS_LEDGER", tmp_path / "web_runs.jsonl")
+    ho = list(catalog.HOLDOUT)
+    lines = [json.dumps({"strategy_id": "preset:x", "window": ho}),
+             json.dumps({"strategy_id": "preset:x", "window": ["2024-01-01", "2025-01-01"]}),
+             json.dumps({"strategy_id": "preset:x", "window": ["2025-11-01", "2025-12-01"]})]
+    (tmp_path / "web_runs.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    d = json.loads(_get(http + "/api/runs")[1])
+    assert d["holdout_touches"] == 2, d          # 1 与 3 都落在 holdout 内
+    assert d["total"] == 3
 
 
 def test_reports_route_carries_the_params_that_run_used(http, tmp_path, monkeypatch):

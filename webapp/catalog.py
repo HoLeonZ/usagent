@@ -115,6 +115,21 @@ def build() -> dict:
     }
 
 
+def holdout_touches(runs: list[dict]) -> int:
+    """台账里有多少次运行的窗口碰了 holdout。
+
+    为什么要有这个计数：卡片上写着「与 holdout 重叠（只准读一次）」，但页面上**从没有数过
+    这条规矩被跨过几次** —— 一句没有计数的纪律等于没有纪律（§5 的整个做法就是"让次数可见"）。
+    数据早就在台账里（每条运行的 window），这里只是把它数出来。
+    """
+    n = 0
+    for r in runs or []:
+        w = r.get("window")
+        if isinstance(w, (list, tuple)) and len(w) == 2 and _overlaps((w[0], w[1]), HOLDOUT):
+            n += 1
+    return n
+
+
 def find(kind: str, ident: str) -> dict | None:
     for e in build()[("presets" if kind == "preset" else "families")]:
         if e["id"] == ident:
