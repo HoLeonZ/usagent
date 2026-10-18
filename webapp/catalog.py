@@ -26,6 +26,8 @@ from research import families, presets                       # noqa: E402
 
 # 交付物的窗口若与这段重叠，页面上必须标红：holdout 只准读一次，且台账里已有 claim。
 HOLDOUT = ("2025-10-14", "2026-10-13")
+# 训练窗的定义处（WFV 的搜索期）—— 页面从这里取，别在自己那份里再写一遍
+from research import wfv_search as W                       # noqa: E402
 
 
 def _overlaps(a: tuple[str, str], b: tuple[str, str]) -> bool:
@@ -96,7 +98,13 @@ def build() -> dict:
     holdout_claims = sum(1 for p in presets_list if p["touches_holdout"])
     return {
         "schema": "usagent.platform.catalog/v1",
+        # 三个窗口预设都从**它们的真实出处**发布，不要让页面再抄一份（抄一份就会各自漂移）：
+        #   holdout —— 本文件的 HOLDOUT（与 holdout 台账、重叠判据同一个常量）；
+        #   train   —— WFV 的搜索期（`wfv_search.SEARCH_LO/HI`，那是"训练窗"的定义处）。
+        # 页面里剩下的 FULL（训练窗起点 .. 数据末端）是**视图默认值**，不是台账里的事实，
+        # 所以不上行 —— 但它的按钮 title 始终印出"按下去会设成哪两天"，不会撒谎。
         "holdout": list(HOLDOUT),
+        "train": [W.SEARCH_LO, W.SEARCH_HI],
         "presets": presets_list,
         "families": fams,
         "notes": {

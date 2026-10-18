@@ -56,6 +56,23 @@ def test_family_default_params_are_the_grid_midpoint():
     assert e["default_params"] == {k: v[len(v) // 2] for k, v in e["grid"].items()}
 
 
+def test_catalog_publishes_the_windows_from_their_real_sources():
+    """页面上的窗口预设必须**取自出处**，不能在 JS 里抄一份。
+
+    HOLDOUT 还担着"与 holdout 重叠"的警示判据 —— 抄错/漂移就会错报（把一次正常回测标红，
+    或者更糟：放过一次真的碰了 holdout 的运行）。TRAIN 的出处是 WFV 的搜索期。
+    """
+    from research import wfv_search as W
+    cat = catalog.build()
+    assert cat["holdout"] == list(catalog.HOLDOUT), "holdout 必须就是 holdout 台账那个常量"
+    assert cat["train"] == [W.SEARCH_LO, W.SEARCH_HI], "训练窗必须取自 wfv_search 的搜索期"
+
+    # 而且页面真的**用了**它（不是发布了但没人读 —— 本仓库为"声明了却没人读"立过规矩）
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    assert "if (CAT.holdout) HOLDOUT = CAT.holdout" in html
+    assert "if (CAT.train) TRAIN = CAT.train" in html
+
+
 def test_catalog_flags_windows_that_touch_the_holdout():
     ho = tuple(catalog.HOLDOUT)
     assert catalog._overlaps(("2025-01-01", "2026-01-01"), ho) is True

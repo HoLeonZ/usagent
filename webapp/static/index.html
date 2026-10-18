@@ -147,8 +147,11 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const pct = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v*100).toFixed(d) + "%";
 const num = (v, d=3) => (v === null || v === undefined || !isFinite(v)) ? "—" : v.toFixed(d);
-const HOLDOUT = ["2025-10-14", "2026-10-13"];
-const TRAIN = ["2024-04-09", "2025-10-13"];
+// 三个窗口预设。HOLDOUT 与 TRAIN **必须**从目录接口取（那边才是出处：holdout 台账的常量、
+// WFV 的搜索期）—— 在本文件里再抄一份就会各自漂移，而 HOLDOUT 还担着"与 holdout 重叠"的
+// 警示判据（抄错就会错报）。FULL 是**视图默认值**（训练窗起点 .. 数据末端），不是台账事实。
+let HOLDOUT = ["2025-10-14", "2026-10-13"];      // 目录到达前先用与服务器一致的兜底值
+let TRAIN = ["2024-04-09", "2025-10-13"];
 const FULL = ["2024-04-09", "2026-10-14"];
 const overlaps = (a, b) => !(a[1] < b[0] || b[1] < a[0]);
 let CAT = null, RUNS = [], REPORTS = [], SORT = {key: "ts", dir: -1};
@@ -419,6 +422,8 @@ async function loadCatalog() {
     return;
   }
   CAT = fetched;
+  if (CAT.holdout) HOLDOUT = CAT.holdout;          // 出处：holdout 台账那个常量
+  if (CAT.train) TRAIN = CAT.train;                // 出处：wfv_search 的搜索期
   $("banner").innerHTML = `目录：<b>${CAT.presets.length}</b> 条 preset · <b>${CAT.families.length}</b> 个族 ·
     其中 <b>${CAT.notes.holdout_presets}</b> 条 preset 的声明窗口含 holdout 天数（标红）。
     族的参数默认=网格中点，可在卡片里改（只列网格上的取值）；${esc(CAT.notes.multiplicity)}`;
