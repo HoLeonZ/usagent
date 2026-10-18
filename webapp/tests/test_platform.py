@@ -195,3 +195,73 @@ def test_server_binds_localhost_only():
     """**只绑 127.0.0.1**：这个页面能一键跑回测、读本地库、写报告文件。"""
     src = (ROOT / "webapp" / "server.py").read_text(encoding="utf-8")
     assert '("127.0.0.1", port)' in src and "0.0.0.0" not in src
+
+
+# ---------------------------------------------------------------- 按钮/导航清单（本循环的机器化）
+
+def test_the_page_has_the_affordances_development_and_backtesting_need():
+    """页面必须齐备「开发 / 回测」所需的按钮与导航 —— 少一个就红。
+
+    为什么写成清单断言：这一层没有 JS 单测，"按钮还在不在"只能靠读页面源码；
+    而**漏掉一个按钮**（例如"复制成可复现命令"）不会让任何别的东西变红 ——
+    那正是本仓库最忌讳的"新东西默认不在护栏里"。清单本身就是这份护栏。
+    """
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    need = {
+        "搜索框（21 张卡片里找一条）": 'type="search"',
+        "顶栏常驻导航": 'class="top"',
+        "分段锚点": 'href="#presets"',
+        "卡片锚点（可深链）": 'id="${a}"',
+        "窗口预设（训练/全窗/声明/holdout）": "windowPresets(",
+        "窗口非法即时提示": "窗口非法（起点必须早于终点）",
+        "回测按钮": "onclick=\"run('${e.kind}','${e.id}')\"",
+        "复制成可复现命令": "copyCmd(",
+        "查看定义体源码": "showSrc(",
+        "族参数可编辑（只列预注册网格取值）": 'select class="grid"',
+        "台账可排序（对比两次运行）": "sortLedger(",
+        "holdout 重叠标红": "与 holdout 重叠",
+        "报告下载": "download>",
+        "报告内嵌": "<iframe",
+        # 2026-10-18 UX 审计补的四件（每条都有实测证据，见 webapp/jobs.py 的注释）
+        "历史报告入口（结果可回访，不必重跑）": 'href="#reports"',
+        "台账的报告列（回访某一次）": 'href="/report/${esc(r.job_id)}"',
+        "在途守卫（双击不静默多花一次 k）": "btn.disabled = true; btn.textContent",
+        "结果按 job 分块（并发不互相覆盖）": '"job-" + jobId',
+        "已用秒数（冷启动不像假死）": "已用 ${el.toFixed(0)}s",
+        "锚点不被常驻顶栏吃掉": "scroll-margin-top",
+    }
+    missing = [k for k, v in need.items() if v not in html]
+    assert not missing, f"页面缺这些按钮/导航：{missing}"
+
+
+def test_source_route_serves_the_strategy_file_and_refuses_traversal(http):
+    """「查看定义体」要有只读路由；且**不许**拼用户输入做路径（遍历必须 404）。"""
+    if not (ROOT / "research" / "preset_defs" / "us_reversal_dip_v1.py").is_file():
+        pytest.skip("定义体不在（不应发生）")
+    code, body = _get(http + "/api/source/preset/us_reversal_dip_v1")
+    assert code == 200
+    d = json.loads(body)
+    assert d["path"] == "research/preset_defs/us_reversal_dip_v1.py"
+    assert "PRESET" in d["text"] and d["bytes"] == len(d["text"])
+    assert _get(http + "/api/source/family/nope")[0] == 404
+    assert _get(http + "/api/source/preset/..%2F..%2Fetc%2Fpasswd")[0] == 404
+    assert _get(http + "/api/source/preset/" + "a" * 80)[0] == 404      # 超长名字也拒
+
+
+def test_reports_route_lists_past_reports_and_parses_their_header(http, tmp_path, monkeypatch):
+    """`/api/reports` 是"结果可回访"的服务端一半：文件名就是 id，名字与窗口**从报告自身读回**。
+
+    为什么要从报告头部读：报告本来就有 title 与副标题（策略名/窗口），另存一份元数据
+    就是"一份事实两处"（本仓库的老毛病）。
+    """
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    (tmp_path / "web_report_abc123def456.html").write_text(
+        "<!doctype html><title>回测明细 · family:xs_flow</title>"
+        "<div class='sub'>窗口 2025-01-01 → 2025-10-13 ｜ 成交 28 笔</div>", encoding="utf-8")
+    (tmp_path / "not_a_report.html").write_text("<title>别的</title>", encoding="utf-8")
+    code, body = _get(http + "/api/reports")
+    assert code == 200
+    reps = json.loads(body)["reports"]
+    assert [r["job_id"] for r in reps] == ["abc123def456"], "只该列 web_report_*"
+    assert reps[0]["name"] == "family:xs_flow"
+    assert reps[0]["window"] == ["2025-01-01", "2025-10-13"]

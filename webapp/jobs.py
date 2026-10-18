@@ -109,7 +109,9 @@ def _metrics(res: dict, eq: pd.DataFrame, reg, lo: str, hi: str, k: int) -> dict
 def submit(req: dict) -> dict:
     """收一份回测请求，立刻返回任务句柄（前端轮询 status）。"""
     job_id = uuid.uuid4().hex[:12]
-    job = {"id": job_id, "status": "queued", "step": "排队", "steps": [],
+    # 初始 step 就把"最慢的那一步"说出来（首次冷启动 30–70 秒在界面上不能是假死）
+    job = {"id": job_id, "status": "queued",
+           "step": "取链路（首次约 30–70 秒；命中缓存近 0 秒）", "steps": [],
            "request": req, "metrics": None, "report": None, "error": None,
            "started": obs.now_iso(), "seconds": None}
     _JOBS[job_id] = job
@@ -198,7 +200,11 @@ def _run(job_id: str) -> None:
                    "params": req.get("params") or (P.get("family_params") or None),
                    "n_trials_k": k, "prior_runs": prior,
                    "n_trades": m["n_trades"], "excess": m["excess"], "dsr": m["dsr"],
-                   "note": req.get("note", "")}
+                   # ⚠️ job_id 必须记：报告文件名就是 web_report_<job_id>.html，不记它这条台账
+                   # 就是**死胡同** —— 想再看一眼那次结果只能重跑，而重跑会把 k 推高
+                   # （拿统计预算买回已经付过费的结果）。审计实测：盘上 6 份报告、界面 0 个入口。
+                   "job_id": job_id, "report": f"web_report_{job_id}.html",
+                   "seconds": job["seconds"], "note": req.get("note", "")}
             RUNS_LEDGER.parent.mkdir(parents=True, exist_ok=True)
             with RUNS_LEDGER.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")

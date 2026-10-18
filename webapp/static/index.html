@@ -6,19 +6,33 @@
 <title>usagent 策略平台</title>
 <style>
 :root{--bg:#0f1115;--fg:#e6e8ee;--dim:#9aa3b2;--line:#262b36;--up:#31c48d;--dn:#f05252;
-      --warn:#f6ad55;--card:#161a21}
+      --warn:#f6ad55;--card:#161a21;--btn:#22303f;--btnb:#33475c}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,
      "Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif}
-.wrap{max-width:1280px;margin:0 auto;padding:22px 18px 60px}
-h1{font-size:20px;margin:0 0 6px}
-h2{font-size:16px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.wrap{max-width:1280px;margin:0 auto;padding:0 18px 60px}
+/* 顶栏常驻：策略多了以后，"我在哪 / 怎么跳"必须是零成本操作 */
+.top{position:sticky;top:0;z-index:9;background:rgba(15,17,21,.96);border-bottom:1px solid var(--line);
+     padding:10px 0 9px;backdrop-filter:blur(6px)}
+.top .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.top h1{font-size:16px;margin:0;white-space:nowrap}
+.top a.nav{color:var(--dim);text-decoration:none;font-size:12.5px;border:1px solid var(--line);
+           border-radius:999px;padding:2px 10px}
+.top a.nav:hover{color:var(--fg);border-color:var(--btnb)}
+input[type=search]{background:#0c0f13;color:var(--fg);border:1px solid var(--line);border-radius:6px;
+                   padding:5px 9px;font-size:13px;min-width:230px}
+h2{font-size:16px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line);
+   scroll-margin-top:64px}       /* 常驻顶栏会吃掉锚点落点（审计实测 titleVisible=false） */
 .sub{color:var(--dim);font-size:12.5px}
 .banner{margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--warn);
         background:#1a1712;border-radius:6px;font-size:12.5px;color:#f0d9b5}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(420px,100%),1fr));gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:13px 14px}
+.card{scroll-margin-top:64px}
+.card:target{border-color:var(--up)}
 .card h3{margin:0 0 4px;font-size:14.5px}
+.card h3 a{color:inherit;text-decoration:none}
+.card h3 a:hover{color:var(--up)}
 .card .mech{color:var(--dim);font-size:12.5px;margin:0 0 9px}
 table{width:100%;border-collapse:collapse;font-size:12.5px}
 td,th{padding:3px 6px;border-bottom:1px solid #20242c;vertical-align:top;text-align:left}
@@ -28,45 +42,67 @@ td.k{color:var(--dim);width:46%}
          border-radius:5px;font-size:12px;color:#cfe3d6;max-height:150px;overflow:auto;white-space:pre-wrap}
 .verdict.none{border-left-color:var(--warn);color:#f0d9b5}
 .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0}
-input[type=date]{background:#0c0f13;color:var(--fg);border:1px solid var(--line);border-radius:5px;
+input[type=date],select{background:#0c0f13;color:var(--fg);border:1px solid var(--line);border-radius:5px;
                  padding:4px 6px;font-size:12.5px}
-button{background:#22303f;color:#dce7f2;border:1px solid #33475c;border-radius:6px;padding:6px 13px;
-       font-size:13px;cursor:pointer}
+select.grid{border-color:var(--btnb)}
+button{background:var(--btn);color:#dce7f2;border:1px solid var(--btnb);border-radius:6px;padding:6px 12px;
+       font-size:12.5px;cursor:pointer}
 button:hover{background:#2a3b4d}
+button.mini{padding:3px 9px;font-size:12px;background:transparent}
 button:disabled{opacity:.5;cursor:default}
 .pos{color:var(--up)}.neg{color:var(--dn)}.warn{color:var(--warn)}
-.run{margin:22px 0 0;padding:14px;border:1px solid #33475c;border-radius:8px;background:#12171e;display:none}
+details.src{margin:9px 0 0}
+details.src pre{max-height:320px;overflow:auto;background:#0c0f13;border:1px solid var(--line);
+                border-radius:6px;padding:9px;font-size:11.5px;line-height:1.45}
+.run{margin:22px 0 0;padding:14px;border:1px solid var(--btnb);border-radius:8px;background:#12171e;display:none}
 .steps{font-size:12.5px;color:var(--dim);margin:8px 0}
-.steps div{padding:1px 0}
 .metrics{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px 14px;margin-top:8px}
 .metrics div{font-size:12.5px;display:flex;justify-content:space-between;border-bottom:1px solid #1d222a;padding:2px 0}
 .metrics span:first-child{color:var(--dim)}
 iframe{width:100%;height:70vh;border:1px solid var(--line);border-radius:6px;background:#fff;margin-top:10px}
 code{font-size:12px;color:#cbd5e1}
-ul.runs{margin:6px 0 0;padding-left:18px;font-size:12.5px;color:var(--dim)}
+table.ledger{font-size:12.5px}
+table.ledger th{cursor:pointer;user-select:none;white-space:nowrap}
+table.ledger th:hover{color:var(--fg)}
+table.ledger td{white-space:nowrap}
+.clip{background:#0c0f13;border:1px solid var(--line);border-radius:6px;padding:7px 9px;margin-top:8px;
+      font-size:11.5px;color:#cbd5e1;white-space:pre-wrap;word-break:break-all;display:none}
 </style>
 </head>
-<body><div class="wrap">
+<body>
+<div class="top"><div class="wrap" style="padding-bottom:0"><div class="row">
+  <h1>usagent 策略平台</h1>
+  <a class="nav" href="#presets">交付 preset</a>
+  <a class="nav" href="#families">策略族</a>
+  <a class="nav" href="#run">本次结果</a>
+  <a class="nav" href="#reports">历史报告</a>
+  <a class="nav" href="#runs">运行台账</a>
+  <input type="search" id="q" placeholder="搜索：名字 / 机制 / 参数…（⌘K 聚焦）">
+  <span class="sub" id="count"></span>
+</div></div></div>
 
-<h1>usagent 策略平台</h1>
-<div class="sub">目录来自注册表本身（<code>research/preset_defs/</code> · <code>research/family_defs/</code>）——
-  新增一条策略后刷新本页即可。点「回测」跑一次，结果用**同一个**公共渲染能力出图（K 线 / 入场价 /
-  出场价 / SL·TP / 当日指标）。</div>
-
+<div class="wrap">
 <div class="banner" id="banner">正在读目录…</div>
-
 <div id="content"></div>
-
-<div class="run" id="run">
-  <div id="runhead"><b>正在回测…</b></div>
+<div class="run" id="run" style="display:block">
+  <div id="runhead" class="sub">还没跑过 —— 在上面任一策略卡片上点「回测」。
+    结果会显示在这里（含逐笔报告），跑过的每一次都留在下面的台账与「历史报告」里。</div>
   <div class="steps" id="steps"></div>
   <div id="result"></div>
 </div>
 
-<h2>最近运行（台账）</h2>
-<div class="sub">每点一次都会记账：<code>research/results/web_runs.jsonl</code>。
-  一个能一键重跑的界面会诱发 p-hacking —— 纪律的做法不是禁止点击，而是**让次数可见**（§5 迭代记账）。</div>
-<ul class="runs" id="runs"></ul>
+<h2 id="runs">运行台账</h2>
+<div class="sub">每点一次都会记账（<code>research/results/web_runs.jsonl</code>）。点列头可排序 ——
+  「同一策略两次」或「两条策略」的对比就看这张表。<b>k 会随点击次数上涨</b>（§5 迭代记账：
+  能一键重跑的界面会诱发 p-hacking，纪律不是禁止点击，而是让次数可见）。</div>
+<div id="ledger"></div>
+
+<h2 id="reports">历史报告</h2>
+<div class="sub">盘上已有的报告（<code>research/results/web_report_*.html</code>）。报告是自包含 HTML，
+  直接打开即可看 K 线 / 入场价 / 出场价 / SL·TP / 当日指标；<b>不必为了再看一眼而重跑</b> ——
+  重跑会推高这条策略的 k（§5 迭代记账）。</div>
+<div id="reports_body"></div>
+</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -74,146 +110,298 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&l
 const pct = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v*100).toFixed(d) + "%";
 const num = (v, d=3) => (v === null || v === undefined || !isFinite(v)) ? "—" : v.toFixed(d);
 const HOLDOUT = ["2025-10-14", "2026-10-13"];
+const TRAIN = ["2024-04-09", "2025-10-13"];
+const FULL = ["2024-04-09", "2026-10-14"];
 const overlaps = (a, b) => !(a[1] < b[0] || b[1] < a[0]);
-const DEFAULT_WINDOW = ["2024-04-09", "2026-10-14"];
+let CAT = null, RUNS = [], REPORTS = [], SORT = {key: "ts", dir: -1};
+const T0 = {};                       // job id → 提交时刻（显示「已用 Ns」，冷启动不该像假死）
 
-let CAT = null;
+// ---------------------------------------------------------------- 目录与卡片
+
+function windowPresets(e) {
+  const own = (e.kind === "preset") ? e.window : FULL;
+  return [["训练窗", TRAIN], ["全窗", FULL], ["声明窗", own], ["holdout", HOLDOUT]];
+}
+
+function familyParamControls(e) {
+  if (e.kind !== "family" || !Object.keys(e.grid).length) return "";
+  // 只允许选**预注册网格上的取值**：网格就是这次搜索的空间，自由取参会让这次运行
+  // 落在预注册空间之外（§5）。所以这里是 select，不是自由输入框。
+  const rows = Object.entries(e.grid).map(([k, vals]) =>
+    `<tr><td class="k">${esc(k)}</td><td><select class="grid" id="p-${e.id}-${k}">${
+      vals.map(v => `<option value='${esc(JSON.stringify(v))}'${JSON.stringify(v) === JSON.stringify(e.default_params[k]) ? " selected" : ""}>${esc(JSON.stringify(v))}</option>`).join("")
+    }</select></td></tr>`).join("");
+  return `<table>${rows}</table>
+    <div class="sub">族的参数只给**预注册网格**上的取值（默认=中点）。要跑网格之外的值，
+    应先在定义体里改网格并重跑搜索 —— 那是一次新的搜索，n_trials 要跟着涨。</div>`;
+}
 
 function paramTable(e) {
-  // preset：引擎口径（与 CLI / 报告同一个函数）；族：网格 + 本组参数
   if (e.kind === "preset") {
     const rows = e.engine_spec.map(x => `<tr><td class="k">${esc(x.label)}</td><td>${esc(x.value)}</td></tr>`).join("");
-    const s = e.strategy;
-    const extra = s.type === "family"
-      ? `<tr><td class="k">入场族</td><td>${esc(s.family)} ${esc(JSON.stringify(s.family_params))}</td></tr>`
-      : `<tr><td class="k">信号参数</td><td>${esc(JSON.stringify(s.signal_params))}</td></tr>`;
+    const st = e.strategy;
+    const extra = st.type === "family"
+      ? `<tr><td class="k">入场族</td><td>${esc(st.family)} ${esc(JSON.stringify(st.family_params))}</td></tr>`
+      : `<tr><td class="k">信号参数</td><td>${esc(JSON.stringify(st.signal_params))}</td></tr>`;
     return `<table>${rows}${extra}
       <tr><td class="k">试验次数 n_comparisons</td><td>${e.n_comparisons}</td></tr>
       <tr><td class="k">validated</td><td>${e.validated ? "true" : "false"}</td></tr>
       <tr><td class="k">锁窗口</td><td>${esc(e.window.join(" .. "))}${e.touches_holdout
         ? ' <span class="warn">（含 holdout 天数）</span>' : ""}</td></tr>
+      <tr><td class="k">定义体</td><td><code>research/preset_defs/${esc(e.id)}.py</code></td></tr>
     </table>`;
   }
   const grid = Object.entries(e.grid).map(([k, v]) =>
-    `<tr><td class="k">${esc(k)}</td><td>${esc(JSON.stringify(v))}</td></tr>`).join("") || "<tr><td>（参考族：无网格）</td><td></td></tr>";
+    `<tr><td class="k">${esc(k)}</td><td>${esc(JSON.stringify(v))}</td></tr>`).join("") ||
+    "<tr><td>（参考族：无网格，不参与搜索）</td><td></td></tr>";
   return `<table>${grid}
     <tr><td class="k">网格组数</td><td>${e.grid_size}</td></tr>
-    <tr><td class="k">默认取哪一组</td><td>${esc(JSON.stringify(e.default_params))}
-      <span class="sub">（网格中点，不是搜索最优）</span></td></tr>
     <tr><td class="k">排序分</td><td>${esc(e.score_col)}${e.score_negated ? "（取负）" : ""}</td></tr>
     <tr><td class="k">需要 regime</td><td>${e.needs_regime ? "是" : "否"}</td></tr>
     ${e.control_arm ? `<tr><td class="k">方向对照臂</td><td>${esc(e.control_arm)}</td></tr>` : ""}
     ${e.delivered_as.length ? `<tr><td class="k">已交付为</td><td>${esc(e.delivered_as.join(", "))}</td></tr>` : ""}
+    <tr><td class="k">定义体</td><td><code>research/family_defs/${esc(e.id)}.py</code></td></tr>
   </table>`;
 }
 
-function card(e, runs) {
-  const w = (e.kind === "preset") ? e.window : DEFAULT_WINDOW;
+function card(e, runCount) {
+  const w = (e.kind === "preset") ? e.window : FULL;
   const held = overlaps(w, HOLDOUT);
   const verdict = (e.verdict || "").trim();
   const vbox = e.kind === "preset"
     ? `<div class="verdict ${verdict ? "" : "none"}">${verdict ? esc(verdict) : "（本策略没有声明负面证据 —— §5 要求负面证据与参数同时记录）"}</div>`
     : `<div class="verdict none">族本身没有 VERDICT（它是候选机制，不是交付物）。跑出来的报告会就地写明这一点。</div>`;
-  return `<div class="card">
-    <h3>${esc(e.name)}</h3>
+  const a = `${e.kind}-${e.id}`;
+  return `<div class="card" id="${a}">
+    <h3><a href="#${a}">${esc(e.name)}</a></h3>
     <p class="mech">${esc(e.kind === "preset" ? (e.is_cli_default ? "preset · CLI 默认" : "preset")
       : "族 · " + e.mechanism)}</p>
     ${paramTable(e)}
+    ${familyParamControls(e)}
     <div class="bar">
-      <label>窗口 <input type="date" id="lo-${e.kind}-${e.id}" value="${w[0]}">
-        → <input type="date" id="hi-${e.kind}-${e.id}" value="${w[1]}"></label>
-      <button onclick="run('${e.kind}','${e.id}')">回测</button>
-      <span class="sub">本条已被跑过 <b>${runs[e.kind + ":" + e.id] || 0}</b> 次</span>
-      <span class="sub ${held ? "warn" : ""}" id="flag-${e.kind}-${e.id}">${held ? "⚠ 与 holdout 重叠（只准读一次）" : ""}</span>
+      ${windowPresets(e).map(([lab, ww]) =>
+        `<button class="mini" onclick="setWindow('${e.kind}','${e.id}','${ww[0]}','${ww[1]}')">${lab}</button>`).join("")}
     </div>
+    <div class="bar">
+      <label>窗口 <input type="date" id="lo-${a}" value="${w[0]}">
+        → <input type="date" id="hi-${a}" value="${w[1]}"></label>
+      <button id="btn-${a}" onclick="run('${e.kind}','${e.id}')">回测</button>
+      <button class="mini" onclick="copyCmd('${e.kind}','${e.id}')">复制命令</button>
+      <button class="mini" onclick="showSrc('${e.kind}','${e.id}')">查看定义体</button>
+      <span class="sub">已跑 <b>${runCount || 0}</b> 次</span>
+    </div>
+    <div class="clip" id="clip-${a}"></div>
+    <div class="sub ${held ? "warn" : ""}" id="flag-${a}">${held ? "⚠ 与 holdout 重叠（只准读一次）" : ""}</div>
+    <details class="src" id="src-${a}"><summary class="sub">定义体源码（只读）</summary>
+      <pre id="srcbody-${a}">点「查看定义体」加载…</pre></details>
     ${vbox}
   </div>`;
 }
 
-async function load() {
+// ---------------------------------------------------------------- 交互
+
+function setWindow(kind, id, lo, hi) {
+  $("lo-" + kind + "-" + id).value = lo; $("hi-" + kind + "-" + id).value = hi;
+  revalidate(kind, id);
+}
+function revalidate(kind, id) {
+  const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
+  const f = $("flag-" + kind + "-" + id);
+  const bad = !(lo < hi), held = overlaps([lo, hi], HOLDOUT);
+  f.textContent = bad ? "✗ 窗口非法（起点必须早于终点）" : (held ? "⚠ 与 holdout 重叠（只准读一次）" : "");
+  f.className = "sub " + (bad || held ? "warn" : "");
+}
+function currentParams(kind, id) {
+  if (kind !== "family") return null;
+  const e = CAT.families.find(x => x.id === id); const out = {};
+  Object.keys(e.grid).forEach(k => { const el = $("p-" + id + "-" + k); if (el) out[k] = JSON.parse(el.value); });
+  return out;
+}
+function cliCmd(kind, id) {
+  const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
+  const out = `research/results/report_${id}_${lo}_${hi}.html`;
+  if (kind === "preset") return `python3 -m research.render_report --preset ${id} --lo ${lo} --hi ${hi} --out ${out}`;
+  const pr = JSON.stringify(currentParams(kind, id));
+  return `python3 -m research.render_report --family ${id} --params '${pr}' --lo ${lo} --hi ${hi} --out ${out}`;
+}
+function copyCmd(kind, id) {
+  const cmd = cliCmd(kind, id), box = $("clip-" + kind + "-" + id);
+  box.style.display = "block";
+  navigator.clipboard?.writeText(cmd).then(
+    () => { box.textContent = "已复制到剪贴板：\n" + cmd; },
+    () => { box.textContent = "（复制失败，请手动选中）\n" + cmd; });
+}
+async function showSrc(kind, id) {
+  const d = $("src-" + kind + "-" + id); d.open = true;
+  const body = $("srcbody-" + kind + "-" + id);
+  if (body.dataset.loaded) return;
+  body.textContent = "加载中…";
+  const j = await (await fetch(`/api/source/${kind}/${id}`)).json();
+  body.textContent = j.error ? ("读不到：" + j.error) : (j.path + "\n" + "─".repeat(60) + "\n" + j.text);
+  body.dataset.loaded = "1";
+}
+function applyFilter() {
+  const q = ($("q").value || "").trim().toLowerCase();
+  let shown = 0;
+  document.querySelectorAll(".card").forEach(c => {
+    const hit = !q || c.innerText.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
+    c.style.display = hit ? "" : "none"; if (hit) shown++;
+  });
+  $("count").textContent = q ? `${shown} / ${CAT.presets.length + CAT.families.length} 张卡片匹配` : "";
+}
+
+async function loadCatalog() {
+  // **只渲染一次**。此前每跑完一次回测都整块重渲 ⇒ 用户改过的窗口、族参数、展开的源码
+  // 被静默清空（审计实测）。刷新台账是另一件事（refreshLedger），不要混在一起。
   CAT = await (await fetch("/api/catalog")).json();
-  const rr = await (await fetch("/api/runs")).json();
-  const runs = {};
-  (rr.runs || []).forEach(r => { runs[r.strategy_id] = (runs[r.strategy_id] || 0) + 1; });
   $("banner").innerHTML = `目录：<b>${CAT.presets.length}</b> 条 preset · <b>${CAT.families.length}</b> 个族 ·
-    其中 <b>${CAT.notes.holdout_presets}</b> 条 preset 的声明窗口含 holdout 天数（页面上标红）。
-    族的默认参数 = ${esc(CAT.notes.family_default_params)}；${esc(CAT.notes.multiplicity)}`;
+    其中 <b>${CAT.notes.holdout_presets}</b> 条 preset 的声明窗口含 holdout 天数（标红）。
+    族的参数默认=网格中点，可在卡片里改（只列网格上的取值）；${esc(CAT.notes.multiplicity)}`;
+  const rr = await (await fetch("/api/runs")).json();
+  const runs = {}; (rr.runs || []).forEach(r => { runs[r.strategy_id] = (runs[r.strategy_id] || 0) + 1; });
   $("content").innerHTML =
-    `<h2>交付 preset（6 条）</h2><div class="grid">${CAT.presets.map(e => card(e, runs)).join("")}</div>
-     <h2>策略族（候选机制，15 个）</h2><div class="grid">${CAT.families.map(e => card(e, runs)).join("")}</div>`;
-  // 窗口一改就重判 holdout 标红
-  // 输入框 id = "<lo|hi>-<kind>-<策略id>"；kind 只有 preset/family 两种，按前缀剥掉即可
+    `<h2 id="presets">交付 preset（${CAT.presets.length} 条）</h2>
+     <div class="grid">${CAT.presets.map(e => card(e, runs["preset:" + e.id])).join("")}</div>
+     <h2 id="families">策略族（候选机制，${CAT.families.length} 个）</h2>
+     <div class="grid">${CAT.families.map(e => card(e, runs["family:" + e.id])).join("")}</div>`;
   document.querySelectorAll("input[type=date]").forEach(inp => inp.addEventListener("change", () => {
     const rest = inp.id.replace(/^(lo|hi)-/, "");
     const kind = rest.startsWith("preset-") ? "preset" : "family";
-    const id = rest.slice(kind.length + 1);
-    const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
-    const f = $("flag-" + kind + "-" + id);
-    f.textContent = overlaps([lo, hi], HOLDOUT) ? "⚠ 与 holdout 重叠（只准读一次）" : "";
-    f.className = "sub " + (overlaps([lo, hi], HOLDOUT) ? "warn" : "");
+    revalidate(kind, rest.slice(kind.length + 1));
   }));
-  $("runs").innerHTML = (rr.runs || []).map(r =>
-    `<li>${esc(r.ts)} · <b>${esc(r.strategy_id)}</b> · ${esc((r.window || []).join(".."))} ·
-      ${r.n_trades} 笔 · 超额 ${pct(r.excess)} · k=${r.n_trials_k}${r.note ? " · " + esc(r.note) : ""}</li>`
-    ).join("") || "<li>（还没有运行记录）</li>";
+  $("q").addEventListener("input", applyFilter);
+  document.addEventListener("keydown", (ev) => {
+    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "k") { ev.preventDefault(); $("q").focus(); }
+  });
+  applyFilter();
+}
+
+async function refreshLedger() {
+  RUNS = (await (await fetch("/api/runs")).json()).runs || [];
+  REPORTS = (await (await fetch("/api/reports")).json()).reports || [];
+  renderLedger(); renderReports();
+}
+
+function renderLedger() {
+  const cols = [["ts","时间"],["strategy_id","策略"],["window","窗口"],["n_trades","笔数"],
+                ["excess","超额"],["dsr","DSR"],["n_trials_k","k"],["note","备注"]];
+  if (!RUNS.length) {
+    $("ledger").innerHTML = `<div class="sub">还没有运行记录 —— 在上面任一策略卡片上点「回测」。</div>`;
+    return;
+  }
+  const rows = [...RUNS].sort((a, b) => {
+    let x = a[SORT.key], y = b[SORT.key];
+    if (Array.isArray(x)) x = x.join(); if (Array.isArray(y)) y = y.join();
+    return (x > y ? 1 : x < y ? -1 : 0) * SORT.dir;
+  });
+  $("ledger").innerHTML = `<table class="ledger"><thead><tr>${cols.map(([k, lab]) =>
+    `<th onclick="sortLedger('${k}')">${lab}${SORT.key === k ? (SORT.dir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}
+    <th>报告</th></tr></thead><tbody>${rows.map(r => `<tr>
+      <td>${esc((r.ts || "").slice(0, 19))}</td>
+      <td><a href="#${esc(r.strategy_id.replace(":", "-"))}" style="color:#cbd5e1">${esc(r.strategy_id)}</a></td>
+      <td>${esc((r.window || []).join(".."))}</td><td>${r.n_trades ?? "—"}</td>
+      <td class="${(r.excess || 0) >= 0 ? "pos" : "neg"}">${pct(r.excess)}</td>
+      <td>${num(r.dsr)}</td><td>${r.n_trials_k ?? "—"}</td><td>${esc((r.note || "").slice(0, 24))}</td>
+      <td>${r.job_id ? `<a href="/report/${esc(r.job_id)}" target="_blank">打开</a>` : "—"}</td>
+    </tr>`).join("")}</tbody></table>`;
+}
+function renderReports() {
+  if (!REPORTS.length) { $("reports_body").innerHTML = `<div class="sub">（盘上还没有报告）</div>`; return; }
+  $("reports_body").innerHTML = `<table class="ledger"><thead><tr><th>时间</th><th>策略</th>
+    <th>窗口</th><th>大小</th><th>打开</th></tr></thead><tbody>${REPORTS.map(r => `<tr>
+      <td>${new Date(r.mtime * 1000).toLocaleString().slice(0, 19)}</td>
+      <td>${esc(r.name)}</td><td>${esc((r.window || []).join(".."))}</td><td>${r.kb} KB</td>
+      <td><a href="/report/${esc(r.job_id)}" target="_blank">打开报告</a></td>
+    </tr>`).join("")}</tbody></table>`;
+}
+function sortLedger(key) { SORT = {key, dir: SORT.key === key ? -SORT.dir : -1}; renderLedger(); }
+function jumpToHash() {
+  const el = document.getElementById(location.hash.replace("#", ""));
+  if (el) { el.scrollIntoView({block: "start"}); el.style.borderColor = "var(--up)"; }
+}
+
+// ---------------------------------------------------------------- 回测
+
+function panel(jobId, kind, id, lo, hi, params) {
+  const d = document.createElement("div");
+  d.id = "job-" + jobId;
+  d.innerHTML = `<div class="jhead"><b>${esc(kind)}:${esc(id)}</b>
+    <span class="sub">${esc(lo)} .. ${esc(hi)}${params ? " · 参数 " + esc(JSON.stringify(params)) : ""}
+     · job ${esc(jobId)}</span>
+    <div class="sub">完整命令：<code>${esc(cliCmd(kind, id))}</code></div></div>
+    <div class="steps jsteps"><div>… 已提交，等待执行</div></div><div class="jbody"></div>`;
+  $("result").appendChild(d);
+  return d;
 }
 
 async function run(kind, id) {
   const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
+  if (!(lo < hi)) { alert("窗口非法：起点必须早于终点"); return; }
+  const btn = $("btn-" + kind + "-" + id);
+  if (btn.disabled) return;                       // 双击守卫：一次点击 = 一次提交 = k+1
+  const params = currentParams(kind, id);
   $("run").style.display = "block";
-  $("result").innerHTML = ""; $("steps").innerHTML = "";
-  $("runhead").innerHTML = `<b>正在回测 ${esc(kind)}:${esc(id)}</b> <span class="sub">${esc(lo)} .. ${esc(hi)}</span>`;
-  const r = await fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({kind, id, lo, hi})});
-  const j = await r.json();
-  if (j.error) { $("runhead").innerHTML = `<b class="neg">提交失败：${esc(j.error)}</b>`; return; }
-  poll(j.id);
+  $("runhead").classList.remove("sub");
+  $("runhead").innerHTML = `<b>正在回测…</b>`;
+  btn.disabled = true; btn.textContent = "回测中…";
+  try {
+    const r = await fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({kind, id, lo, hi, params})});
+    const j = await r.json();
+    if (j.error) { $("runhead").innerHTML = `<b class="neg">提交失败：${esc(j.error)}</b>`; return; }
+    T0[j.id] = Date.now();
+    panel(j.id, kind, id, lo, hi, params);
+    $("run").scrollIntoView({block: "start"});
+    poll(j.id, kind, id);
+  } finally {
+    setTimeout(() => { btn.disabled = false; btn.textContent = "回测"; }, 1500);
+  }
 }
 
-async function poll(id) {
-  const st = await (await fetch("/api/job/" + id)).json();
-  if (!st || st.error) { $("runhead").innerHTML = `<b class="neg">任务丢失</b>`; return; }
-  $("steps").innerHTML = (st.steps || []).map(s =>
-    `<div>✓ ${esc(s.name)} <span class="sub">${s.seconds}s</span></div>`).join("")
-    + (st.status === "running" ? `<div>… ${esc(st.step)}</div>` : "");
-  if (st.status === "running" || st.status === "queued") { setTimeout(() => poll(id), 900); return; }
+async function poll(jobId, kind, id) {
+  const box = $("job-" + jobId);
+  const st = await (await fetch("/api/job/" + jobId)).json();
+  if (!st || st.error) { if (box) box.querySelector(".jbody").innerHTML = `<b class="neg">任务丢失</b>`; return; }
+  const el = (Date.now() - (T0[jobId] || Date.now())) / 1000;
+  if (box) {
+    box.querySelector(".jsteps").innerHTML = (st.steps || []).map(s =>
+      `<div>✓ ${esc(s.name)} <span class="sub">${s.seconds}s</span></div>`).join("")
+      + (st.status === "running" || st.status === "queued"
+          ? `<div>… ${esc(st.step)} <span class="sub">已用 ${el.toFixed(0)}s</span></div>` : "");
+  }
+  if (st.status === "running" || st.status === "queued") { setTimeout(() => poll(jobId, kind, id), 900); return; }
   if (st.status === "error") {
-    $("runhead").innerHTML = `<b class="neg">回测失败</b>`;
-    $("result").innerHTML = `<div class="verdict none">${esc(st.error)}</div>`;
+    if (box) box.querySelector(".jbody").innerHTML = `<div class="verdict none">${esc(st.error)}</div>`;
     return;
   }
-  const m = st.metrics, k = m.k_breakdown;
-  const cls = (v) => v >= 0 ? "pos" : "neg";
-  $("runhead").innerHTML = `<b>回测完成</b> <span class="sub">${esc(st.seconds)}s ·
-    报告自检 ${st.selfcheck && st.selfcheck.length ? "**失败**：" + esc(st.selfcheck.join("；")) : "通过"}</span>`;
-  $("result").innerHTML = `
-    <div class="metrics">
-      <div><span>成交笔数</span><b>${m.n_trades}</b></div>
-      <div><span>自身收益</span><b class="${cls(m.own_ret)}">${pct(m.own_ret)}</b></div>
-      <div><span>CAGR</span><b class="${cls(m.cagr)}">${pct(m.cagr)}</b></div>
-      <div><span>平均敞口</span><b>${pct(m.exposure, 1)}</b></div>
-      <div><span>同窗等权池 CAGR</span><b class="${cls(m.bench_cagr)}">${pct(m.bench_cagr)}</b></div>
-      <div><span>曝光匹配超额</span><b class="${cls(m.excess)}">${pct(m.excess)}</b></div>
-      <div><span>超额/敞口</span><b class="${cls(m.excess_per_exposure)}">${pct(m.excess_per_exposure, 1)}</b></div>
-      <div><span>beta</span><b>${num(m.beta, 2)}</b></div>
-      <div><span>alpha 年化</span><b class="${cls(m.alpha_annual)}">${pct(m.alpha_annual)}</b></div>
-      <div><span>t(alpha)</span><b>${num(m.t_alpha, 2)}</b></div>
-      <div><span>判据折为正</span><b>${m.folds_positive}/4</b></div>
-      <div><span>最大回撤</span><b class="neg">${pct(m.maxdd, 1)}</b></div>
-      <div><span>E[R]</span><b class="${cls(m.E_R)}">${num(m.E_R)}</b></div>
-      <div><span>胜率</span><b>${pct(m.win_pct, 1)}</b></div>
-      <div><span>盈亏比 PF</span><b>${num(m.profit_factor, 2)}</b></div>
-      <div><span>最好 10% 占总 R</span><b>${pct(m.top_decile_share, 1)}</b></div>
-      <div><span>DSR</span><b>${num(m.dsr)}</b></div>
-      <div><span>DSR 的 k</span><b>${m.dsr_k} <span class="sub">(声明 ${k.declared_or_grid} +
-        平台已跑 ${k.platform_runs_before})</span></b></div>
-    </div>
-    <div class="bar"><a href="${st.report}" target="_blank"><button>在新窗口打开逐笔报告（K线/入场价/出场价/SL·TP/指标）</button></a>
-      <span class="sub">报告是自包含 HTML（无外链、无脚本）—— 可直接下载归档</span></div>
-    <iframe src="${st.report}" loading="lazy"></iframe>`;
-  load();   // 刷新台账与计数
+  const m = st.metrics, k = m.k_breakdown, cls = (v) => v >= 0 ? "pos" : "neg";
+  const cells = [["成交笔数", m.n_trades, ""], ["自身收益", pct(m.own_ret), cls(m.own_ret)],
+    ["CAGR", pct(m.cagr), cls(m.cagr)], ["平均敞口", pct(m.exposure, 1), ""],
+    ["同窗等权池 CAGR", pct(m.bench_cagr), cls(m.bench_cagr)],
+    ["曝光匹配超额", pct(m.excess), cls(m.excess)],
+    ["超额/敞口", pct(m.excess_per_exposure, 1), cls(m.excess_per_exposure)],
+    ["beta", num(m.beta, 2), ""], ["alpha 年化", pct(m.alpha_annual), cls(m.alpha_annual)],
+    ["t(alpha)", num(m.t_alpha, 2), ""], ["判据折为正", m.folds_positive + "/4", ""],
+    ["最大回撤", pct(m.maxdd, 1), "neg"], ["E[R]", num(m.E_R), cls(m.E_R)],
+    ["胜率", pct(m.win_pct, 1), ""], ["盈亏比 PF", num(m.profit_factor, 2), ""],
+    ["最好 10% 占总 R", pct(m.top_decile_share, 1), ""], ["DSR", num(m.dsr), ""],
+    ["DSR 的 k", `${m.dsr_k} <span class="sub">(声明 ${k.declared_or_grid} + 平台已跑 ${k.platform_runs_before})</span>`, ""]];
+  if (box) {
+    box.querySelector(".jbody").innerHTML = `
+      <div class="sub">完成，用时 ${esc(st.seconds)}s ·
+        报告自检 ${st.selfcheck && st.selfcheck.length
+          ? "<b class='neg'>失败：" + esc(st.selfcheck.join("；")) + "</b>" : "通过"}
+        ${st.hint ? " · " + esc(st.hint) : ""}</div>
+      <div class="metrics">${cells.map(([lab, val, c]) =>
+        `<div><span>${lab}</span><b class="${c}">${val}</b></div>`).join("")}</div>
+      <div class="bar"><a href="${st.report}" target="_blank"><button>在新窗口打开逐笔报告</button></a>
+        <a href="${st.report}" download><button class="mini">下载报告 HTML</button></a>
+        <span class="sub">报告自包含（无外链、无脚本）—— 下面就是它；它也进了「历史报告」</span></div>
+      <iframe src="${st.report}" loading="lazy"></iframe>`;
+  }
+  refreshLedger();                       // 只刷台账/历史，**不**重渲目录（否则会吞掉用户输入）
 }
 
-load();
+loadCatalog().then(() => { refreshLedger().then(jumpToHash); });
 </script>
-</div></body></html>
+</body></html>

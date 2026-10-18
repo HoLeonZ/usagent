@@ -11,6 +11,8 @@
     POST /api/run           提交回测 {kind,id,lo,hi,params?} → {job id}
     GET  /api/job/<id>      任务状态（steps / metrics / report 链接）
     GET  /api/runs          台账（含"这条策略已被跑过几次"）
+    GET  /api/reports       盘上已有的报告（结果可回访，不必为了看一眼而重跑）
+    GET  /api/source/<kind>/<id>   只读地取定义体源码（开发时最常跳的地方）
     GET  /report/<id>       回测报告（自包含 HTML）
 
 用法：
@@ -75,6 +77,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, catalog.build())
         if p == "/api/runs":
             return self._json(200, {"runs": jobs.recent_runs(30)})
+        if p == "/api/reports":
+            # 盘上已有的报告（结果**可以回访**）。截取文件头部把策略名与窗口读回来 ——
+            # 报告自己就带这两样（title 与副标题），不用另存一份元数据（一份事实一处）。
+            out = []
+            for f in sorted(RESULTS.glob("web_report_*.html"),
+                            key=lambda x: x.stat().st_mtime, reverse=True)[:50]:
+                head = f.read_text(encoding="utf-8", errors="replace")[:4000]
+                name = re.search(r"<title>回测明细 · ([^<]+)</title>", head)
+                win = re.search(r"窗口 ([0-9-]+) → ([0-9-]+)", head)
+                st = f.stat()
+                out.append({"job_id": f.stem.replace("web_report_", ""),
+                            "name": name.group(1) if name else "?",
+                            "window": [win.group(1), win.group(2)] if win else None,
+                            "kb": round(st.st_size / 1024), "mtime": int(st.st_mtime)})
+            return self._json(200, {"reports": out})
+        m = re.fullmatch(r"/api/source/(preset|family)/([A-Za-z0-9_]{1,64})", p)
+        if m:
+            # 只读地取**定义体源码**（开发时最常要跳的地方）。两条校验：策略必须存在，
+            # 且文件名只能由 [A-Za-z0-9_] 组成（不拼用户输入、不做目录遍历）。
+            kind, ident = m.group(1), m.group(2)
+            if catalog.find(kind, ident) is None:
+                return self._json(404, {"error": f"未知策略 {ident!r}"})
+            sub = "preset_defs" if kind == "preset" else "family_defs"
+            f = ROOT / "research" / sub / f"{ident}.py"
+            if not f.is_file():
+                return self._json(404, {"error": f"没有定义体文件 {f.name}"})
+            text = f.read_text(encoding="utf-8")
+            return self._json(200, {"path": f"research/{sub}/{ident}.py",
+                                    "bytes": len(text), "text": text[:200_000]})
         m = re.fullmatch(r"/api/job/([0-9a-f]{6,32})", p)
         if m:
             st = jobs.status(m.group(1))
