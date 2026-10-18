@@ -6,7 +6,12 @@
 <title>usagent 策略平台</title>
 <style>
 :root{--bg:#0f1115;--fg:#e6e8ee;--dim:#9aa3b2;--line:#262b36;--up:#31c48d;--dn:#f05252;
-      --warn:#f6ad55;--card:#161a21;--btn:#22303f;--btnb:#33475c}
+      --warn:#f6ad55;--card:#161a21;--btn:#22303f;--btnb:#33475c;
+      /* ⚠️ --acc 原先**只被引用、从未定义**（:75 的 button.thbtn:focus-visible 用了它）——
+         var() 未定义 ⇒ 该声明在 computed-value 阶段作废 ⇒ outline:none。于是键盘用户 Tab 到
+         台账列头时看不出焦点在哪（审计 blocking：实测 getComputedStyle(:root) 取 --acc 为空串、
+         :focus-visible 命中但 outline-style 为 none）。 */
+      --acc:#7aa7ff}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,
      "Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif}
@@ -26,12 +31,16 @@ input[type=text]{background:#0c0f13;color:var(--fg);border:1px solid var(--line)
 /* 窄屏（手机/半屏窗口）：顶栏是 sticky 的，每一行都从正文里**永久**扣走一条 ——
    把两个输入框的 min-width 收窄，让它们并排，顶栏从 186px 降到约一屏的四分之一以下。 */
 @media (max-width:560px){
+  h2,.card,#run{scroll-margin-top:132px}   /* 窄屏顶栏换行到 114–118px */
   input[type=search]{min-width:150px}
   input[type=text]{min-width:140px;flex:1 1 140px}
   .top h1{font-size:15px}
 }
 h2{font-size:16px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line);
-   scroll-margin-top:64px}       /* 常驻顶栏会吃掉锚点落点（审计实测 titleVisible=false） */
+   /* 常驻顶栏会吃掉锚点落点。实测顶栏高：78px@1920–1280、83@1100、114@700、118@480 ——
+      原先一律 64px，所以**每个视口都还差一截**（审计实测标题被盖住 15–54px；
+      我上一轮那次测量用了 top<200 的松容差，把这个问题漏过去了）。 */
+   scroll-margin-top:96px}
 .sub{color:var(--dim);font-size:12.5px}
 .banner{margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--warn);
         background:#1a1712;border-radius:6px;font-size:12.5px;color:#f0d9b5}
@@ -48,13 +57,21 @@ details.ft[open] summary{border-bottom:1px solid var(--line);color:var(--fg)}
 .ftbody dt{color:#cbd5e1;font-weight:600}
 .ftbody dd{margin:0;color:var(--dim)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:13px 14px}
-.card{scroll-margin-top:64px}
+.card{scroll-margin-top:96px}
+/* ⚠️ 光给 h2/.card 设不够：顶栏那个「本次结果」锚的是 #run，而它是普通 div ——
+   实测（用 Range 量标题文字上沿 vs 顶栏底边）它落在 15px、被 79px 的顶栏整条盖住。
+   凡是**会被锚点跳到**的元素都要让开顶栏。 */
+#run{scroll-margin-top:96px}
 .card:target{border-color:var(--up)}
 .card h3{margin:0 0 4px;font-size:14.5px}
 .card h3 a{color:inherit;text-decoration:none}
 .card h3 a:hover{color:var(--up)}
 .card .mech{color:var(--dim);font-size:12.5px;margin:0 0 9px}
 table{width:100%;border-collapse:collapse;font-size:12.5px}
+/* 全局链接色。此前页面只有 .top a.nav / .card h3 a / .busy a 三处作用域规则，中间那些
+   直接挂文字的 <a>（卡片「报告」、台账「打开」、历史报告「打开报告」/「CSV」）全部落到
+   UA 默认蓝 #0000EE —— 在 --card #161a21 上只有 1.86:1（AA 要 4.5:1），实测共 57 个。 */
+a{color:var(--acc)}
 td,th{padding:3px 6px;border-bottom:1px solid #20242c;vertical-align:top;text-align:left;
       /* 审计实测（2026-10-18）：参数那一格是 JSON.stringify 出来的**无断点长串**（最长 245 字符），
          没有这一行时 td 撑到 1708px、整页 scrollWidth 2329px vs 视口 1200px ⇒
@@ -70,7 +87,14 @@ td code.p{color:#9fb3c8;font-size:11.5px}   /* 参数格：等宽、可断，别
       border:1px solid #4a3a12;background:#241d0e;border-radius:999px;padding:2px 10px}
 .busy a{color:inherit;text-decoration:none}
 .busy a:hover{text-decoration:underline}
-button.thbtn{background:none;border:0;padding:0;color:inherit;font:inherit;cursor:pointer}
+/* 链接当按钮用（一个动作一个 Tab 停靠点：原先 <a><button> 会停两次，且两处语义重复） */
+a.btnlink{display:inline-block;background:var(--btn);color:#dce7f2;border:1px solid var(--btnb);
+          border-radius:6px;padding:6px 12px;font-size:12.5px;text-decoration:none}
+a.btnlink:hover{background:#2a3b4d}
+a.btnlink.mini{padding:3px 9px;font-size:12px;background:transparent}
+/* 列头按钮的点击目标：原先 padding:0 ⇒ 「k」那一列实测只有 7×19px，远小于可用尺寸 */
+button.thbtn{background:none;border:0;padding:6px 4px;min-height:24px;min-width:20px;color:inherit;
+             font:inherit;cursor:pointer}
 button.thbtn:hover{color:var(--fg)}
 button.thbtn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 /* 兜底：将来任何一格再塞进不可断的内容，也只让**这张表**横滚，不再把整页顶破 */
@@ -121,8 +145,9 @@ table.ledger td{white-space:nowrap}
   <a class="nav" href="#" onclick="reloadCatalog();return false"
      title="重新拉一次目录并重渲卡片（你改过的窗口/族参数会回到默认）。
 注意：改了定义体要先重启服务 —— 注册表是启动时读一次的">重新读目录</a>
-  <input type="search" id="q" placeholder="搜索：名字 / 机制 / 参数…（⌘K 聚焦）">
-  <input type="text" id="note" placeholder="备注（可选：这次改了什么 / 为什么跑）"
+  <input type="search" id="q" aria-label="搜索策略卡片" placeholder="搜索：名字 / 机制 / 参数…（⌘K 聚焦）">
+  <input type="text" id="note" aria-label="本次运行的备注（写进台账）"
+         placeholder="备注（可选：这次改了什么 / 为什么跑）"
          title="写进台账的备注列。台账是拿来对比两次运行的 —— 没有备注，两次点击在纸面上长得一模一样。">
   <label class="sub" title="同止损止盈、同笔数、随机入场 200 次 ⇒ 这条策略落在随机分布的第几百分位。
 这是把「运气」与「本事」分开的唯一判词；默认关是因为它让每次点击多花几秒到半分钟（视笔数）。">
@@ -365,7 +390,7 @@ function card(e, runCount) {
       <span class="sub poolhint">（池子可评估范围：跑过任意一条后显示）</span>
     </div>
     <div class="clip" id="clip-${a}"></div>
-    <div class="sub ${held ? "warn" : ""}" id="flag-${a}">${held ? "⚠ 与 holdout 重叠（只准读一次）" : ""}</div>
+    <div class="sub ${held ? "warn" : ""}" id="flag-${a}" role="status" aria-live="polite">${held ? "⚠ 与 holdout 重叠（只准读一次）" : ""}</div>
     <details class="src" id="src-${a}"><summary class="sub">定义体源码（只读）</summary>
       <pre id="srcbody-${a}">点「查看定义体」加载…</pre>
       <div class="devhint" id="srchint-${a}"></div></details>
@@ -657,7 +682,7 @@ function renderLedger() {
     : ` · 碰过 holdout 的运行：<b>0</b> 次`;
   $("lbar").innerHTML = `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
       ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""}${ht} ·
-    <select id="lf" onchange="renderLedger()">
+    <select id="lf" aria-label="按策略筛选台账" onchange="renderLedger()">
       <option value="">全部策略</option>
       ${opts.map(([s, n]) => `<option value="${esc(s)}"${s === strat ? " selected" : ""}>${esc(s)}（${n}）</option>`).join("")}
     </select>
@@ -801,9 +826,36 @@ async function run(kind, id) {
     // 只有 console 一条 TypeError。一个**看起来在跑、其实永远不会完成**的按钮，
     // 比一句报错坏得多 —— 它会让人一直等。错误就地写在卡片上，并滚到结果区。
     return fail(exc.name === "TypeError" ? "连不上本地服务（它还开着吗？）" : exc.message, btn);
-  } finally {
-    setTimeout(() => { btn.disabled = false; btn.textContent = "回测"; }, 1500);
   }
+  // ⚠️ 这里原先是一个 `setTimeout(…, 1500)` 的"守卫" —— 冷启动要 30–70 秒（页面自己就这么写），
+  // 1.5 秒后按钮就复活了，而任务还在跑 ⇒ 手还在卡片上的人再点一次就是**第二次提交**，k 再 +1
+  // （审计实测：真实点击后 1.52 秒按钮即复活，而同一时刻面板还在「已用 2s / 取消」）。
+  // 现在守卫是**真的在途状态**：按钮由 poll() 在终态才放行（见 releaseCardBtn）。
+}
+
+// 一次运行结束时才把卡片按钮放行。为什么放在 poll 而不是 run：run() 里的 try 在 poll() 之前
+// 就返回了（没有 await），所以那里根本不知道任务什么时候结束。
+function releaseCardBtn(kind, id) {
+  const b = $("btn-" + kind + "-" + id);
+  if (b) { b.disabled = false; b.textContent = "回测"; }
+}
+
+// 终态必须写回 #runhead —— 它是 #run 子树里**唯一**的 live region（role=status aria-live），
+// 而四类终态原先只写 .jbody（没有 role/aria-live）⇒ 读屏跑完永远静默，状态区一直停在
+// 「正在回测…」（审计 blocking）。顺带把那一格也收拾干净：原先"任务丢失"时它仍挂着
+// 看似在跑的「… 回测（成交 16 笔）已用 46s [取消]」，计时器冻在那里、取消按钮还是死的。
+function fin(headline, box, detail) {
+  const rh = $("runhead");
+  if (rh) rh.innerHTML = `<b>${esc(headline)}</b>` +
+    (detail ? ` <span class="sub">${esc(String(detail).slice(0, 300))}</span>` : "");
+  if (box) {
+    const j = box.querySelector(".jsteps");
+    if (j) j.innerHTML = (j.innerHTML || "") + `<div class="sub">—— 已结束（${esc(headline)}）——</div>`;
+    const b = box.querySelector(".jsteps button");
+    if (b) b.remove();                     // 取消按钮不能留成死按钮
+  }
+  const jb = box && box.querySelector(".jbody");
+  if (jb) jb.innerHTML = `<div class="verdict none">${esc(headline)}${detail ? "：" + esc(detail) : ""}</div>`;
 }
 
 function fail(msg, btn) {
@@ -822,6 +874,51 @@ function fail(msg, btn) {
 }
 
 const POLLFAIL = {};                              // jobId -> 连续失败次数
+// 步骤区。排队中的任务**一步都还没开始**，此前却把「取链路（首次约 30–70 秒）」当作当前
+// 步骤显示、计时器还在走 ⇒ 看起来像在干活（实际在等锁）。排队时如实说"排队中"。
+function stepsHtml(st, jobId, el) {
+  const done = (st.steps || []).map(s =>
+    `<div>✓ ${esc(s.name)} <span class="sub">${s.seconds}s</span></div>`).join("");
+  if (st.status === "queued") {
+    return done + `<div>… <b>排队中</b> <span class="sub">服务端一次只跑一个任务 —— 前一个跑完才开始（${
+      el == null ? "" : "已等 " + el.toFixed(0) + "s，"}</span>
+      <button class="mini" onclick="cancelJob('${esc(jobId || st.id || "")}')">取消</button></div>`;
+  }
+  if (st.status === "running") {
+    return done + `<div>… ${esc(st.step)} <span class="sub">已用 ${
+      el == null ? "" : el.toFixed(0) + "s，"}</span>
+      <button class="mini" onclick="cancelJob('${esc(jobId || st.id || "")}')">取消</button>
+      <span class="sub">粗粒度：当前这一步跑完才停</span></div>`
+      + (CANCELREQ.has(jobId) || CANCELREQ.has(st.id)
+          ? `<div class="sub">已请求取消 —— 当前这一步跑完就停（已取消的运行<b>不进台账</b>）</div>` : "");
+  }
+  return done;
+}
+
+// 页面加载时把**在途任务**找回来：刷新/换新标签页/关了再开之后，面板、徽标、取消按钮
+// 全部重建（服务端 GET /api/jobs）。不这么做的话 job id 只活在被刷掉的那份 DOM 里，
+// 而页面会一边写着「还没跑过」一边在服务端继续跑 —— 那是假话，且会诱导用户再点一次回测（k +1）。
+async function recoverInflight() {
+  try {
+    const r = await (await fetch("/api/jobs")).json();
+    for (const job of (r.jobs || [])) {
+      T0[job.id] = Date.now() - (Number(job.seconds) || 0) * 1000;
+      panel(job.id, job.kind, job.strategy, job.lo, job.hi, null, 0);
+      const box = $("job-" + job.id);
+      if (box) box.querySelector(".jsteps").innerHTML = stepsHtml(job, job.id, null);
+      trackInflight(job.id, true);
+      const b = $("btn-" + job.kind + "-" + job.strategy);
+      if (b) { b.disabled = true; b.textContent = "回测中…"; }   // 卡片上也别让它再点一次
+      poll(job.id, job.kind, job.strategy);
+    }
+    if ((r.jobs || []).length) {
+      $("run").style.display = "block";
+      $("runhead").innerHTML = `<b>有 ${r.jobs.length} 个任务在跑</b>
+        <span class="sub">（页面加载时从服务端找回的）</span>`;
+    }
+  } catch (exc) { /* 找不回就算了 —— 但它绝不该把页面挡在别的地方 */ }
+}
+
 async function cancelJob(jobId) {
   CANCELREQ.add(jobId);
   const box = $("job-" + jobId);
@@ -857,17 +954,28 @@ async function poll(jobId, kind, id) {
     setTimeout(() => poll(jobId, kind, id), 1500);
     return;
   }
-  if (st && st.status === "cancelled") {
-    // ⚠️ 必须排在 `st.error` 那个判据之前：取消的原因文案也放在 error 字段里，而那条判据
-    // 的本意是"接口返回了 {error: …}（任务找不到了）"—— 实测被它拦成了「任务丢失」。
+  // 判据必须**窄**：`st.error` 的本意只是拦"接口回了个 {error: …}（任务查不到）"，
+  // 而 status==="error" 的任务同样带着非空 error 字段（服务端就是这么设计字段的）——
+  // 用一个字段兼两件事，于是 896 行那条 `st.status === "error"` 分支永远不可达，
+  // 所有失败都退化成同一句「任务丢失」（审计 blocking，两名核验者独立复现）。
+  if (!st || st.status === undefined) {
     trackInflight(jobId, false);
-    if (box) box.querySelector(".jbody").innerHTML =
-      `<div class="verdict none">已取消 —— ${esc(st.error || "")}</div>`;
+    releaseCardBtn(kind, id);
+    fin("任务丢失", box, `服务端返回的不是任务对象（可能这个 job 早已不在内存里 —— 服务重启过？）。
+      盘上的结果仍可从「运行台账」与「历史报告」找回。`);
     return;
   }
-  if (!st || st.error) {
+  if (st.status === "cancelled") {
     trackInflight(jobId, false);
-    if (box) box.querySelector(".jbody").innerHTML = `<b class="neg">任务丢失</b>`;
+    releaseCardBtn(kind, id);
+    fin("已取消", box, "已取消 —— " + (st.error || "") + "（这次不进台账：没有结果被看到，不计入 k）");
+    return;
+  }
+  if (st.status === "error") {
+    trackInflight(jobId, false);
+    releaseCardBtn(kind, id);
+    if (box) box.querySelector(".jsteps").innerHTML = stepsHtml(st);   // 服务端已返回的 steps 别丢
+    fin("失败", box, st.error || "（服务端没给原因）");
     return;
   }
   if (st.pool_range && (!POOL || POOL[0] !== st.pool_range[0])) {
@@ -878,21 +986,15 @@ async function poll(jobId, kind, id) {
       i.id.replace(/^(lo|hi)-(preset|family)-/, "")));
   }
   const el = (Date.now() - (T0[jobId] || Date.now())) / 1000;
-  if (box) {
-    box.querySelector(".jsteps").innerHTML = (st.steps || []).map(s =>
-      `<div>✓ ${esc(s.name)} <span class="sub">${s.seconds}s</span></div>`).join("")
-      + (st.status === "running" || st.status === "queued"
-          ? `<div>… ${esc(st.step)} <span class="sub">已用 ${el.toFixed(0)}s</span>
-               <button class="mini" onclick="cancelJob('${esc(jobId)}')">取消</button>
-               <span class="sub">粗粒度：当前这一步跑完才停</span></div>`
-            + (CANCELREQ.has(jobId)
-                ? `<div class="sub">已请求取消 —— 当前这一步跑完就停（已取消的运行<b>不进台账</b>）</div>` : "")
-          : "");
-  }
+  if (box) box.querySelector(".jsteps").innerHTML = stepsHtml(st, jobId, el);
   if (st.status === "running" || st.status === "queued") {
     trackInflight(jobId, true); setTimeout(() => poll(jobId, kind, id), 900); return;
   }
   trackInflight(jobId, false);              // 结束（不管是 done 还是 error）就从徽标里摘掉
+  // ⚠️ 成功路径也必须放行按钮。守卫从"1.5 秒定时器"改成"真在途"之后，任何一条终态没放行
+  // 都会让那张卡的「回测」**永久禁用**——实测就踩到了这个（刷新恢复后卡片一直写着"回测中…"，
+  // 而任务早就跑完了）。终态共四条：done / error / cancelled / 任务丢失，一条都不能漏。
+  releaseCardBtn(kind, id);
   if (st.status === "error") {
     if (box) box.querySelector(".jbody").innerHTML = `<div class="verdict none">${esc(st.error)}</div>`;
     return;
@@ -909,6 +1011,7 @@ async function poll(jobId, kind, id) {
     ["胜率", pct(m.win_pct, 1), ""], ["盈亏比 PF", num(m.profit_factor, 2), ""],
     ["最好 10% 占总 R", pct(m.top_decile_share, 1), ""], ["DSR", num(m.dsr), ""],
     ["DSR 的 k", `${m.dsr_k} <span class="sub">(声明 ${k.declared_or_grid} + 平台已跑 ${k.platform_runs_before})</span>`, ""]];
+  fin(`完成 · 成交 ${m.n_trades} 笔 · 用时 ${st.seconds}s`, box, st.hint || "");
   if (box) {
     box.querySelector(".jbody").innerHTML = `
       <div class="sub">完成，用时 ${esc(st.seconds)}s ·
@@ -917,20 +1020,19 @@ async function poll(jobId, kind, id) {
         ${st.hint ? " · " + esc(st.hint) : ""}</div>
       <div class="metrics">${cells.map(([lab, val, c]) =>
         `<div><span>${lab}</span><b class="${c}">${val}</b></div>`).join("")}</div>
-      <div class="bar"><a href="${st.report}" target="_blank"><button>在新窗口打开逐笔报告</button></a>
-        <a href="${st.report}" download><button class="mini">下载报告 HTML</button></a>
-        ${st.trades_csv ? `<a href="${esc(st.trades_csv)}" download>
-          <button class="mini" title="逐笔那 20 列（成交价/出场原因/滑点/穿价…）的机器可读版，
-含窗口/成本/价格口径的注释行；pandas.read_csv(..., comment='#') 可直接读">
-          下载逐笔 CSV</button></a>` : ""}
+      <div class="bar"><a class="btnlink" href="${st.report}" target="_blank">在新窗口打开逐笔报告</a>
+        <a class="btnlink mini" href="${st.report}" download>下载报告 HTML</a>
+        ${st.trades_csv ? `<a class="btnlink mini" href="${esc(st.trades_csv)}" download
+          title="逐笔那 21 列的机器可读版（含窗口/成本/价格口径的注释行）；
+pandas.read_csv(..., comment='#') 可直接读">下载逐笔 CSV</a>` : ""}
         <span class="sub">报告自包含（无外链、无脚本）—— 下面就是它；它也进了「历史报告」</span></div>
-      <iframe src="${st.report}" loading="lazy"></iframe>`;
+      <iframe src="${st.report}" loading="lazy" title="逐笔报告预览（自包含 HTML）"></iframe>`;
   }
   refreshLedger();                       // 只刷台账/历史，**不**重渲目录（否则会吞掉用户输入）
 }
 
 // 目录与台账**各自独立**取数：此前台账被串在 loadCatalog 的 then 链上 ⇒ 目录接口一挂，
 // 连「还没有运行记录」都不渲染（审计实测）。两条路径各自失败、各自可见，跳锚点不依赖它们。
-loadCatalog().then(refreshLedger).then(jumpToHash);
+loadCatalog().then(refreshLedger).then(recoverInflight).then(jumpToHash);
 </script>
 </body></html>

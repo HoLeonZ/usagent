@@ -176,6 +176,27 @@ def cancel(job_id: str) -> bool:
     return True
 
 
+def inflight() -> list[dict]:
+    """还在跑（queued/running）的任务清单 —— 页面**刷新之后**靠它把状态找回来。
+
+    为什么必须有它（2026-10-18 审计的 blocking #1，两名核验者独立复现）：job id 只活在被刷掉的
+    那份 DOM 里 —— 没有 localStorage/sessionStorage 落它，服务端也只按 id 查、没有枚举入口。
+    于是运行中刷新页面就会：徽标消失、面板消失、取消入口消失、页面还写着「还没跑过」（假话，
+    服务端此刻仍在跑）。用户在这句假话下的自然反应是**再点一次回测** —— 那会把 k 再推高一次。
+    """
+    out = []
+    for jid, j in list(_JOBS.items()):
+        if j.get("status") not in ("queued", "running"):
+            continue
+        req = j.get("request") or {}
+        out.append({"id": jid, "status": j["status"], "step": j.get("step"),
+                    "kind": req.get("kind"), "strategy": req.get("id"),
+                    "lo": req.get("lo"), "hi": req.get("hi"),
+                    "steps": j.get("steps") or [],
+                    "seconds": None if j.get("seconds") is None else float(j["seconds"])})
+    return out
+
+
 def status(job_id: str) -> dict | None:
     j = _JOBS.get(job_id)
     return dict(j) if j else None

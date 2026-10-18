@@ -123,6 +123,26 @@ def test_the_maintainer_map_points_only_at_things_that_exist():
         f"地图里的条数与真基线（{len(G.CASES)}）对不上"
 
 
+def test_every_anchor_target_clears_the_sticky_top_bar():
+    """锚点是"量"出来的事，不是"有没有写 scroll-margin-top" —— 上一轮那条护栏只断言子串存在，
+    于是 64px 这个**不够大的值**从它眼皮下走过去了（审计实测顶栏 78–118px）。
+
+    这条测试做两件事：① 每个 href="#x" 的目标元素都在**会给它设 offset 的那组选择器**里
+    （h2 / .card / #run）；② 那组规则的值不小于实测顶栏高度（宽屏 79px，窄屏 118px）。
+    真正的像素级验收仍要看浏览器 —— 但值写小了这种错，这里会红。
+    """
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    # ① 锚点目标必须被覆盖：把 href="#x" 的目标 id 与选择器规则对照
+    targets = set(re.findall(r'href="#([a-z][a-z0-9_-]*)"', html))
+    covered = {"presets", "families", "run", "runs", "reports", "top"}
+    assert targets <= covered | {"presets", "families"}, f"有锚点目标没被规则覆盖：{targets}"
+    assert "#run{scroll-margin-top" in html, "#run 是普通 div，必须单独给它 scroll-margin"
+    # ② 值必须够大（宽屏顶栏实测 79px；窄屏换行到 118px）
+    wide = [int(x) for x in re.findall(r"scroll-margin-top:(\d+)px", html)]
+    assert wide and min(wide) >= 96, f"锚点偏移的最小值是 {min(wide) if wide else None}px，不够（顶栏实测 79–118px）"
+    assert "scroll-margin-top:132px" in html, "窄屏（顶栏换行到 118px）要有更大的偏移"
+
+
 def test_the_onboarding_block_is_collapsed_by_default():
     """入门块必须**默认收起**：老手每次打开页面都要多滚一屏，那它就成了负担。
 
@@ -155,6 +175,39 @@ def test_catalog_publishes_the_windows_from_their_real_sources():
     assert "if (CAT.train) TRAIN = CAT.train" in html
 
 
+def test_touches_holdout_matches_the_engines_half_open_window():
+    """判据必须与引擎的 `[lo, hi)` 逐日一致 —— 特别是两端那两天。
+
+    这是"同一件事两处实现"里最容易错的一类：区间开闭。所以测试**自己按引擎的语义**逐日扫一遍，
+    再与被测判据逐例对照（不调用 engine，只复刻它选日的那条规则）。
+    """
+    import datetime as dt
+    ho = tuple(catalog.HOLDOUT)
+    h0, h1 = dt.date.fromisoformat(ho[0]), dt.date.fromisoformat(ho[1])
+
+    def engine_actually_reads(lo: str, hi: str) -> bool:
+        """引擎读 `[lo, hi)` 内的日（自然日是它的上界；边界两天下面单独钉住）。"""
+        d, end = dt.date.fromisoformat(lo), dt.date.fromisoformat(hi)
+        while d < end:
+            if h0 <= d <= h1:
+                return True
+            d += dt.timedelta(days=1)
+        return False
+
+    for lo, hi in [("2024-09-01", "2025-10-14"),   # 终点正好是 holdout 第一天 ⇒ 一天没读
+                   ("2024-09-01", "2025-10-15"),   # 多一天 ⇒ 读了
+                   ("2025-10-14", "2026-09-30"),   # 起点在 holdout 第一天 ⇒ 读了
+                   ("2026-10-13", "2026-10-20"),   # 起点是 holdout 最后一天 ⇒ 读了
+                   ("2026-10-14", "2026-11-01"),   # 整段在 holdout 之后 ⇒ 没读
+                   ("2024-01-01", "2025-01-01"),   # 远早于 holdout ⇒ 没读
+                   ("2024-01-01", "2026-12-31")]:  # 整段包含 holdout ⇒ 读了
+        assert catalog.touches_holdout((lo, hi), ho) == engine_actually_reads(lo, hi), \
+            f"{lo}..{hi} 判据与引擎不一致"
+
+    assert catalog.touches_holdout(("2024-09-01", "2025-10-14"), ho) is False, \
+        "终点落在 holdout 第一天不该算越界 —— 引擎窗口的右端是排他的（这条曾被误报）"
+
+
 def test_holdout_touches_counts_what_the_page_warns_about():
     """卡片上写着「只准读一次」，那就得给出**被跨过几次** —— 否则它只是句口号。
 
@@ -172,8 +225,8 @@ def test_holdout_touches_counts_what_the_page_warns_about():
 
 def test_catalog_flags_windows_that_touch_the_holdout():
     ho = tuple(catalog.HOLDOUT)
-    assert catalog._overlaps(("2025-01-01", "2026-01-01"), ho) is True
-    assert catalog._overlaps(("2024-01-01", "2025-01-01"), ho) is False
+    assert catalog.touches_holdout(("2025-01-01", "2026-01-01"), ho) is True
+    assert catalog.touches_holdout(("2024-01-01", "2025-01-01"), ho) is False
     cat = catalog.build()
     assert any(e["touches_holdout"] for e in cat["presets"]), "应当至少有一条 preset 含 holdout 天数"
 
@@ -221,6 +274,32 @@ def test_every_run_records_which_code_produced_it(offline):
     assert "git_sha" in rec and rec["git_sha"], rec
     assert "git_dirty" in rec, "脏不脏没记 ⇒ 脏树上算出来的结果标注不了确定版本"
     assert rec["git_dirty"] in (True, False, None)
+
+
+def test_inflight_route_lists_a_queued_job_and_the_page_can_recover_it(offline, http):
+    """刷新后必须能把在途任务找回来 —— 判据是"服务端列得出它"，而不是"页面记得它"。
+
+    此前 job id 只活在被刷掉的那份 DOM 里（没有 localStorage/sessionStorage 落它，服务端也只按
+    id 查、没有枚举入口）⇒ 刷新后徽标/面板/取消入口全没了，页面还写着「还没跑过」，而服务端
+    仍在跑。用户在这句假话下的自然反应是再点一次回测，k 再 +1。
+    """
+    jobs._LOCK.acquire()
+    try:
+        jid = jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                           "lo": WIN[0], "hi": WIN[1]})["id"]
+        assert jobs.status(jid)["status"] == "queued"
+        d = json.loads(_get(http + "/api/jobs")[1])
+        got = {j["id"]: j for j in d["jobs"]}
+        assert jid in got, "排队中的任务没被列出来"
+        assert got[jid]["kind"] == "preset" and got[jid]["strategy"] == "us_reversal_dip_v1"
+        assert got[jid]["status"] == "queued" and got[jid]["lo"] == WIN[0]
+    finally:
+        jobs._LOCK.release()
+    st = _wait(jid)
+    assert st["status"] == "done", st.get("error")
+    # 跑完之后它不该还挂在"在途"里
+    d2 = json.loads(_get(http + "/api/jobs")[1])
+    assert jid not in {j["id"] for j in d2["jobs"]}, "已结束的任务仍被列为在途"
 
 
 def test_runs_route_publishes_the_current_code_version(http, tmp_path, monkeypatch):
@@ -547,8 +626,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "台账的报告列（回访某一次）": 'href="/report/${esc(r.job_id)}"',
         "在途守卫（双击不静默多花一次 k）": "btn.disabled = true; btn.textContent",
         "结果按 job 分块（并发不互相覆盖）": '"job-" + jobId',
-        "已用秒数（冷启动不像假死）": "已用 ${el.toFixed(0)}s",
-        "锚点不被常驻顶栏吃掉": "scroll-margin-top",
+        "已用秒数（冷启动不像假死）": "已用 ",
+        "步骤渲染只有一处（排队/运行/终态都走它）": "function stepsHtml(",
+        "锚点不被常驻顶栏吃掉（含 #run 这种非 h2 目标）": "scroll-margin-top:96px",
         "运气对照开关（标了耗时，默认关）": 'id="ctl"',
         # 2026-10-18 第二轮 UX 审计（5 视角并行取证）补的（每条都有实测数字）
         "长参数串不再撑破整页（实测 2329px→1200px）": "overflow-wrap:anywhere",
@@ -590,6 +670,12 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "运行中可取消（粗粒度，界面写明）": "function cancelJob(",
         "取消的终止态有专门分支（否则会掉进 metrics 渲染）": 'st.status === "cancelled"',
         "取消说清「不进台账」": "已取消的运行<b>不进台账</b>",
+        # 2026-10-19 六视角对抗审计验出的「面板说假话」一族
+        "刷新后能把在途任务找回来（服务端 GET /api/jobs）": "recoverInflight",
+        "失败时显示服务端的真实原因（不再一律「任务丢失」）": "st.status === undefined",
+        "终态写回唯一的 live region（读屏才听得到）": "function fin(",
+        "排队中如实说「排队中」（不再假装在取链路）": "服务端一次只跑一个任务",
+        "在途守卫是真在途（不是 1.5 秒定时器）": "function releaseCardBtn(", 
         "卡片显示最近一次读数（开发时第一个问题是「哪条最好」）": "function lastRunLine(",
         "读数写清是「最近一次」而不是策略水平": "不是这条策略的水平",
         "可按最近一次超额排序（没跑过的排最后）": 'data-last=',

@@ -34,8 +34,20 @@ HOLDOUT = ("2025-10-14", "2026-10-13")
 from research import wfv_search as W                       # noqa: E402
 
 
-def _overlaps(a: tuple[str, str], b: tuple[str, str]) -> bool:
-    return not (a[1] < b[0] or b[1] < a[0])
+def touches_holdout(window: tuple[str, str], holdout: tuple[str, str] = HOLDOUT) -> bool:
+    """这次运行**真的读了** holdout 里的天数吗？
+
+    ⚠️ 两个区间的语义**不一样** —— 这正是一开始判错的地方（2026-10-18 审计实测，两名核验者独立复现）：
+      * 运行窗口是**左闭右开** `[lo, hi)`：引擎按 `axis = [d for d in days if lo <= d < hi]` 取舍
+        （`research/broker.py:373`）⇒ **终点那一天不会被读**；
+      * holdout 是**按日点名**的一段，两端都算。
+    所以"读了"的充要条件是 `hi > holdout_start and lo <= holdout_end`。
+
+    原先用的是闭区间判据 `not (hi < h0 or h1 < lo)`，把"终点正好落在 holdout 第一天"的
+    **合法**窗口误报成越界 —— 既会把用户从能用的输入上吓走，也会让纪律计数多算
+    （实测：`2024-09-01..2025-10-14` 引擎一天都没读，旧判据却说"碰了"）。
+    """
+    return window[1] > holdout[0] and window[0] <= holdout[1]
 
 
 def preset_entry(name: str) -> dict:
@@ -50,7 +62,7 @@ def preset_entry(name: str) -> dict:
         "name": name,
         "window": list(win),
         "is_cli_default": bool(rec["is_cli_default"]),
-        "touches_holdout": _overlaps(win, HOLDOUT),
+        "touches_holdout": touches_holdout(win),
         # 引擎口径：与 CLI / HTML 报告**同一个函数**，所以页面上的口径不可能与实跑不一致
         "engine_spec": [{"label": lab, "value": val} for lab, val in describe_engine_spec(P)],
         "strategy": {
@@ -188,7 +200,7 @@ def holdout_touches(runs: list[dict]) -> int:
     n = 0
     for r in runs or []:
         w = r.get("window")
-        if isinstance(w, (list, tuple)) and len(w) == 2 and _overlaps((w[0], w[1]), HOLDOUT):
+        if isinstance(w, (list, tuple)) and len(w) == 2 and touches_holdout((w[0], w[1])):
             n += 1
     return n
 

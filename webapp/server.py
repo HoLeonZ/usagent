@@ -11,6 +11,7 @@
     POST /api/run           提交回测 {kind,id,lo,hi,params?} → {job id}
     POST /api/cancel/<id>   取消一次运行（粗粒度：当前这一步跑完才停）
     GET  /api/job/<id>      任务状态（steps / metrics / report 链接）
+    GET  /api/jobs          在途任务（queued/running）—— 刷新后能把面板与取消入口找回来
     GET  /api/runs          台账（最近 30 条 + 总条数）
     GET  /api/runs.csv      台账**全部**记录的 CSV（页面上的表有 30 条上限）
     GET  /api/reports       盘上已有的报告（结果可回访，不必为了看一眼而重跑）
@@ -78,8 +79,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(code, path.read_bytes(), "text/html; charset=utf-8")
 
-    def _report(self, code: int, path: Path, job_id: str | None = None) -> None:
+    def _report(self, code: int, path: Path, job_id: str | None = None,
+                ledger: bool = False) -> None:
         """托管一份报告 —— **在服务端**给它加一条"回到平台"的返回条。
+
+        `target="_top"` 是必须的：平台把报告 iframe 内嵌在结果区里，不带 target 的话点这条
+        返回条会把**整个平台**塞进那个 70vh 的小框里（审计实测）。
 
         为什么在服务端注入而不是写进报告文件：报告是**可下载、可归档**的自包含产物
         （`selfcheck` 明令不许出现 `https?://`），写死一个 `http://127.0.0.1:…` 会让
@@ -93,7 +98,10 @@ class Handler(BaseHTTPRequestHandler):
                '<div class="hostbar" style="position:fixed;left:14px;bottom:14px;z-index:9;'
                'background:#161a22;border:1px solid #262b36;border-radius:999px;padding:6px 12px;'
                'font:13px/1.4 -apple-system,PingFang SC,Arial,sans-serif;color:#e6e8ee">'
-               '← <a href="/#runs" style="color:#8ab4f8;text-decoration:none">回到平台（这份运行在台账里）</a>'
+               '← <a target="_top" href="/#runs" style="color:#8ab4f8;text-decoration:none">'
+               + ("回到平台（这份运行在台账里）" if ledger else
+                  "回到平台（这份是命令行 --out 产出的，不在台账里）")
+               + '</a>'
                + (f'<span style="color:#9aa3b2"> · job {job_id}</span>' if job_id else "")
                + f'<span style="color:#9aa3b2"> · {path.name}</span></div>')
         if "</body>" in html:
@@ -132,6 +140,14 @@ class Handler(BaseHTTPRequestHandler):
                                     # 卡片「已跑 N 次」与筛选下拉都按**全文**数 —— 它们与
                                     # DSR 的 k 是同一个计数，不能受"表只显示 30 条"影响
                                     "by_strategy": jobs.counts_by_strategy()})
+        if p == "/api/jobs":
+            # 在途任务（页面刷新后据此重建面板/徽标/取消入口）。只给这个页面用得上的最小字段。
+            jobs_now = jobs.inflight()
+            for r in jobs_now:
+                if r["seconds"] is None:
+                    st = jobs.status(r["id"]) or {}
+                    r["seconds"] = st.get("seconds")
+            return self._json(200, {"jobs": jobs_now})
         if p == "/api/runs.csv":
             # 完整台账的 CSV（页面上的表有 30 条上限，导出不能跟着被截断）。
             import csv as _csv
@@ -226,7 +242,10 @@ class Handler(BaseHTTPRequestHandler):
             if not _JOB_ID.match(jid):
                 return self._json(400, {"error": "任务 id 非法"})
             # 只接受由本次服务生成的报告文件（不拼用户输入、不做目录遍历）
-            return self._report(200, RESULTS / f"web_report_{jid}.html", job_id=jid)
+            # 台账里有没有这一条：只有平台自己产出的才在（CLI `--out` 的从来不在）——
+            # 返回条那句「这份运行在台账里」必须是真的（审计实测：CLI 产物上它是假的）
+            return self._report(200, RESULTS / f"web_report_{jid}.html", job_id=jid,
+                                ledger=any(r.get("job_id") == jid for r in jobs.all_runs()))
         self._json(404, {"error": f"未知路径 {p}"})
 
     def do_POST(self) -> None:                       # noqa: N802
