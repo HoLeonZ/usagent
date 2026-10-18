@@ -412,9 +412,17 @@ body:has(#xf-regime:checked) .card:not([data-reason="regime"]){display:none}
 .ok{color:var(--up)}.no{color:var(--dn)}
 .nodata{color:var(--dim);padding:16px}
 code{background:#1b2029;padding:1px 5px;border-radius:4px;font-size:12px}
-h2{scroll-margin-top:12px}
+/* 锚点落点必须让开**自己的**那条粘性目录。实测（2026-10-18 审计，两名核验者独立复现）：
+   .toc 是 position:sticky;top:0、渲染高 40.4px，而这里原先写 12px ⇒ 点任意一个目录项，
+   章节标题都被目录条**整条盖住**（h2 的文字行落在目录条下面）。52px = 40.4 + 余量。 */
+h2{scroll-margin-top:52px}
+/* 逐笔卡的锚点（#t{i}）同样要让开目录条 —— 否则从总表跳到某一笔，卡片头也在目录条下。 */
+.card[id^="t"]{scroll-margin-top:52px}
 /* 粘性小节导航：这份报告实测 87k px 高（90+ 屏），目录放在最上面等于走到中段就够不着了。
    sticky 让它一直在顶上；打印时由 @media print 隐藏。 */
+/* 屏幕端也要给链接上色：报告里 16 个「跳到该笔」的标的链接此前是 UA 默认蓝 #0000EE，
+   在 --card #161a22 上只有约 1.9:1（打印块里那条 a{color:inherit} 只作用于打印）。 */
+a{color:var(--acc)}
 .toc{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 4px;position:sticky;top:0;z-index:5;
      background:var(--bg);padding:8px 0 6px;border-bottom:1px solid var(--line)}
 .toc a{font-size:12.5px;color:var(--fg);text-decoration:none;border:1px solid var(--line);
