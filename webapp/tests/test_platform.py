@@ -342,6 +342,12 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "结构化过滤也算「在筛」（标题不能再说「6 条」）": "filtering = !!(q || onlyRun || onlyHeld)",
         "台账列头是真按钮（键盘可达）": 'class="thbtn"',
         "排序状态可被读屏读到": 'aria-sort=',
+        # 2026-10-18 第三轮：滚走不失联 + 窄屏
+        "顶栏「有任务在跑」徽标（滚到哪儿都看得见）": 'id="busy"',
+        "徽标可点回结果": 'href="#job-',
+        "徽标在轮询失败/任务丢失时也会摘掉（不留假在跑）": "trackInflight(jobId, false)",
+        "超长机器串可断（实测 390px 下曾顶破 47px）": "color:#cbd5e1;overflow-wrap:anywhere",
+        "窄屏压缩顶栏（sticky 的每一行都从正文永久扣走）": "@media (max-width:560px)",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]

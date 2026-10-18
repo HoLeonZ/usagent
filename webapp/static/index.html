@@ -23,6 +23,13 @@ input[type=search]{background:#0c0f13;color:var(--fg);border:1px solid var(--lin
                    padding:5px 9px;font-size:13px;min-width:230px}
 input[type=text]{background:#0c0f13;color:var(--fg);border:1px solid var(--line);border-radius:6px;
                  padding:5px 9px;font-size:12.5px;min-width:210px}
+/* 窄屏（手机/半屏窗口）：顶栏是 sticky 的，每一行都从正文里**永久**扣走一条 ——
+   把两个输入框的 min-width 收窄，让它们并排，顶栏从 186px 降到约一屏的四分之一以下。 */
+@media (max-width:560px){
+  input[type=search]{min-width:150px}
+  input[type=text]{min-width:140px;flex:1 1 140px}
+  .top h1{font-size:15px}
+}
 h2{font-size:16px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line);
    scroll-margin-top:64px}       /* 常驻顶栏会吃掉锚点落点（审计实测 titleVisible=false） */
 .sub{color:var(--dim);font-size:12.5px}
@@ -46,6 +53,12 @@ td,th{padding:3px 6px;border-bottom:1px solid #20242c;vertical-align:top;text-al
 th{color:var(--dim);font-weight:400}
 td.k{color:var(--dim);width:46%}
 td code.p{color:#9fb3c8;font-size:11.5px}   /* 参数格：等宽、可断，别再把表撑破 */
+/* 顶栏的"有任务在跑"徽标。为什么必须有：一次回测是 35–66 秒的重活，而卡片区有 20 多屏 ——
+   点完回测往下滚，页面上就没有任何地方告诉你它还在跑、跑了多久（审计实测：滚走即失联）。 */
+.busy{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#f0d9b5;
+      border:1px solid #4a3a12;background:#241d0e;border-radius:999px;padding:2px 10px}
+.busy a{color:inherit;text-decoration:none}
+.busy a:hover{text-decoration:underline}
 button.thbtn{background:none;border:0;padding:0;color:inherit;font:inherit;cursor:pointer}
 button.thbtn:hover{color:var(--fg)}
 button.thbtn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
@@ -73,7 +86,9 @@ details.src pre{max-height:320px;overflow:auto;background:#0c0f13;border:1px sol
 .metrics div{font-size:12.5px;display:flex;justify-content:space-between;border-bottom:1px solid #1d222a;padding:2px 0}
 .metrics span:first-child{color:var(--dim)}
 iframe{width:100%;height:70vh;border:1px solid var(--line);border-radius:6px;background:#fff;margin-top:10px}
-code{font-size:12px;color:#cbd5e1}
+code{font-size:12px;color:#cbd5e1;overflow-wrap:anywhere}
+/* code 里的东西（命令、文件名、定义体路径）常是**一个超长不可断的 token** —— 实测 390px 视口下
+   复制命令里的 --out 文件名有 405px 宽，把整页顶出 47px 横向滚动。机器内容就该在任意处断。 */
 table.ledger{font-size:12.5px}
 table.ledger th{cursor:pointer;user-select:none;white-space:nowrap}
 table.ledger th:hover{color:var(--fg)}
@@ -97,6 +112,7 @@ table.ledger td{white-space:nowrap}
 这是把「运气」与「本事」分开的唯一判词；默认关是因为它让每次点击多花几秒到半分钟（视笔数）。">
     <input type="checkbox" id="ctl"> 运气对照 200 次（+约 3–26 秒）</label>
   <span class="sub" id="count"></span>
+  <span id="busy" class="busy" style="display:none" role="status" aria-live="polite"></span>
 </div></div></div>
 
 <div class="wrap">
@@ -137,6 +153,26 @@ const FULL = ["2024-04-09", "2026-10-14"];
 const overlaps = (a, b) => !(a[1] < b[0] || b[1] < a[0]);
 let CAT = null, RUNS = [], REPORTS = [], SORT = {key: "ts", dir: -1};
 const T0 = {};                       // job id → 提交时刻（显示「已用 Ns」，冷启动不该像假死）
+const INFLIGHT = new Set();          // 还没结束的任务（顶栏徽标据此显示；滚到哪儿都看得见）
+let _busyTimer = null;
+
+function paintBusy() {
+  const el = $("busy"), n = INFLIGHT.size;
+  if (!n) { el.style.display = "none"; el.textContent = ""; return; }
+  const ids = [...INFLIGHT];
+  const oldest = Math.min(...ids.map(i => T0[i] || Date.now()));
+  const secs = ((Date.now() - oldest) / 1000).toFixed(0);
+  el.style.display = "";
+  el.innerHTML = `<a href="#job-${esc(ids[0])}">⏳ ${n} 个任务在跑 · 最久的已用 ${secs}s
+    （点这里跳到结果）</a>`;
+}
+function trackInflight(jobId, running) {
+  if (running) INFLIGHT.add(jobId); else INFLIGHT.delete(jobId);
+  paintBusy();
+  // 只在真的有任务时开表：空闲时不留一个每秒醒一次的定时器
+  if (INFLIGHT.size && !_busyTimer) _busyTimer = setInterval(paintBusy, 1000);
+  if (!INFLIGHT.size && _busyTimer) { clearInterval(_busyTimer); _busyTimer = null; }
+}
 
 // ---------------------------------------------------------------- 目录与卡片
 
@@ -569,6 +605,7 @@ async function run(kind, id) {
     const j = await r.json();
     if (j.error) return fail(`提交失败：${j.error}`, btn);
     T0[j.id] = Date.now();
+    trackInflight(j.id, true);
     panel(j.id, kind, id, lo, hi, params, controlRuns);
     $("run").scrollIntoView({block: "start"});
     poll(j.id, kind, id);
@@ -583,6 +620,8 @@ async function run(kind, id) {
 }
 
 function fail(msg, btn) {
+  // 注意：这里**没有** job id（提交就没成功，或记录在 poll 里），所以顶栏徽标要在
+  // poll 的两条早退路径上自己摘干净 —— 见下面 trackInflight(false) 的两处。
   // 一处写两处看：结果区（滚过去了）**和**这张卡片自己的按钮旁边（手还在那儿）
   $("runhead").innerHTML = `<b class="neg">${esc(msg)}</b>`;
   $("run").scrollIntoView({block: "start"});
@@ -608,12 +647,17 @@ async function poll(jobId, kind, id) {
       if (box) box.querySelector(".jsteps").innerHTML =
         `<div class="neg">读不到任务状态（连续 ${POLLFAIL[jobId]} 次：${esc(exc.message)}）——
           服务可能已停；任务仍在后台跑，刷新页面后到「运行台账」里看这一次是否落账。</div>`;
+      trackInflight(jobId, false);                // 状态都读不到了，不能再挂着一个"在跑"
       return;                                     // 停轮询：不再无声地每 0.9 秒重试
     }
     setTimeout(() => poll(jobId, kind, id), 1500);
     return;
   }
-  if (!st || st.error) { if (box) box.querySelector(".jbody").innerHTML = `<b class="neg">任务丢失</b>`; return; }
+  if (!st || st.error) {
+    trackInflight(jobId, false);
+    if (box) box.querySelector(".jbody").innerHTML = `<b class="neg">任务丢失</b>`;
+    return;
+  }
   if (st.pool_range && (!POOL || POOL[0] !== st.pool_range[0])) {
     POOL = st.pool_range; applyPoolHint();
     try { sessionStorage.setItem("pool", JSON.stringify(POOL)); } catch (e) { /* 隐私模式等 */ }
@@ -628,7 +672,10 @@ async function poll(jobId, kind, id) {
       + (st.status === "running" || st.status === "queued"
           ? `<div>… ${esc(st.step)} <span class="sub">已用 ${el.toFixed(0)}s</span></div>` : "");
   }
-  if (st.status === "running" || st.status === "queued") { setTimeout(() => poll(jobId, kind, id), 900); return; }
+  if (st.status === "running" || st.status === "queued") {
+    trackInflight(jobId, true); setTimeout(() => poll(jobId, kind, id), 900); return;
+  }
+  trackInflight(jobId, false);              // 结束（不管是 done 还是 error）就从徽标里摘掉
   if (st.status === "error") {
     if (box) box.querySelector(".jbody").innerHTML = `<div class="verdict none">${esc(st.error)}</div>`;
     return;
