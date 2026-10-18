@@ -77,6 +77,36 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(code, path.read_bytes(), "text/html; charset=utf-8")
 
+    def _report(self, code: int, path: Path, job_id: str | None = None) -> None:
+        """托管一份报告 —— **在服务端**给它加一条"回到平台"的返回条。
+
+        为什么在服务端注入而不是写进报告文件：报告是**可下载、可归档**的自包含产物
+        （`selfcheck` 明令不许出现 `https?://`），写死一个 `http://127.0.0.1:…` 会让
+        自检失败、归档后链接也是死的。而注入的服务端那条只在**由本平台托管时**存在 ——
+        下载下来的那一份仍然干净、仍然自包含。（审计当初给的也是这条建议。）
+        """
+        if not path.is_file():
+            return self._json(404, {"error": f"找不到 {path.name}"})
+        html = path.read_text(encoding="utf-8")
+        bar = ('<style>@media print{.hostbar{display:none}}</style>'
+               '<div class="hostbar" style="position:fixed;left:14px;bottom:14px;z-index:9;'
+               'background:#161a22;border:1px solid #262b36;border-radius:999px;padding:6px 12px;'
+               'font:13px/1.4 -apple-system,PingFang SC,Arial,sans-serif;color:#e6e8ee">'
+               '← <a href="/#runs" style="color:#8ab4f8;text-decoration:none">回到平台（这份运行在台账里）</a>'
+               + (f'<span style="color:#9aa3b2"> · job {job_id}</span>' if job_id else "")
+               + f'<span style="color:#9aa3b2"> · {path.name}</span></div>')
+        if "</body>" in html:
+            html = html.replace("</body>", bar + "</body>", 1)
+        else:
+            html += bar
+        body = html.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, fmt, *args):               # 默认会往 stderr 刷每一条请求
         pass
 
@@ -185,14 +215,14 @@ class Handler(BaseHTTPRequestHandler):
             f = (RESULTS / m.group(1)).resolve()
             if f.parent != RESULTS.resolve():
                 return self._json(400, {"error": "报告路径越界"})
-            return self._html(200, f)
+            return self._report(200, f)
         m = re.fullmatch(r"/report/([0-9a-f]{6,32})", p)
         if m:
             jid = m.group(1)
             if not _JOB_ID.match(jid):
                 return self._json(400, {"error": "任务 id 非法"})
             # 只接受由本次服务生成的报告文件（不拼用户输入、不做目录遍历）
-            return self._html(200, RESULTS / f"web_report_{jid}.html")
+            return self._report(200, RESULTS / f"web_report_{jid}.html", job_id=jid)
         self._json(404, {"error": f"未知路径 {p}"})
 
     def do_POST(self) -> None:                       # noqa: N802

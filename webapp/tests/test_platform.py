@@ -449,6 +449,9 @@ def test_server_binds_localhost_only():
 # ---------------------------------------------------------------- 按钮/导航清单（本循环的机器化）
 
 def test_the_page_has_the_affordances_development_and_backtesting_need():
+    # 注：「回到平台」的返回条**不在**这张清单里 —— 它在服务端注入（server.py 的 _report），
+    # 断在 test_served_reports_get_a_back_to_platform_bar_but_the_file_stays_clean 里。
+    # 这张清单只扫 index.html，把只存在于服务端的字符串加进来会红（我自己加错过一次）。
     """页面必须齐备「开发 / 回测」所需的按钮与导航 —— 少一个就红。
 
     为什么写成清单断言：这一层没有 JS 单测，"按钮还在不在"只能靠读页面源码；
@@ -580,6 +583,30 @@ def test_runs_route_counts_holdout_touches_over_the_whole_ledger(http, tmp_path,
     d = json.loads(_get(http + "/api/runs")[1])
     assert d["holdout_touches"] == 2, d          # 1 与 3 都落在 holdout 内
     assert d["total"] == 3
+
+
+def test_served_reports_get_a_back_to_platform_bar_but_the_file_stays_clean(
+        http, tmp_path, monkeypatch):
+    """返回条只在**托管时**存在：文件本身必须仍然自包含、仍然干净。
+
+    报告是可下载、可归档的产物（自检明令不许有 `https?://`）—— 把返回链接写进文件里，
+    自检会红、归档后链接是死的。所以只在服务端响应时注入，并实测"下载到的那一份没有它"。
+    """
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    f = tmp_path / "web_report_abc123def456.html"
+    f.write_text("<!doctype html><title>回测明细 · x</title>"
+                 "<div class='sub'>窗口 2025-01-01 → 2025-10-13</div></body></html>", encoding="utf-8")
+    code, body = _get(http + "/report/abc123def456")
+    served = body.decode()
+    assert code == 200
+    assert 'class="hostbar"' in served and 'href="/#runs"' in served, "托管时应有返回条"
+    assert "job abc123def456" in served
+    assert "@media print" in served, "打印时不该把这条浮层打到纸上"
+    # ⚠️ 关键：**文件本身**没有被动过
+    disk = f.read_text(encoding="utf-8")
+    assert "hostbar" not in disk and "回到平台" not in disk, "返回条被写进文件了"
+    # 也没有引入外链（自检的那条规矩依旧成立）
+    assert "http://" not in served.replace("https://", "")
 
 
 def test_reports_route_carries_the_params_that_run_used(http, tmp_path, monkeypatch):
