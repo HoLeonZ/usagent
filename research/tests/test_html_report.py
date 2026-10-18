@@ -117,6 +117,47 @@ def test_report_navigation_and_print_are_present(chain):
     assert H.selfcheck(doc, n) == []
 
 
+def test_exit_reason_summary_matches_the_trades_it_claims_to_summarize(chain):
+    """报告里的「按出场原因」必须与它下面那张逐笔表**逐项对得上**。
+
+    为什么单独钉它：这张汇总是"读报告的人用来看整体"的那一块，一旦算错（分组漏了、
+    合计拿权益总收益冒充逐笔平均、占比不归一），读者会拿着一个错的结论去调策略，
+    而报告看起来毫无异常。所以测试**自己重算一遍**，不调用被测函数。
+    """
+    panel, ind = chain
+    res, eq, ind2, bench, summary, _ = RR.run(*WIN, "us_reversal_dip_v1", 0)
+    trades = res["trades"]
+    assert len(trades) > 0, "合成市场上要有成交，否则是空断言"
+    rows = H.exit_reason_rows(trades)
+
+    # 1. 覆盖完整、不重不漏：每一笔都被分到恰好一类
+    assert sum(r["n"] for r in rows) == len(trades)
+    assert {r["reason"] for r in rows} == set(trades["exit_reason"].unique())
+    # 2. 占比归一
+    assert abs(sum(r["share"] for r in rows) - 1.0) < 1e-9
+    # 3. 每类的四个数都要与**直接重算**一致（不是"看着像"）
+    for r in rows:
+        g = trades[trades["exit_reason"] == r["reason"]]
+        assert r["n"] == len(g)
+        assert abs(r["share"] - len(g) / len(trades)) < 1e-12
+        assert abs(r["mean_net_return"] - float(g["net_return"].mean())) < 1e-12
+        assert abs(r["sum_net_pnl"] - float(g["net_pnl"].sum())) < 1e-6
+        assert abs(r["win_rate"] - float((g["net_pnl"] > 0).mean())) < 1e-12
+    # 4. 从多到少（"哪一类出场最多"要一眼可见）
+    assert [r["n"] for r in rows] == sorted((r["n"] for r in rows), reverse=True)
+
+    # 5. 报告里要真的画出这张表、并且**只给出现过的原因**配图例
+    doc = H.render_html(trades, eq, ind2, summary["signal"], bench, summary,
+                        explain=H.condition_rows)
+    assert H.selfcheck(doc, len(trades)) == []
+    assert "按出场原因（从多到少）" in doc
+    for reason in {r["reason"] for r in rows}:
+        assert f'<code>{reason}</code>' in doc, f"{reason} 没进报告"
+    absent = set(H.EXIT_LEGEND) - {r["reason"] for r in rows}
+    for reason in absent:
+        assert f'<code>{reason}</code>=' not in doc, f"{reason} 没出现过却配了图例"
+
+
 def test_note_overrides_the_missing_verdict_fallback(chain):
     """族没有 VERDICT：报告**必须**明说"没有声明负面证据"，除非调用方给了 --note。
 

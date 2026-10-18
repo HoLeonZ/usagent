@@ -298,6 +298,44 @@ def inline_md(text: str) -> str:
     return out
 
 
+# 出场原因的**中文图例**：引擎里是英文裸码（broker.EXIT_REASONS），报告此前只印码，
+# 读者得去翻源码才知道 sl_gap 与 sl 的区别（审计实测「图例」在报告里出现 0 次）。
+# 语义按 broker.py 的**赋值点**写，不是猜的：
+#   sl/tp       —— 盘中触及止损/止盈价，按那个价成交（broker.py 的 close_position(..., sl_fill_at)）
+#   sl_gap/tp_gap —— 开盘就跳空过线，按**开盘价**成交（close_position(pos, day, o, ...)）
+#   max_hold    —— 持有到 spec["max_hold"] 上限，按当日收盘价平
+#   eod         —— 窗口结束当天的收盘平仓
+#   regime      —— regime 门翻掉，按开盘价平
+EXIT_LEGEND = {
+    "sl": "盘中触及止损价，按止损价成交",
+    "sl_gap": "跳空跌破止损 —— 按**开盘价**成交（比止损价更差）",
+    "tp": "盘中触及止盈价，按止盈价成交",
+    "tp_gap": "跳空高过止盈 —— 按**开盘价**成交（比止盈价更好）",
+    "max_hold": "持有到最长天数上限，按当日收盘平",
+    "eod": "窗口结束，按最后一日收盘平",
+    "regime": "regime 门翻转，按开盘价平",
+}
+
+
+def exit_reason_rows(trades: pd.DataFrame) -> list[dict]:
+    """按出场原因分档 —— 读者要先知道"这一类出场整体如何"，才有必要往下翻几十张卡。
+
+    为什么在这里算而不是复用 `broker.summarize` 的三个 count：那三个是**粗分组**
+    （tp+tp_gap / sl+sl_gap / max_hold），回答不了"跳空止损这一小撮到底亏多少"。
+    这里是同一列（exit_reason）的另一种分组，只做呈现，不改任何判据。
+    """
+    if trades is None or trades.empty or "exit_reason" not in trades.columns:
+        return []
+    rows = []
+    for reason, g in trades.groupby("exit_reason", sort=False):
+        rows.append({"reason": str(reason), "n": int(len(g)),
+                     "share": float(len(g) / len(trades)),
+                     "mean_net_return": float(g["net_return"].mean()),
+                     "sum_net_pnl": float(g["net_pnl"].sum()),
+                     "win_rate": float((g["net_pnl"] > 0).mean())})
+    return sorted(rows, key=lambda d: -d["n"])
+
+
 CSS = """
 :root{--bg:#0f1115;--fg:#e6e8ee;--dim:#9aa3b2;--line:#262b36;--up:#31c48d;--dn:#f05252;
 --acc:#5b8def;--sl:#f05252;--tp:#31c48d;--warn:#f0b429;--card:#161a22}
@@ -344,6 +382,11 @@ th{color:var(--dim);font-weight:500;text-align:right}
 th:first-child,td:first-child{text-align:left}
 tr:hover td{background:#1b2029}
 .pos{color:var(--up)}.neg{color:var(--dn)}
+.reasonbox{margin:12px 0 6px}
+.rsum{font-size:12.5px}
+.rsum td,.rsum th{padding:4px 8px}
+.rleg{font-size:12px;color:var(--dim);margin:8px 0 0;line-height:1.7}
+.rleg code{background:transparent;padding:0;color:var(--fg)}
 .conds{font-size:12px;border-collapse:collapse;margin-top:10px;width:100%}
 .conds td,.conds th{padding:3px 7px;border-bottom:1px solid #1e222b}
 .ok{color:var(--up)}.no{color:var(--dn)}
@@ -495,7 +538,41 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     parts.append('</table></div>')
 
     # ---- 交易总表 ----
-    parts.append('<h2 id="s-trades">全部交易</h2><div class="card"><table><thead><tr>')
+    # ---- 出场原因分布（在 90 张卡之前先说清"钱是从哪一类出场来的"）----
+    _rr = exit_reason_rows(trades)
+    if _rr:
+        parts.append('<h2 id="s-trades">全部交易</h2><div class="card">'
+                     '<div class="reasonbox"><b>按出场原因（从多到少）</b>'
+                     '<table class="rsum"><thead><tr>'
+                     '<th>原因</th><th>笔数</th><th>占比</th><th>平均净收益</th>'
+                     '<th>合计净盈亏</th><th>胜率</th></tr></thead><tbody>')
+        for d in _rr:
+            cls = "pos" if d["mean_net_return"] >= 0 else "neg"
+            parts.append(
+                f'<tr><td><code>{e(d["reason"])}</code></td><td>{d["n"]}</td>'
+                f'<td>{d["share"]*100:.0f}%</td>'
+                f'<td class="{cls}">{d["mean_net_return"]*100:+.2f}%</td>'
+                f'<td class="{"pos" if d["sum_net_pnl"] >= 0 else "neg"}">'
+                f'${d["sum_net_pnl"]:,.0f}</td>'
+                f'<td>{d["win_rate"]*100:.0f}%</td></tr>')
+        # 合计行必须与上面每一行**同一列同名**：这里是"逐笔平均净收益"（不是权益总收益 tot，
+        # 那是另一回事；把它们并排放会让人以为逐笔平均 == 组合收益）。
+        _mret = float(trades["net_return"].mean())
+        _wpct = float((trades["net_pnl"] > 0).mean())
+        parts.append(f'<tr><td><b>合计</b></td><td><b>{len(trades)}</b></td><td>100%</td>'
+                     f'<td class="{"pos" if _mret >= 0 else "neg"}">{_mret*100:+.2f}%</td>'
+                     f'<td class="{"pos" if trades["net_pnl"].sum() >= 0 else "neg"}">'
+                     f'${trades["net_pnl"].sum():,.0f}</td>'
+                     f'<td>{_wpct*100:.0f}%</td></tr>')
+        parts.append('</tbody></table><div class="rleg">出场原因的含义：'
+                     + " ・ ".join(f'<code>{e(k)}</code>={inline_md(v)}'
+                                   for k, v in EXIT_LEGEND.items()
+                                   if k in {d["reason"] for d in _rr})
+                     + f'</div></div>')
+        # 表格仍在本卡片里（同一个 .card），只是接在汇总下面
+        parts.append('<table><thead><tr>')
+    else:
+        parts.append('<h2 id="s-trades">全部交易</h2><div class="card"><table><thead><tr>')
     for h in ("#", "标的", "信号日", "入场日", "入场价", "止损", "止盈", "股数",
               "出场日", "出场价", "出场原因", "持有", "净收益"):
         parts.append(f'<th>{e(h)}</th>')
