@@ -413,7 +413,10 @@ body:has(#xf-regime:checked) .card:not([data-reason="regime"]){display:none}
 .nodata{color:var(--dim);padding:16px}
 code{background:#1b2029;padding:1px 5px;border-radius:4px;font-size:12px}
 h2{scroll-margin-top:12px}
-.toc{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 4px}
+/* 粘性小节导航：这份报告实测 87k px 高（90+ 屏），目录放在最上面等于走到中段就够不着了。
+   sticky 让它一直在顶上；打印时由 @media print 隐藏。 */
+.toc{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 4px;position:sticky;top:0;z-index:5;
+     background:var(--bg);padding:8px 0 6px;border-bottom:1px solid var(--line)}
 .toc a{font-size:12.5px;color:var(--fg);text-decoration:none;border:1px solid var(--line);
        border-radius:999px;padding:2px 10px;background:var(--card)}
 .toc a:hover{border-color:var(--acc);color:var(--acc)}

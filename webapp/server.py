@@ -9,6 +9,7 @@
     GET  /                  页面（`static/index.html`，自包含、无 CDN）
     GET  /api/catalog       策略目录（preset 参数 / 族网格 / 负面证据）
     POST /api/run           提交回测 {kind,id,lo,hi,params?} → {job id}
+    POST /api/cancel/<id>   取消一次运行（粗粒度：当前这一步跑完才停）
     GET  /api/job/<id>      任务状态（steps / metrics / report 链接）
     GET  /api/runs          台账（最近 30 条 + 总条数）
     GET  /api/runs.csv      台账**全部**记录的 CSV（页面上的表有 30 条上限）
@@ -175,7 +176,15 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": f"未知路径 {p}"})
 
     def do_POST(self) -> None:                       # noqa: N802
-        if self.path.split("?", 1)[0] != "/api/run":
+        p = self.path.split("?", 1)[0]
+        if p.startswith("/api/cancel/"):
+            # 取消一次运行。粗粒度：当前这一步跑完才停（见 jobs.cancel 的说明）。
+            # ⚠️ 只调用一次并记住结果：调两次的话，若任务恰好在两次之间跑完，
+            # 第一次说"受理了"、第二次说"没受理"，返回给页面的是后者 —— 自相矛盾。
+            m = re.fullmatch(r"/api/cancel/([0-9a-f]{6,32})", p)
+            ok = bool(m) and jobs.cancel(m.group(1))
+            return self._json(200 if ok else 404, {"cancelled": ok})
+        if p != "/api/run":
             return self._json(404, {"error": "未知路径"})
         try:
             n = int(self.headers.get("Content-Length") or 0)

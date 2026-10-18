@@ -87,7 +87,7 @@ def _wait(job_id: str, timeout: float = 120.0) -> dict:
     while time.time() - t0 < timeout:
         st = jobs.status(job_id)
         assert st is not None
-        if st["status"] in ("done", "error"):
+        if st["status"] in ("done", "error", "cancelled"):
             return st
         time.sleep(0.2)
     raise AssertionError("任务超时")
@@ -119,6 +119,39 @@ def test_second_run_raises_k_the_multiplicity_is_visible(offline):
     k1, k2 = first["metrics"]["dsr_k"], second["metrics"]["dsr_k"]
     assert k2 == k1 + 1, f"k 没随点击次数上涨：{k1} → {k2}"
     assert second["metrics"]["k_breakdown"]["platform_runs_before"] == 1
+
+
+def test_a_queued_run_can_be_cancelled_and_is_not_recorded(offline):
+    """取消要真的生效，且**不进台账** —— k 只数"被看过的试验"，不数花掉的 CPU。
+
+    为什么用"排队中"这条路径测：运行本身只要一两秒，抢时序必然 flaky；而排队是确定的 ——
+    先握住重活锁，提交的任务必然停在 queued，取消它、再放锁，结果必然 cancelled。
+    （粗粒度的诚实边界：正在跑的那一步跑完才停，这条断言只覆盖"还没开始跑"的那段。）
+    """
+    jobs._LOCK.acquire()
+    try:
+        jid = jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                           "lo": WIN[0], "hi": WIN[1]})["id"]
+        assert jobs.status(jid)["status"] == "queued"
+        assert jobs.cancel(jid) is True
+        assert jobs.cancel(jid) is True, "重复请求取消应当是幂等的（任务还没结束）"
+    finally:
+        jobs._LOCK.release()
+    st = _wait(jid)
+    assert st["status"] == "cancelled", st
+    assert "未记账" in st["error"], st["error"]
+    # 台账里不能有它留下的任何一行
+    led = offline / "web_runs.jsonl"
+    assert not led.exists() or "cancelled" not in led.read_text(encoding="utf-8")
+    assert jobs.prior_runs("preset:us_reversal_dip_v1") == 0, "取消的运行不该推高 k"
+
+
+def test_cancel_refuses_unknown_or_finished_jobs(offline):
+    assert jobs.cancel("deadbeefdead") is False, "未知任务不该被受理"
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert st["status"] == "done"
+    assert jobs.cancel(st["id"]) is False, "已经跑完的任务不该被受理"
 
 
 def test_unknown_strategy_and_bad_window_surface_as_errors(offline):
@@ -249,6 +282,14 @@ def test_no_literal_markdown_leaks_into_visible_copy():
     body = re.sub(r"<script>.*?</script>", "", html, flags=re.S)
     body = re.sub(r"<style>.*?</style>", "", body, flags=re.S)
     offenders = [ln.strip()[:70] for ln in body.splitlines() if "**" in ln]
+    # ⚠️ 这个盲区我自己踩过第四次：**JS 生成的文案**（模板字符串拼出来的 HTML）不在静态标记里，
+    # 上面的括号扫不到它。所以 script 里也要扫 —— 先剥掉注释（注释里可以有 markdown），
+    # 再看剩下的还有没有 `**`。JS 里的 `**` 只可能是幂运算或文案，这个页面没有前者。
+    m = re.search(r"<script>(.*?)</script>", html, re.S)
+    js = m.group(1) if m else ""
+    js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)
+    js = "\n".join(re.sub(r"(?<![:/])//.*$", "", ln) for ln in js.splitlines())
+    offenders += [ln.strip()[:70] for ln in js.splitlines() if "**" in ln]
     assert not offenders, f"可见文案里有 markdown 的 **：{offenders}"
 
 
@@ -348,6 +389,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "徽标在轮询失败/任务丢失时也会摘掉（不留假在跑）": "trackInflight(jobId, false)",
         "超长机器串可断（实测 390px 下曾顶破 47px）": "color:#cbd5e1;overflow-wrap:anywhere",
         "窄屏压缩顶栏（sticky 的每一行都从正文永久扣走）": "@media (max-width:560px)",
+        "运行中可取消（粗粒度，界面写明）": "function cancelJob(",
+        "取消的终止态有专门分支（否则会掉进 metrics 渲染）": 'st.status === "cancelled"',
+        "取消说清「不进台账」": "已取消的运行<b>不进台账</b>",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]

@@ -154,6 +154,7 @@ const overlaps = (a, b) => !(a[1] < b[0] || b[1] < a[0]);
 let CAT = null, RUNS = [], REPORTS = [], SORT = {key: "ts", dir: -1};
 const T0 = {};                       // job id → 提交时刻（显示「已用 Ns」，冷启动不该像假死）
 const INFLIGHT = new Set();          // 还没结束的任务（顶栏徽标据此显示；滚到哪儿都看得见）
+const CANCELREQ = new Set();         // 已经点过"取消"的任务（面板每轮重绘，提示要能活下来）
 let _busyTimer = null;
 
 function paintBusy() {
@@ -635,6 +636,23 @@ function fail(msg, btn) {
 }
 
 const POLLFAIL = {};                              // jobId -> 连续失败次数
+async function cancelJob(jobId) {
+  CANCELREQ.add(jobId);
+  const box = $("job-" + jobId);
+  try {
+    const r = await (await fetch("/api/cancel/" + jobId, {method: "POST"})).json();
+    if (!r.cancelled) {
+      CANCELREQ.delete(jobId);
+      if (box) box.querySelector(".jsteps").insertAdjacentHTML("beforeend",
+        `<div class="sub">这次已经结束了，不用取消</div>`);
+    }
+  } catch (exc) {
+    CANCELREQ.delete(jobId);
+    if (box) box.querySelector(".jsteps").insertAdjacentHTML("beforeend",
+      `<div class="neg">取消失败：${esc(exc.message)}</div>`);
+  }
+}
+
 async function poll(jobId, kind, id) {
   const box = $("job-" + jobId);
   let st;
@@ -651,6 +669,14 @@ async function poll(jobId, kind, id) {
       return;                                     // 停轮询：不再无声地每 0.9 秒重试
     }
     setTimeout(() => poll(jobId, kind, id), 1500);
+    return;
+  }
+  if (st && st.status === "cancelled") {
+    // ⚠️ 必须排在 `st.error` 那个判据之前：取消的原因文案也放在 error 字段里，而那条判据
+    // 的本意是"接口返回了 {error: …}（任务找不到了）"—— 实测被它拦成了「任务丢失」。
+    trackInflight(jobId, false);
+    if (box) box.querySelector(".jbody").innerHTML =
+      `<div class="verdict none">已取消 —— ${esc(st.error || "")}</div>`;
     return;
   }
   if (!st || st.error) {
@@ -670,7 +696,12 @@ async function poll(jobId, kind, id) {
     box.querySelector(".jsteps").innerHTML = (st.steps || []).map(s =>
       `<div>✓ ${esc(s.name)} <span class="sub">${s.seconds}s</span></div>`).join("")
       + (st.status === "running" || st.status === "queued"
-          ? `<div>… ${esc(st.step)} <span class="sub">已用 ${el.toFixed(0)}s</span></div>` : "");
+          ? `<div>… ${esc(st.step)} <span class="sub">已用 ${el.toFixed(0)}s</span>
+               <button class="mini" onclick="cancelJob('${esc(jobId)}')">取消</button>
+               <span class="sub">粗粒度：当前这一步跑完才停</span></div>`
+            + (CANCELREQ.has(jobId)
+                ? `<div class="sub">已请求取消 —— 当前这一步跑完就停（已取消的运行<b>不进台账</b>）</div>` : "")
+          : "");
   }
   if (st.status === "running" || st.status === "queued") {
     trackInflight(jobId, true); setTimeout(() => poll(jobId, kind, id), 900); return;

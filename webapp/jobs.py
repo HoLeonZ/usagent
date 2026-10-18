@@ -37,6 +37,10 @@ from research import render_report as RR, signals                 # noqa: E402
 RESULTS = ROOT / "research" / "results"
 RUNS_LEDGER = RESULTS / "web_runs.jsonl"
 
+class Cancelled(Exception):
+    """用户取消。**粗粒度**：只在步骤之间检查 —— 取链路与回测都是单次调用，中途打断不了。"""
+
+
 _LOCK = threading.Lock()          # 重活串行：面板载入与回测都在这个锁里
 _JOBS: dict[str, dict] = {}
 _CHAIN: dict[str, tuple] = {}     # universe_key -> (panel, ind, reg)；目前只有一种池子口径
@@ -149,7 +153,7 @@ def submit(req: dict) -> dict:
     """收一份回测请求，立刻返回任务句柄（前端轮询 status）。"""
     job_id = uuid.uuid4().hex[:12]
     # 初始 step 就把"最慢的那一步"说出来（首次冷启动 30–70 秒在界面上不能是假死）
-    job = {"id": job_id, "status": "queued",
+    job = {"id": job_id, "status": "queued", "cancel": False,
            "step": "取链路（首次约 30–70 秒；命中缓存近 0 秒）", "steps": [],
            "request": req, "metrics": None, "report": None, "error": None,
            "started": obs.now_iso(), "seconds": None}
@@ -158,9 +162,28 @@ def submit(req: dict) -> dict:
     return dict(job)
 
 
+def cancel(job_id: str) -> bool:
+    """请求取消一次运行。返回「这次请求是否被受理」。
+
+    诚实边界：当前这一步**跑完才会停**（载面板 30–70 秒、回测数秒，都是单次调用，
+    打断不了）—— 界面上也这么说。取消的运行**不进台账**：没有结果被看到，
+    它就不该计入 §5 的迭代次数（k 是"看过的试验数"，不是"花掉的 CPU"）。
+    """
+    j = _JOBS.get(job_id)
+    if not j or j["status"] in ("done", "error", "cancelled"):
+        return False
+    j["cancel"] = True
+    return True
+
+
 def status(job_id: str) -> dict | None:
     j = _JOBS.get(job_id)
     return dict(j) if j else None
+
+
+def _check_cancel(job: dict) -> None:
+    if job.get("cancel"):
+        raise Cancelled("已取消")
 
 
 def _step(job: dict, name: str, t0: float) -> None:
@@ -175,6 +198,7 @@ def _run(job_id: str) -> None:
     try:
         with _LOCK:                                   # 重活串行，避免面板/CPU 互抢
             job["status"] = "running"
+            _check_cancel(job)                        # 排队期间被取消：连面板都不载
             kind, ident = req["kind"], req["id"]
             lo, hi = req["lo"], req["hi"]
             if lo >= hi:
@@ -190,6 +214,7 @@ def _run(job_id: str) -> None:
             else:
                 raise ValueError(f"未知策略类型 {kind!r}")
             _step(job, "取链路（命中缓存则近 0 秒）", t0)
+            _check_cancel(job)
             panel, ind, reg = chain
 
             # ---- 窗口体检（**在**信号与回测之前）----
@@ -219,11 +244,13 @@ def _run(job_id: str) -> None:
                                              **P["signal"])
                 hint = "该 preset 声明 n_comparisons=%d" % int(P.get("n_comparisons") or 1)
             _step(job, f"计算信号（{len(sig)} 个候选）", t0)
+            _check_cancel(job)
 
             t0 = time.perf_counter()
             res = broker.simulate(P, sig, ind, start=lo, end=hi)
             eq = res["equity"].set_index("date")
             _step(job, f"回测（成交 {len(res['trades'])} 笔）", t0)
+            _check_cancel(job)
 
             ctl_runs = int(req.get("control_runs") or 0)
             cagr_now = float(metrics.cagr(eq["equity"], pd.Series(eq.index)))
@@ -292,6 +319,13 @@ def _run(job_id: str) -> None:
                                        else "；运气对照**未跑**（报告里会写明）"),
                         "report": f"/report/{job_id}", "report_path": str(report),
                         "selfcheck": problems})
+    except Cancelled:
+        # 取消**不写台账**：没有结果被看到，就不算一次被看过的试验（k 只数看过的）
+        job["status"] = "cancelled"
+        # 面板会打「已取消 —— {这句}」，所以这里不要再重复"已取消"
+        job["error"] = "未记账：这一跑没有结果被看到，因此不计入 k"
+        obs.log_run("平台回测", False, seconds=time.perf_counter() - t_all,
+                    strategy=f"{req.get('kind')}:{req.get('id')}", detail="cancelled")
     except Exception as exc:                          # noqa: BLE001 —— 页面要看到原因
         job["status"] = "error"
         job["error"] = f"{type(exc).__name__}: {exc}"
