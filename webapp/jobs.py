@@ -172,6 +172,22 @@ def _run(job_id: str) -> None:
             _step(job, "取链路（命中缓存则近 0 秒）", t0)
             panel, ind, reg = chain
 
+            # ---- 窗口体检（**在**信号与回测之前）----
+            # 审计实测：一个"窗口里没有交易日"的输入，要先跑完信号（7–11 秒）才由 broker 报错，
+            # 而报错还不告诉你合法范围。链路已经在手上了，交易日轴几乎不值钱 —— 就在这里问，
+            # 答案里带上这个池子真正可评估的那段。
+            axis = pd.Index(sorted(panel["date"].unique()))
+            lo_ts, hi_ts = pd.Timestamp(lo), pd.Timestamp(hi)
+            if not len(axis[(axis >= lo_ts) & (axis < hi_ts)]):
+                raise ValueError(
+                    f"窗口 {lo}..{hi} 里没有任何交易日 —— 这个池子的数据覆盖 "
+                    f"{axis[0].date()} .. {axis[-1].date()}（指标预热完之后可评估的是 "
+                    f"{panel_mod.first_signal_date(panel).date()} .. {axis[-1].date()}）")
+            # 可评估范围**顺带说出来**（不是错误，只是"这一段会空着"）：界面据此在窗口旁边
+            # 显示范围，省掉"跑完才发现起点太早/终点超出数据"。
+            job["pool_range"] = [str(panel_mod.first_signal_date(panel).date()),
+                                 str(axis[-1].date())]
+
             t0 = time.perf_counter()
             if P.get("family"):
                 fid = str(P["family"])

@@ -129,6 +129,37 @@ def test_unknown_strategy_and_bad_window_surface_as_errors(offline):
     assert st2["status"] == "error" and "窗口非法" in st2["error"]
 
 
+def test_a_window_with_no_trading_days_fails_fast_and_names_the_range(offline):
+    """空窗口要在**信号之前**就被挡下，且报错必须说出合法范围（审计实测两样都没有）。
+
+    原本的路径：链路面板载入 → 算信号（7–11 秒）→ broker 抛「窗口内没有任何交易日」，
+    而这句话没告诉读者该填什么。交易日轴在载完面板之后几乎不值钱，就在那一步问。
+    """
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": "1999-01-01", "hi": "1999-02-01"})["id"])
+    assert st["status"] == "error", st
+    assert "没有任何交易日" in st["error"] and "覆盖" in st["error"], st["error"]
+    assert "1999" in st["error"]
+    # 而且**没跑信号**（那一步的名字不该出现在步骤里）
+    assert not any("计算信号" in s2["name"] for s2 in st["steps"]), st["steps"]
+
+
+def test_a_run_reports_the_pool_range_so_the_page_can_warn_before_running(offline):
+    """跑过一次之后，页面要知道"这个池子哪一段可评估" —— 据此在窗口旁显示范围并当场预警。"""
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert st["status"] == "done", st.get("error")
+    lo, hi = st["pool_range"]
+    # 起止都必须是合法日期且起点早于终点（不写死具体年份：合成市场的跨度是 fixture 的事）
+    import pandas as pd
+    lo_ts, hi_ts = pd.Timestamp(lo), pd.Timestamp(hi)
+    assert lo_ts < hi_ts, st["pool_range"]
+    # 这条范围必须与刚跑过的窗口**重叠**（这正是页面拿它做的那个判断）—— 否则"可评估范围"
+    # 与"刚跑出成交的窗口"互相矛盾。注意不能断言"含住窗口"：数据尾端早于窗口右端是常态
+    # （合成市场到 2024-12-27，而评测窗到 2025-01-01），那种情况本来就只是"后面没数据"。
+    assert lo_ts < pd.Timestamp(WIN[1]) and hi_ts > pd.Timestamp(WIN[0]), st["pool_range"]
+
+
 def test_family_path_uses_the_registry_template(offline):
     """族型请求走的是"已注册 preset + 换掩码"那条路（与 CLI 报告同一做法）。"""
     st = _wait(jobs.submit({"kind": "family", "id": "str",
@@ -262,6 +293,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "族那个空操作按钮已禁用并说明原因（声明窗是 preset 的属性）": "（族没有声明窗）",
         "两个日期输入可被读屏区分": 'aria-label="窗口起点"',
         "搜索 0 命中时分节标题说实话（原本还写着「6 条」）": "这一节没有命中",
+        "窗口旁显示池子可评估范围（跑过一次后就有）": "池子可评估范围",
+        "与池子范围不重叠时当场预警（不必白等一次）": "完全不重叠",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]

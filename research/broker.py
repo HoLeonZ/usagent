@@ -372,7 +372,9 @@ def simulate(
     lo, hi = pd.Timestamp(start), pd.Timestamp(end)
     axis = [d for d in days if lo <= d < hi]
     if not axis:
-        raise BrokerError(f"窗口 {start}..{end} 内没有任何交易日")
+        # 报错要**可行动**：只说"没有交易日"，读者无从知道该填什么。数据轴就在手边。
+        raise BrokerError(f"窗口 {start}..{end} 内没有任何交易日 —— 本池子的交易日范围是 "
+                          f"{days[0].date()} .. {days[-1].date()}")
 
     cost_half = costs.half_rate(cost_bps_roundtrip)
 

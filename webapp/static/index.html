@@ -217,6 +217,7 @@ function card(e, runCount) {
       <button class="mini" onclick="copyCmd('${e.kind}','${e.id}')">复制命令</button>
       <button class="mini" onclick="showSrc('${e.kind}','${e.id}')">查看定义体</button>
       <span class="sub">已跑 <b>${runCount || 0}</b> 次</span>
+      <span class="sub poolhint">（池子可评估范围：跑过任意一条后显示）</span>
     </div>
     <div class="clip" id="clip-${a}"></div>
     <div class="sub ${held ? "warn" : ""}" id="flag-${a}">${held ? "⚠ 与 holdout 重叠（只准读一次）" : ""}</div>
@@ -236,8 +237,25 @@ function revalidate(kind, id) {
   const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
   const f = $("flag-" + kind + "-" + id);
   const bad = !(lo < hi), held = overlaps([lo, hi], HOLDOUT);
-  f.textContent = bad ? "✗ 窗口非法（起点必须早于终点）" : (held ? "⚠ 与 holdout 重叠（只准读一次）" : "");
-  f.className = "sub " + (bad || held ? "warn" : "");
+  // 与池子范围完全不重叠 ⇒ 这一跑必然空手（审计：此前要先等信号跑完才由 broker 报错，
+  // 而且报错不告诉你合法范围）。范围跑过一次就有（POOL），有就当场说。
+  const miss = POOL && !bad && !(lo < POOL[1] && hi > POOL[0]);
+  f.textContent = bad ? "✗ 窗口非法（起点必须早于终点）"
+    : miss ? `✗ 这段窗口与池子范围（${POOL[0]} .. ${POOL[1]}）完全不重叠 —— 跑下去只会空手`
+    : (held ? "⚠ 与 holdout 重叠（只准读一次）" : "");
+  f.className = "sub " + (bad || held || miss ? "warn" : "");
+}
+// 池子可评估范围（= 指标预热完成日 .. 数据最后一天）。跑过任意一条之后由任务状态带回来 ——
+// 不预取是因为"知道"这件事本身就要求先载面板，而载面板正是那个 30–70 秒的重活。
+// 存进 sessionStorage：刷新一次页面不该把"刚从一次 30 秒的重活里学到的东西"丢掉
+// （只在本次标签页里 —— 这是"这次会话说的话"，不是需要落盘的产物）。
+let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
+                    catch (e) { return null; } })();
+function applyPoolHint() {
+  document.querySelectorAll(".poolhint").forEach(el => {
+    el.textContent = POOL ? `池子可评估范围 ${POOL[0]} .. ${POOL[1]}（早于起点的部分没有信号）`
+                          : "（池子可评估范围：跑过任意一条后显示）";
+  });
 }
 function currentParams(kind, id) {
   if (kind !== "family") return null;
@@ -334,6 +352,7 @@ async function loadCatalog() {
   document.addEventListener("keydown", (ev) => {
     if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "k") { ev.preventDefault(); $("q").focus(); }
   });
+  applyPoolHint();
   applyFilter();
 }
 
@@ -474,6 +493,13 @@ async function poll(jobId, kind, id) {
     return;
   }
   if (!st || st.error) { if (box) box.querySelector(".jbody").innerHTML = `<b class="neg">任务丢失</b>`; return; }
+  if (st.pool_range && (!POOL || POOL[0] !== st.pool_range[0])) {
+    POOL = st.pool_range; applyPoolHint();
+    try { sessionStorage.setItem("pool", JSON.stringify(POOL)); } catch (e) { /* 隐私模式等 */ }
+    document.querySelectorAll("input[type=date]").forEach(i => revalidate(
+      i.id.includes("-preset-") ? "preset" : "family",
+      i.id.replace(/^(lo|hi)-(preset|family)-/, "")));
+  }
   const el = (Date.now() - (T0[jobId] || Date.now())) / 1000;
   if (box) {
     box.querySelector(".jsteps").innerHTML = (st.steps || []).map(s =>
