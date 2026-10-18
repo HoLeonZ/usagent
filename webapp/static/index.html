@@ -137,8 +137,14 @@ const T0 = {};                       // job id → 提交时刻（显示「已�
 // ---------------------------------------------------------------- 目录与卡片
 
 function windowPresets(e) {
-  const own = (e.kind === "preset") ? e.window : FULL;
-  return [["训练窗", TRAIN], ["全窗", FULL], ["声明窗", own], ["holdout", HOLDOUT]];
+  // 声明窗是**已交付 preset** 的属性（那是它被验证过的那段）。族是候选机制，还没有声明窗 ——
+  // 此前这里对族取 FULL，于是族卡上「声明窗」与「全窗」是同一件事（四个按钮里有一个空操作，
+  // 审计实测）。宁可少一个按钮，也不要一个按下去什么都没发生的按钮。
+  if (e.kind !== "preset") {
+    return [["训练窗", TRAIN], ["全窗", FULL], ["holdout", HOLDOUT],
+            ["（族没有声明窗）", null]];
+  }
+  return [["训练窗", TRAIN], ["全窗", FULL], ["声明窗", e.window], ["holdout", HOLDOUT]];
 }
 
 function familyParamControls(e) {
@@ -197,12 +203,16 @@ function card(e, runCount) {
     ${paramTable(e)}
     ${familyParamControls(e)}
     <div class="bar">
-      ${windowPresets(e).map(([lab, ww]) =>
-        `<button class="mini" onclick="setWindow('${e.kind}','${e.id}','${ww[0]}','${ww[1]}')">${lab}</button>`).join("")}
+      ${windowPresets(e).map(([lab, ww]) => ww
+        ? `<button class="mini" title="${ww[0]} .. ${ww[1]}"
+             onclick="setWindow('${e.kind}','${e.id}','${ww[0]}','${ww[1]}')">${lab}</button>`
+        : `<button class="mini" disabled title="声明窗是已交付 preset 的属性：族是候选机制，` +
+          `还没有被验证过的那段窗口。跑完网格、交付成 preset 之后它才有声明窗。">${lab}</button>`
+        ).join("")}
     </div>
     <div class="bar">
-      <label>窗口 <input type="date" id="lo-${a}" value="${w[0]}">
-        → <input type="date" id="hi-${a}" value="${w[1]}"></label>
+      <label>窗口 <input type="date" id="lo-${a}" value="${w[0]}" aria-label="窗口起点">
+        → <input type="date" id="hi-${a}" value="${w[1]}" aria-label="窗口终点"></label>
       <button id="btn-${a}" onclick="run('${e.kind}','${e.id}')">回测</button>
       <button class="mini" onclick="copyCmd('${e.kind}','${e.id}')">复制命令</button>
       <button class="mini" onclick="showSrc('${e.kind}','${e.id}')">查看定义体</button>
@@ -269,9 +279,22 @@ async function showSrc(kind, id) {
 function applyFilter() {
   const q = ($("q").value || "").trim().toLowerCase();
   let shown = 0;
+  // 分节也要说实话：0 命中时标题不能还写着「交付 preset（6 条）」—— 那看起来像
+  // "说有 6 条却一条都没显示"（审计实测两个分节标题始终显示）。逐节统计可见卡片。
+  const grids = [...document.querySelectorAll("#content .grid")];
+  const perGrid = grids.map(() => 0);
   document.querySelectorAll(".card").forEach(c => {
     const hit = !q || c.innerText.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
-    c.style.display = hit ? "" : "none"; if (hit) shown++;
+    c.style.display = hit ? "" : "none";
+    if (hit) { shown++; perGrid[grids.indexOf(c.closest(".grid"))]++; }
+  });
+  grids.forEach((g, i) => {
+    const h = g.previousElementSibling, cnt = h && h.querySelector(".cnt");
+    if (!cnt) return;                       // 总数从元素自己身上读（别从文案里正则回捞）
+    const total = h.dataset.total, unit = h.dataset.unit;
+    cnt.textContent = q
+      ? `（${perGrid[i]} / ${total} 匹配${perGrid[i] ? "" : "：这一节没有命中"}）`
+      : `（${total} ${unit}）`;
   });
   $("count").textContent = q ? `${shown} / ${CAT.presets.length + CAT.families.length} 张卡片匹配` : "";
 }
@@ -298,9 +321,9 @@ async function loadCatalog() {
   const rr = await (await fetch("/api/runs")).json();
   const runs = {}; (rr.runs || []).forEach(r => { runs[r.strategy_id] = (runs[r.strategy_id] || 0) + 1; });
   $("content").innerHTML =
-    `<h2 id="presets">交付 preset（${CAT.presets.length} 条）</h2>
+    `<h2 id="presets" data-total="${CAT.presets.length}" data-unit="条">交付 preset <span class="cnt">（${CAT.presets.length} 条）</span></h2>
      <div class="grid">${CAT.presets.map(e => card(e, runs["preset:" + e.id])).join("")}</div>
-     <h2 id="families">策略族（候选机制，${CAT.families.length} 个）</h2>
+     <h2 id="families" data-total="${CAT.families.length}" data-unit="个">策略族（候选机制）<span class="cnt">（${CAT.families.length} 个）</span></h2>
      <div class="grid">${CAT.families.map(e => card(e, runs["family:" + e.id])).join("")}</div>`;
   document.querySelectorAll("input[type=date]").forEach(inp => inp.addEventListener("change", () => {
     const rest = inp.id.replace(/^(lo|hi)-/, "");

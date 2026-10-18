@@ -258,6 +258,10 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "备注输入框（台账那一列原本没人能填）": 'id="note"',
         "复制的命令带上运气对照开关（否则 CLI 默认跑 200 次）": "--control-runs ${ctl}",
         "复制的命令产物与平台同一命名空间（跑完页面上看得见）": "web_report_cli_",
+        "窗口按钮自带「按下去会设成什么」": 'title="${ww[0]} .. ${ww[1]}"',
+        "族那个空操作按钮已禁用并说明原因（声明窗是 preset 的属性）": "（族没有声明窗）",
+        "两个日期输入可被读屏区分": 'aria-label="窗口起点"',
+        "搜索 0 命中时分节标题说实话（原本还写着「6 条」）": "这一节没有命中",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
