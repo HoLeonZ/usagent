@@ -36,6 +36,17 @@ h2{font-size:16px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid 
 .banner{margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--warn);
         background:#1a1712;border-radius:6px;font-size:12.5px;color:#f0d9b5}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(420px,100%),1fr));gap:14px}
+/* 首次使用的入门块：**默认收起**（老手不想每次多滚一屏），但一开就有三步入门 + 六个词。 */
+details.ft{margin:10px 0;border:1px solid var(--line);border-radius:8px;background:#12171e}
+details.ft summary{cursor:pointer;font-size:12.5px;color:var(--dim);padding:9px 12px}
+details.ft summary:hover{color:var(--fg)}
+details.ft[open] summary{border-bottom:1px solid var(--line);color:var(--fg)}
+.ftbody{padding:10px 14px 12px;font-size:12.5px;line-height:1.75}
+.ftbody ol{margin:0 0 10px;padding-left:22px}
+.ftbody li{margin:4px 0}
+.ftbody dl{margin:0;display:grid;grid-template-columns:max-content 1fr;gap:3px 12px}
+.ftbody dt{color:#cbd5e1;font-weight:600}
+.ftbody dd{margin:0;color:var(--dim)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:13px 14px}
 .card{scroll-margin-top:64px}
 .card:target{border-color:var(--up)}
@@ -122,6 +133,34 @@ table.ledger td{white-space:nowrap}
 
 <div class="wrap">
 <div class="banner" id="banner">正在读目录…</div>
+
+<details id="firsttime" class="ft">
+  <summary>第一次用？三步 + 六个词（点开）</summary>
+  <div class="ftbody">
+    <ol>
+      <li><b>挑一条</b>：卡片上的「最近一次」是它上次跑出来的读数（没跑过就写"还没跑过"）；
+        也可以用上面的「视图 → 跑得多的在前」。</li>
+      <li><b>选一段窗口</b>：卡片上四个按钮各自把日期填好，鼠标悬停能看到它会填哪两天；
+        池子真正可评估的范围在窗口旁边写着。</li>
+      <li><b>点「回测」</b>：<b>第一次要 30–70 秒</b>（在载全池面板 —— 顶栏会出现"⏳ 在跑"，
+        别以为它挂了）；之后命中缓存约 7 秒。结果落在「本次结果」，并且每次都会进「运行台账」。</li>
+    </ol>
+    <dl>
+      <dt>preset</dt><dd>已交付的策略：参数冻结，并且声明过 n_comparisons（它是在多少次试验里
+        被选出来的 —— 这个数进 DSR 的分母）。</dd>
+      <dt>族</dt><dd>候选机制，还不是交付物。它的参数是一张<b>预注册网格</b>（这一页一次只跑一格，
+        想跑整张网格用「复制网格命令」）。</dd>
+      <dt>k</dt><dd>DSR 的分母 = 声明值/网格数 + <b>这台平台上跑过的次数</b>。点一次回测 k 就 +1，
+        这是有意的（§5 迭代记账：能一键重跑的界面会诱发 p-hacking，纪律不是禁止点击，而是让次数可见）。</dd>
+      <dt>holdout</dt><dd>留出来只准读一次的那段窗口。碰了它会被标黄，台账表头有累计次数。</dd>
+      <dt>曝光匹配超额</dt><dd>把闲置资金按等权池计息之后的超额（空仓时精确为 0）——
+        与报告摘要里"总收益 − 基准"那个「超额」<b>不是同一个量</b>，别互相印证。</dd>
+      <dt>价格口径</dt><dd>数学指标用分红回补价；成交价、止损止盈触发、逐日市值与盈亏一律
+        as-traded（§3(b) 双轨），现金分红在穿除息日时显式入账。</dd>
+    </dl>
+  </div>
+</details>
+
 <div id="content"></div>
 <div class="run" id="run" style="display:block">
   <div id="runhead" class="sub" role="status" aria-live="assertive">还没跑过 —— 在上面任一策略卡片上点「回测」。

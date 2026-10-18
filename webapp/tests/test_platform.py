@@ -95,6 +95,21 @@ def test_catalog_flags_definitions_changed_after_the_process_started(tmp_path, m
     assert catalog.stale_definitions(started_at=0.0) == ["research/preset_defs/x.py"]
 
 
+def test_the_onboarding_block_is_collapsed_by_default():
+    """入门块必须**默认收起**：老手每次打开页面都要多滚一屏，那它就成了负担。
+
+    顺便钉住它讲的是"这一页怎么用、哪些词是什么意思"，而不是又一份营销文案 ——
+    六个词里每一个都对应本仓库真在用的口径（k 的构成、holdout 只准读一次、
+    曝光匹配超额与报告「超额」不是同一个量、双轨价格）。
+    """
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    tag = re.search(r"<details[^>]*id=\"firsttime\"[^>]*>", html)
+    assert tag, "没有入门块"
+    assert "open" not in tag.group(0), "入门块默认必须是收起的"
+    for term in ("preset", "族", "k", "holdout", "曝光匹配超额", "价格口径"):
+        assert f"<dt>{term}</dt>" in html, f"入门块少了 {term} 这个词"
+
+
 def test_catalog_publishes_the_windows_from_their_real_sources():
     """页面上的窗口预设必须**取自出处**，不能在 JS 里抄一份。
 
@@ -533,6 +548,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "历史报告列表里的逐笔 CSV 列": "r.has_trades",
         "数据覆盖到哪天（拿多新的数据跑的结论）": "数据覆盖到",
         "数据陈旧时才提示，并给出取数命令": "download_ohlcv.py",
+        "首次使用的入门块（三步 + 六个词）": 'id="firsttime"',
+        "入门块默认收起（老手不必每次多滚一屏）": 'class="ft">',
+        "入门块说清第一次要 30–70 秒（否则像挂了）": "第一次要 30–70 秒",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
