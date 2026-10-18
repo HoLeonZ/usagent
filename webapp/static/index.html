@@ -161,6 +161,36 @@ table.ledger td{white-space:nowrap}
   </div>
 </details>
 
+<details id="maintain" class="ft">
+  <summary>接手这个仓库？代码地图 + 改完跑什么（点开）</summary>
+  <div class="ftbody">
+    <p><b>引擎在哪儿</b>（改行为都在这些文件里，别在别处改）：</p>
+    <dl>
+      <dt>research/broker.py</dt><dd>成交与记账：何时进/出、按什么价成交、费用、现金与持仓</dd>
+      <dt>research/signals.py</dt><dd>单个 preset 的入场信号（族型 preset 的入场在掩码里）</dd>
+      <dt>research/family_defs/*.py</dt><dd>族的入场掩码（自由 Python）＋ <code>research/families.py</code> 的预注册网格</dd>
+      <dt>research/metrics.py</dt><dd>E[R]/胜率/PF/DSR 等指标</dd>
+      <dt>research/overlay.py</dt><dd>曝光匹配口径（<b>唯一</b>一处实现）</dd>
+      <dt>research/html_report.py</dt><dd>报告的<b>全部</b>呈现（与策略无关）</dd>
+      <dt>core/preset_contract.py</dt><dd>preset 的契约与 <code>resolve()</code>（参数的唯一入口）</dd>
+    </dl>
+    <p style="margin-top:10px"><b>改完必须跑</b>：</p>
+    <ul>
+      <li><code>bash tools/preflight.sh</code> —— 快检（卫生/契约/离线行为锁，几秒）。提交钩子跑的就是它。</li>
+      <li><code>bash tools/preflight.sh --full</code> —— 再跑全量，含<b>真数据行为锁</b>：
+        6 条 preset 的交易列表与权益曲线 sha256（基线在 <code>research/tests/baselines/</code>，
+        只放哈希与计数、不放收益数字，§7）。</li>
+      <li><code>python -m research.golden_baseline --regen</code> —— 只在<b>有意</b>改口径时用，
+        并且必须在提交信息里说明成因。<b>不要</b>用它去掩盖变红。</li>
+    </ul>
+    <p><b>三条纪律</b>（细则见 <code>CLAUDE.md</code> §0–§7）：§3 双轨价格 —— 指标用分红回补价、
+      成交与记账用 as-traded；§5 记账 —— 每次试验都进 k，改了参数空间要同步改声明；
+      §6 行为锁 —— 交易列表与净值不许无声变化。
+      <br>另：<code>research/preset_defs/*.py</code> 是<b>数据</b>不是代码 —— 改它要重启服务、
+      并且 <code>n_comparisons</code> 要跟着改（换了参数空间就是一次新搜索）。</p>
+  </div>
+</details>
+
 <div id="content"></div>
 <div class="run" id="run" style="display:block">
   <div id="runhead" class="sub" role="status" aria-live="assertive">还没跑过 —— 在上面任一策略卡片上点「回测」。

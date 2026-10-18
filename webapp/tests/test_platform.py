@@ -95,6 +95,34 @@ def test_catalog_flags_definitions_changed_after_the_process_started(tmp_path, m
     assert catalog.stale_definitions(started_at=0.0) == ["research/preset_defs/x.py"]
 
 
+def test_the_maintainer_map_points_only_at_things_that_exist():
+    """代码地图**不许烂**：里面写的每个路径都要真的在仓库里，写的每个数字都要对得上。
+
+    为什么值得一条测试：这段文案是给"接手的人"看的 —— 他照着去开一个已被改名的文件，
+    比没有地图更坏。数字同理（"6 条 preset 的真数据行为锁"这种话，改一次基线就可能变假）。
+    所以路径按文件系统验、数字按 `golden_baseline.CASES` 验。
+    """
+    from research import golden_baseline as G
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    block = re.search(r'<details id="maintain".*?</details>', html, re.S).group(0)
+
+    paths = re.findall(r"<dt>(research/[A-Za-z0-9_./*]+)</dt>", block)
+    assert len(paths) >= 5, f"地图太薄：{paths}"
+    for rel in paths:
+        if rel.endswith("/*.py"):
+            assert (ROOT / rel).parent.is_dir(), f"地图指向不存在的目录：{rel}"
+        else:
+            assert (ROOT / rel).is_file(), f"地图指向不存在的文件：{rel}"
+
+    # 命令也要真的存在（工具被改名时这里会红）
+    assert (ROOT / "tools" / "preflight.sh").is_file()
+    assert "research.golden_baseline" in block and hasattr(G, "CASES")
+
+    # 地图里那个数字必须与真基线用例数一致（"6 条 preset 的真数据行为锁"）
+    assert f"{len(G.CASES)} 条 preset 的交易列表与权益曲线 sha256" in block, \
+        f"地图里的条数与真基线（{len(G.CASES)}）对不上"
+
+
 def test_the_onboarding_block_is_collapsed_by_default():
     """入门块必须**默认收起**：老手每次打开页面都要多滚一屏，那它就成了负担。
 
@@ -576,6 +604,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "首次使用的入门块（三步 + 六个词）": 'id="firsttime"',
         "入门块默认收起（老手不必每次多滚一屏）": 'class="ft">',
         "入门块说清第一次要 30–70 秒（否则像挂了）": "第一次要 30–70 秒",
+        "接手者用的代码地图（引擎在哪儿）": 'id="maintain"',
+        "地图说明改完跑什么（含 --regen 的边界）": "tools/preflight.sh",
         "台账「代码」列（哪份代码跑的）": '["git_sha","代码"]',
         "台账顶栏写当前代码版本": "当前代码 <b>",
         "旧版本运行与脏树都要标出来": "function codeCell(", 
