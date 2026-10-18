@@ -106,6 +106,25 @@ def test_the_maintainer_map_points_only_at_things_that_exist():
     html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
     block = re.search(r'<details id="maintain".*?</details>', html, re.S).group(0)
 
+    # ⚠️ 这个洞我自己踩过：原先只扫 <dt> 里的路径，而那句「细则见 CLAUDE.md」写在**正文的
+    # <code> 里** —— 护栏验了我心里想的那类，没验我实际写下的全部，于是它放行了一个指向
+    # 不存在文件的指路牌（本仓库根本没有 CLAUDE.md）。现在扫**整块里所有**像仓库路径的
+    # <code> 片段，并显式列出允许指向外部的例外（例外要少，且每个都要有理由）。
+    EXTERNAL = {"CLAUDE.md"}          # §0–§7 的原文写在维护者另一处，本仓库只有引用
+    for tok in set(re.findall(r"<code>([^<>{}]+)</code>", block)):
+        tok = tok.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_./*-]+\.(py|md|sh|html|json|csv)", tok):
+            continue
+        if tok in EXTERNAL:
+            assert "不在本仓库" in block or "另一处" in block, \
+                f"{tok} 被列为外部例外，但文案里没说清它是外部的"
+            continue
+        if tok.endswith("/*.py"):
+            assert (ROOT / tok).parent.is_dir(), f"地图指向不存在的目录：{tok}"
+        else:
+            assert (ROOT / tok).is_file(), f"地图指向不存在的文件：{tok}"
+    assert EXTERNAL == {"CLAUDE.md"}, "外部例外被扩大了 —— 每个例外都要单独说理由"
+
     paths = re.findall(r"<dt>(research/[A-Za-z0-9_./*]+)</dt>", block)
     assert len(paths) >= 5, f"地图太薄：{paths}"
     for rel in paths:
@@ -585,6 +604,31 @@ def test_run_counts_come_from_the_whole_ledger_not_the_shown_window(http, tmp_pa
     assert d["by_strategy"] == {"preset:x": 35}, d["by_strategy"]
     # 而且它与 k 的记账读的是同一份东西
     assert jobs.prior_runs("preset:x") == 35
+
+
+def test_the_inline_script_parses(tmp_path):
+    """内联脚本必须能**解析** —— 一个语法错就让整页变成死的（没有 JS，卡片都渲不出来）。
+
+    为什么值得一条测试：2026-10-19 我自己往 METRIC_HELP 的字符串里嵌了 ASCII 引号，整个
+    `<script>` 语法错误、页面全死；而当时**所有静态断言全绿** —— 按钮清单只看字符串在不在、
+    markdown 扫描只看 `**`，没有一条会解析语法。这个洞是真实的：我当时已经把它推到了正在
+    服务的文件里。
+
+    用 `node --check`：开发机有 node 就真跑；没有就 skip 并说明（与"真数据行为锁在没有库时
+    跳过"是同一种诚实边界 —— CI 上也没有 node，这条锁只在开发机生效）。
+    """
+    import shutil
+    import subprocess
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    js = re.search(r"<script>(.*?)</script>", html, re.S)
+    assert js, "页面里没有内联脚本？"
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器没有 node —— 语法锁跑不了（CI 也没有 node）")
+    f = tmp_path / "inline.js"
+    f.write_text(js.group(1), encoding="utf-8")
+    r = subprocess.run([node, "--check", str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, f"内联脚本语法错（整页会死）：{r.stderr[:500]}"
 
 
 def test_server_binds_localhost_only():

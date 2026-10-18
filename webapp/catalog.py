@@ -92,7 +92,12 @@ def family_entry(fid: str) -> dict:
         "kind": "family",
         "id": fid,
         "name": fid,
-        "mechanism": doc[0] if doc else "",
+        # 机制那一行是给**人读**的（卡片直接印它），所以在这里就清成纯文本：
+        # ① 掩码 docstring 首行自带「族:」/「族 1:」前缀，而卡片模板前面又加了「族 · 」
+        #    ⇒ 实测 15 张族卡里 11 张印成「族 · 族:**…**」；
+        # ② 首行里有 markdown 的 **强调**，而卡片是 esc() 后原样显示的 ⇒ 星号直接印在脸上
+        #    （我的 markdown 护栏扫的是 index.html 的静态文案，看不见**数据**里的这类标记）。
+        "mechanism": _plain_mechanism(doc[0] if doc else ""),
         "grid": {k: list(v) for k, v in grid.items()},
         "grid_size": int(families.grid_size(fid)) if grid else 0,
         "fixed": dict(families.FIXED.get(fid) or {}),
@@ -168,6 +173,21 @@ def data_through() -> dict | None:
                 "days_ago": (datetime.date.today() - d).days}
     except Exception:                                  # noqa: BLE001 —— 只读装饰，出错就别显示
         return None
+
+
+def _plain_mechanism(line: str) -> str:
+    """把掩码 docstring 的首行清成"能直接印在页面上"的纯文本（去前缀、去强调标记）。
+
+    为什么在**数据层**做而不是在页面渲染时做：这一行是"机制说明"，它的读者是页面；
+    而页面拿到的 catalog 本来就是"已编译好的展示形态"（这一层的职责）。放在页面里做意味着
+    每个渲染点都要记得清一次 —— 漏一处就是又一次"星号印在脸上"。
+    """
+    import re as _re
+    t = (line or "").strip()
+    t = _re.sub(r"^族\s*\d*\s*[:：]\s*", "", t)          # 「族:」/「族 1:」前缀
+    t = _re.sub(r"\*\*(.+?)\*\*", r"\1", t)             # **强调** → 强调
+    t = _re.sub(r"`([^`]+)`", r"\1", t)                    # `code` → code
+    return t.strip()
 
 
 def stale_definitions(started_at: float | None = None) -> list[str]:

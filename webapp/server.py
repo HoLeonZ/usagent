@@ -139,7 +139,9 @@ class Handler(BaseHTTPRequestHandler):
                                     "git_sha": obs.git_sha(), "git_dirty": obs.git_dirty(),
                                     # 卡片「已跑 N 次」与筛选下拉都按**全文**数 —— 它们与
                                     # DSR 的 k 是同一个计数，不能受"表只显示 30 条"影响
-                                    "by_strategy": jobs.counts_by_strategy()})
+                                    "by_strategy": jobs.counts_by_strategy(),
+                                    # 卡片「最近一次」也按全台账（与 by_strategy 同源）
+                                    "last_by_strategy": jobs.last_by_strategy()})
         if p == "/api/jobs":
             # 在途任务（页面刷新后据此重建面板/徽标/取消入口）。只给这个页面用得上的最小字段。
             jobs_now = jobs.inflight()

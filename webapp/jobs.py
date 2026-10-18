@@ -97,6 +97,21 @@ def recent_runs(limit: int = 20) -> list[dict]:
     return list(reversed(all_runs()[-limit:]))
 
 
+def last_by_strategy() -> dict[str, dict]:
+    """每条策略**最近一次**运行的读数（全文台账）。
+
+    与 `counts_by_strategy` 同理：卡片的「已跑 N 次」与「最近一次」是同一个量的两面，
+    若一个按全台账数、另一个按"最近 30 条"取，第 31 次运行之后同一张卡会自相矛盾
+    （审计实测：卡片同时说「已跑 31 次」和「最近一次」停在更早那次）。
+    """
+    out: dict[str, dict] = {}
+    for r in all_runs():
+        k = r.get("strategy_id")
+        if k:
+            out[k] = r                      # 正序覆盖 ⇒ 最后留下的就是最近一次
+    return out
+
+
 def counts_by_strategy() -> dict[str, int]:
     """每条策略**全部**运行次数。
 
@@ -317,7 +332,8 @@ def _run(job_id: str) -> None:
             t0 = time.perf_counter()
             trades_csv = RESULTS / f"web_trades_{job_id}.csv"
             n_csv = write_trades_csv(trades_csv, res["trades"], job_id=job_id, name=name,
-                                     lo=lo, hi=hi, spec=resolve(P), n_trials=k)
+                                     lo=lo, hi=hi, spec=resolve(P), n_trials=k,
+                                     declared=declared, prior=prior)
             _step(job, f"导出逐笔 CSV（{n_csv} 行）", t0)
 
             t0 = time.perf_counter()
@@ -382,7 +398,8 @@ TRADES_CSV_COLS = ["entry_date", "exit_date", "symbol", "exit_reason", "entry_pr
 
 
 def write_trades_csv(path: Path, trades: pd.DataFrame, *, job_id: str, name: str,
-                     lo: str, hi: str, spec: dict, n_trials: int) -> int:
+                     lo: str, hi: str, spec: dict, n_trials: int,
+                     declared: int | None = None, prior: int | None = None) -> int:
     """把逐笔写成 CSV —— 报告是给人看的，**这份是给脚本/表格看的**。
 
     为什么必须有：报告是 1.9MB 的自包含 HTML，逐笔那 24 列只存在于它的 `<table>` 里；
@@ -399,8 +416,16 @@ def write_trades_csv(path: Path, trades: pd.DataFrame, *, job_id: str, name: str
         f"# 任务 {job_id} ｜ 窗口 {lo}..{hi}（左闭右开）｜ 成交 {len(trades)} 笔",
         f"# 价格口径：成交价/止损止盈触发/盈亏一律 as-traded（§3(b) 双轨）；"
         f"atr_pct 等指标列为当日 as-traded 派生量",
-        f"# 成本：双边 {spec.get('cost_bps_roundtrip')!r}bp ｜ 滑点 scale="
-        f"{spec.get('atr_slip_scale')!r} ｜ n_trials(k)={int(n_trials)}",
+        f"# 成本：双边 {spec.get('cost_bps_roundtrip')!r}bp ｜ 滑点 scale={spec.get('atr_slip_scale')!r}",
+        # ⚠️ 这里必须写清 k 是**哪一个**数：报告里那句「N 次试验里选出来的」用的是
+        # **声明**的 n_comparisons，而这一列是 DSR 的分母 = 声明 + 平台已跑次数 ——
+        # 同一个词 n_trials 在两份产物里指两个数（审计实测：报告 1614 / 同一 job 的 CSV 1627）。
+        f"# DSR 分母 k={int(n_trials)}"
+        + (f"（= 声明 n_comparisons {int(declared)} + 平台在本平台已跑 {int(prior)} 次）"
+           if declared is not None and prior is not None else ""),
+        # ⚠️ 刻度也要写：这一份是**小数**（0.1188 = 11.88%），而报告里同名列印百分数。
+        "# 刻度：*_pct / net_return 等比率列一律给**小数**（0.1188 就是 11.88%）；"
+        "报告 HTML 里那些数字印的是百分数 —— 同一列两处刻度不同，别混用",
         f"# 这是机器可读件；人看的版本是同一 job 的报告 HTML（含 K 线/指标/判词）",
         "# 读法：pandas.read_csv(path, comment='#')",
     ]

@@ -165,7 +165,8 @@ table.ledger td{white-space:nowrap}
     <ol>
       <li><b>挑一条</b>：卡片上的「最近一次」是它上次跑出来的读数（没跑过就写"还没跑过"）；
         也可以用上面的「视图 → 跑得多的在前」。</li>
-      <li><b>选一段窗口</b>：卡片上四个按钮各自把日期填好，鼠标悬停能看到它会填哪两天；
+      <li><b>选一段窗口</b>：卡片上那排按钮各自把日期填好，鼠标悬停能看到它会填哪两天
+        （preset 四个、族三个 —— 族没有"声明窗"，第四个位置是禁用的说明）；
         池子真正可评估的范围在窗口旁边写着。</li>
       <li><b>点「回测」</b>：<b>第一次要 30–70 秒</b>（在载全池面板 —— 顶栏会出现"⏳ 在跑"，
         别以为它挂了）；之后命中缓存约 7 秒。结果落在「本次结果」，并且每次都会进「运行台账」。</li>
@@ -175,7 +176,8 @@ table.ledger td{white-space:nowrap}
         被选出来的 —— 这个数进 DSR 的分母）。</dd>
       <dt>族</dt><dd>候选机制，还不是交付物。它的参数是一张<b>预注册网格</b>（这一页一次只跑一格，
         想跑整张网格用「复制网格命令」）。</dd>
-      <dt>k</dt><dd>DSR 的分母 = 声明值/网格数 + <b>这台平台上跑过的次数</b>。点一次回测 k 就 +1，
+      <dt>k</dt><dd>DSR 的分母 = 声明值/网格数 + <b>这次之前</b>在本平台跑过的次数（所以同一策略
+        每跑一次，下一次的 k 就 +1 —— 这一次自己不算进自己的 k）。点一次回测 k 就 +1，
         这是有意的（§5 迭代记账：能一键重跑的界面会诱发 p-hacking，纪律不是禁止点击，而是让次数可见）。</dd>
       <dt>holdout</dt><dd>留出来只准读一次的那段窗口。碰了它会被标黄，台账表头有累计次数。</dd>
       <dt>曝光匹配超额</dt><dd>把闲置资金按等权池计息之后的超额（空仓时精确为 0）——
@@ -208,7 +210,9 @@ table.ledger td{white-space:nowrap}
       <li><code>python -m research.golden_baseline --regen</code> —— 只在<b>有意</b>改口径时用，
         并且必须在提交信息里说明成因。<b>不要</b>用它去掩盖变红。</li>
     </ul>
-    <p><b>三条纪律</b>（细则见 <code>CLAUDE.md</code> §0–§7）：§3 双轨价格 —— 指标用分红回补价、
+    <p><b>三条纪律</b>（<b>注意：这套 §0–§7 的原文不在本仓库里</b> —— 它写在维护者另一处的
+      <code>CLAUDE.md</code>；本仓库里能读的是 <code>README.md</code> 与
+      <code>research/README.md</code> 的引用）：§3 双轨价格 —— 指标用分红回补价、
       成交与记账用 as-traded；§5 记账 —— 每次试验都进 k，改了参数空间要同步改声明；
       §6 行为锁 —— 交易列表与净值不许无声变化。
       <br>另：<code>research/preset_defs/*.py</code> 是<b>数据</b>不是代码 —— 改它要重启服务、
@@ -246,13 +250,21 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const pct = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v*100).toFixed(d) + "%";
 const num = (v, d=3) => (v === null || v === undefined || !isFinite(v)) ? "—" : v.toFixed(d);
+// 超额类数字的单位是**百分点**（两条年化收益率之差），不是百分比。报告与 CLI 一直印 "pp"，
+// 平台此前把它印成 "%" —— 同一个量两处两种单位（审计实测：台账 −19.59% 与报告 −43.93pp 并排）。
+const pp = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v*100).toFixed(d) + "pp";
 // 三个窗口预设。HOLDOUT 与 TRAIN **必须**从目录接口取（那边才是出处：holdout 台账的常量、
 // WFV 的搜索期）—— 在本文件里再抄一份就会各自漂移，而 HOLDOUT 还担着"与 holdout 重叠"的
 // 警示判据（抄错就会错报）。FULL 是**视图默认值**（训练窗起点 .. 数据末端），不是台账事实。
 let HOLDOUT = ["2025-10-14", "2026-10-13"];      // 目录到达前先用与服务器一致的兜底值
 let TRAIN = ["2024-04-09", "2025-10-13"];
-const FULL = ["2024-04-09", "2026-10-14"];
-const overlaps = (a, b) => !(a[1] < b[0] || b[1] < a[0]);
+// 「全窗」的右端 = 数据末端的**次日**（窗口是左闭右开 `[lo, hi)`，写死日期会静默丢掉最后几天：
+// 实测硬编码的 2026-10-14 把数据的 10-15、10-16 两天关在窗外）。目录到达后按 data_through 修正。
+let FULL = ["2024-04-09", "2026-10-14"];
+// ⚠️ 与 catalog.touches_holdout **同一个语义**：运行的窗口是左闭右开 `[lo, hi)`（引擎
+// `broker.py:373`），holdout 是按日点名的一段 ⇒ "读了 holdout"= `hi > h0 && lo <= h1`。
+// 先前的闭区间写法会把"终点正好落在 holdout 第一天"的**合法**窗口误报成越界。
+const overlaps = (w, h) => w[1] > h[0] && w[0] <= h[1];
 let CAT = null, RUNS = [], REPORTS = [], SORT = {key: "ts", dir: -1};
 const T0 = {};                       // job id → 提交时刻（显示「已用 Ns」，冷启动不该像假死）
 const INFLIGHT = new Set();          // 还没结束的任务（顶栏徽标据此显示；滚到哪儿都看得见）
@@ -313,7 +325,7 @@ function paramTable(e) {
     return `<table>${rows}${extra}
       <tr><td class="k">试验次数 n_comparisons</td><td>${e.n_comparisons}</td></tr>
       <tr><td class="k">validated</td><td>${e.validated ? "true" : "false"}</td></tr>
-      <tr><td class="k">锁窗口</td><td>${esc(e.window.join(" .. "))}${e.touches_holdout
+      <tr><td class="k">声明窗</td><td>${esc(e.window.join(" .. "))}${e.touches_holdout
         ? ' <span class="warn">（含 holdout 天数）</span>' : ""}</td></tr>
       <tr><td class="k">定义体</td><td><code>research/preset_defs/${esc(e.id)}.py</code></td></tr>
     </table>`;
@@ -338,13 +350,25 @@ function lastRunLine(e) {
   const r = LAST[e.kind + ":" + e.id];
   if (!r) return `<div class="sub">还没跑过 —— 上面的「回测」跑一次，这里会显示最近一次的读数。</div>`;
   const when = (r.ts || "").slice(0, 16).replace("T", " ");
-  const ex = r.excess == null ? "—" : (r.excess * 100).toFixed(2) + "%";
+  const ex = r.excess == null ? "—" : pp(r.excess);
   const cls = (r.excess || 0) >= 0 ? "pos" : "neg";
   return `<div class="sub">最近一次（${esc(when)}）：曝光匹配超额 <b class="${cls}">${ex}</b>
     · DSR ${r.dsr == null ? "—" : Number(r.dsr).toFixed(3)} · k ${r.n_trials_k ?? "—"}
     · 窗口 ${esc((r.window || []).join(".."))}
-    ${r.job_id ? `· <a href="/report/${esc(r.job_id)}" target="_blank">报告</a>` : ""}
+    ${reportLink(r.job_id)}
     <br><span class="sub">⚠️ 这是<b>最近一次</b>的读数，不是这条策略的水平；跨窗口的数字不能直接比。</span></div>`;
+}
+
+// 报告链接只在**盘上真有那份文件**时才渲染 —— 否则整列都是死链（审计实测：6/25 行的
+// 「报告」列指向不存在的文件，而报告就在同一页的「历史报告」里）。判据用现有的 REPORTS 清单，
+// 不新增接口：它是 /api/reports 扫盘得到的，正是"文件在不在"的答案。
+function haveReport(jobId) {
+  return !!jobId && REPORTS.some(x => x.job_id === jobId);
+}
+function reportLink(jobId) {
+  return haveReport(jobId)
+    ? `· <a href="/report/${esc(jobId)}" target="_blank">报告</a>`
+    : (jobId ? `<span class="sub" title="台账里有这条运行，但盘上已经没有对应的报告文件了">· 报告已不在盘上</span>` : "");
 }
 
 function card(e, runCount) {
@@ -562,11 +586,26 @@ async function loadCatalog() {
   CAT = fetched;
   if (CAT.holdout) HOLDOUT = CAT.holdout;          // 出处：holdout 台账那个常量
   if (CAT.train) TRAIN = CAT.train;                // 出处：wfv_search 的搜索期
+  if (CAT.train) FULL = [CAT.train[0], FULL[1]];
+  if (CAT.data_through) {                          // 右端跟着数据走（+1 天，右开区间才含最后一天）
+    const d = new Date(CAT.data_through.last_date + "T00:00:00");
+    d.setDate(d.getDate() + 1);
+    // ⚠️ 不能用 toISOString()：它按 **UTC** 印日期，本地 00:00 会被折回前一天 ——
+    // 实测就先踩到了这个（右端印成 2026-10-16，而右开区间又把它自己排除掉，
+    // 于是"修好丢两天"变成"still 丢一天"）。toLocaleDateString("sv") 给的是本地 YYYY-MM-DD。
+    FULL = [FULL[0], d.toLocaleDateString("sv")];
+  }
   $("banner").innerHTML = `目录：<b>${CAT.presets.length}</b> 条 preset · <b>${CAT.families.length}</b> 个族 ·
-    其中 <b>${CAT.notes.holdout_presets}</b> 条 preset 的声明窗口含 holdout 天数（标红）。
+    其中 <b>${CAT.notes.holdout_presets}</b> 条 preset 的声明窗口含 holdout 天数；
+    页面上<b>被标红的是 ${(() => {
+      const p = CAT.presets.filter(e => overlaps(e.window, HOLDOUT)).length;
+      const f = CAT.families.filter(e => overlaps(FULL, HOLDOUT)).length;
+      return p + f;
+    })()} 张卡</b>（preset 按各自的声明窗，族按它们的默认窗口＝全窗）—— 两种都算「这次回测会读到
+    holdout」，只准读一次。
     族的参数默认=网格中点，可在卡片里改（只列网格上的取值）；${esc(CAT.notes.multiplicity)}
     ${CAT.data_through ? ` · 数据覆盖到 <b>${esc(CAT.data_through.last_date)}</b>
-      （${CAT.data_through.symbols} 个标的；今天 ${new Date().toISOString().slice(0, 10)}，
+      （${CAT.data_through.symbols} 个标的；今天 ${new Date().toLocaleDateString("sv")}，
       ${CAT.data_through.days_ago} 天前）`
       + (CAT.data_through.days_ago >= 5
          ? `<div class="warn">⚠️ 已经 ${CAT.data_through.days_ago} 天没有新数据了（自然日差 ≥5 就提示，
@@ -706,9 +745,9 @@ function renderLedger() {
                  onclick="fillWindow('${esc(r.strategy_id)}','${esc(r.window[0])}','${esc(r.window[1])}')"
                  style="color:#cbd5e1">${esc(r.window.join(".."))}</a>`
             : "—"}</td>
-      <td><code class="p">${esc(paramsOf(r.params))}</code></td>
+      <td><code class="p">${esc(paramsOf(r.params, "params" in r ? null : "missing"))}</code></td>
       <td>${r.n_trades ?? "—"}</td>
-      <td class="${(r.excess || 0) >= 0 ? "pos" : "neg"}">${pct(r.excess)}</td>
+      <td class="${(r.excess || 0) >= 0 ? "pos" : "neg"}">${pp(r.excess)}</td>
       <td class="${r._d ? ((r._d > 0 ? "pos" : "neg")) : "sub"}" title="${r._d == null
             ? "这个配置还没有跑过第二次"
             : (r._dsha && r._dsha !== r.git_sha
@@ -720,7 +759,9 @@ function renderLedger() {
                           : (r._d > 0 ? "+" : "") + (r._d * 100).toFixed(2) + "pp")}</td>
       <td>${num(r.dsr)}</td><td>${r.n_trials_k ?? "—"}</td><td>${codeCell(r)}</td>
       <td>${esc((r.note || "").slice(0, 24))}</td>
-      <td>${r.job_id ? `<a href="/report/${esc(r.job_id)}" target="_blank">打开</a>` : "—"}</td>
+      <td>${haveReport(r.job_id)
+            ? `<a href="/report/${esc(r.job_id)}" target="_blank">打开</a>`
+            : `<span class="sub" title="盘上没有这份报告（可能被清理过）">—</span>`}</td>
     </tr>`).join("")}</tbody></table>`;
 }
 // 把某张卡的窗口填成这一对日期（不自动提交）：台账里看到"上次用这个窗口跑过"，
@@ -749,7 +790,8 @@ function renderReports() {
     <th>窗口</th><th>参数</th><th>大小</th><th>打开</th><th>逐笔</th></tr></thead><tbody>${REPORTS.map(r => `<tr>
       <td>${new Date(r.mtime * 1000).toLocaleString().slice(0, 19)}</td>
       <td>${esc(r.name)}</td><td>${esc((r.window || []).join(".."))}</td>
-      <td><code class="p">${esc(paramsOf(r.params))}</code></td><td>${r.kb} KB</td>
+      <td><code class="p">${esc(paramsOf(r.params, r.job_id ? null : (r.params ? null : "cli")))}</code></td>
+      <td>${r.kb} KB</td>
       <td><a href="/report-file/${esc(r.file)}" target="_blank">打开报告</a></td>
       <td>${r.has_trades ? `<a href="/api/trades/${esc(r.job_id)}.csv" download>CSV</a>`
                          : '<span class="sub">—</span>'}</td>
@@ -775,9 +817,17 @@ function codeCell(r) {
   return `<span class="${stale || r.git_dirty ? "sub" : ""}" title="${esc(why)}">${esc(sha)}${
     flags ? `<span class="sub">（${esc(flags)}）</span>` : ""}</span>`;
 }
-function paramsOf(p) {
-  if (!p || !Object.keys(p).length) return "（在定义体里）";
-  return Object.entries(p).map(([k, v]) => k + "=" + v).join(" ");
+// 参数列。⚠️ 三种"没有参数"要分开说，不能一律断言"在定义体里"（审计实测：那对 CLI `--out`
+// 的产物与早期未记 params 的记录都是**假话** —— 它们的参数根本不是从定义体来的，
+// 一条是命令行传的、一条是那会儿还没开始记）：
+//   missing —— 台账这条记录里根本没有 params 字段（早于参数记账）
+//   cli     —— 不是平台产出的（命令行 --out），参数在命令里，没进台账
+//   body    —— 平台记的是 null：这条策略确实把参数放在定义体里（信号型 preset）
+function paramsOf(p, why) {
+  if (p && Object.keys(p).length) return Object.entries(p).map(([k, v]) => k + "=" + v).join(" ");
+  if (why === "missing") return "（这条记录早于参数记账）";
+  if (why === "cli") return "（命令行传入，未记账）";
+  return "（在定义体里）";
 }
 function sortLedger(key) { SORT = {key, dir: SORT.key === key ? -SORT.dir : -1}; renderLedger(); }
 function jumpToHash() {
@@ -1003,14 +1053,37 @@ async function poll(jobId, kind, id) {
   const cells = [["成交笔数", m.n_trades, ""], ["自身收益", pct(m.own_ret), cls(m.own_ret)],
     ["CAGR", pct(m.cagr), cls(m.cagr)], ["平均敞口", pct(m.exposure, 1), ""],
     ["同窗等权池 CAGR", pct(m.bench_cagr), cls(m.bench_cagr)],
-    ["曝光匹配超额", pct(m.excess), cls(m.excess)],
-    ["超额/敞口", pct(m.excess_per_exposure, 1), cls(m.excess_per_exposure)],
+    ["曝光匹配超额", pp(m.excess), cls(m.excess)],
+    ["超额/敞口", pp(m.excess_per_exposure, 1), cls(m.excess_per_exposure)],
     ["beta", num(m.beta, 2), ""], ["alpha 年化", pct(m.alpha_annual), cls(m.alpha_annual)],
     ["t(alpha)", num(m.t_alpha, 2), ""], ["判据折为正", m.folds_positive + "/4", ""],
     ["最大回撤", pct(m.maxdd, 1), "neg"], ["E[R]", num(m.E_R), cls(m.E_R)],
     ["胜率", pct(m.win_pct, 1), ""], ["盈亏比 PF", num(m.profit_factor, 2), ""],
     ["最好 10% 占总 R", pct(m.top_decile_share, 1), ""], ["DSR", num(m.dsr), ""],
     ["DSR 的 k", `${m.dsr_k} <span class="sub">(声明 ${k.declared_or_grid} + 平台已跑 ${k.platform_runs_before})</span>`, ""]];
+  // 每个数字都要能查到"它是什么、什么单位、往哪边好"—— 此前 19 个格子里除两个以外，
+  // 界面上没有一处给定义、单位或方向（DSR 是 0–1 概率、E[R] 是 R 倍数、t(alpha) 是 t 值…）。
+  const METRIC_HELP = {
+    "成交笔数": "本次窗口内完成的交易笔数（一笔一进一出）。",
+    "自身收益": "本窗口内账户权益的总收益率（不含杠杆放大，含费用与分红）。",
+    "CAGR": "同窗口的年化收益率（按 365.25/交易日折算）。",
+    "平均敞口": "持仓市值占权益的日均比例；空仓日算 0。越低越接近「大部分时间在场外」。",
+    "同窗等权池 CAGR": "同一窗口里「无脑等权持有整个池子」的年化收益 —— 基准线。",
+    "曝光匹配超额": "把闲置资金按等权池计息之后的超额（空仓时精确为 0）。单位 pp；与报告摘要里那个"
+      + "「总收益 − 基准」那个「超额」不是同一个量。",
+    "超额/敞口": "曝光匹配超额 ÷ 平均敞口 —— 每单位敞口换来的超额（单位 pp）。",
+    "beta": "策略日收益对同窗池日收益的回归斜率（1 = 与池子同涨同跌）。",
+    "alpha 年化": "扣掉 beta 暴露后的年化超额收益（单位 %）。",
+    "t(alpha)": "alpha 的 t 值（HAC 调整）；|t| < 2 时 alpha 与 0 无法区分。",
+    "判据折为正": "把窗口切成 4 折，收益为正的折数（x/4）。",
+    "最大回撤": "窗口内权益从峰值回落的最大幅度（越低越好）。",
+    "E[R]": "每笔的期望收益，以「计划风险（1R）」为单位：+1R = 赚到一个止损宽度。",
+    "胜率": "盈利笔数占全部成交笔数的比例。",
+    "盈亏比 PF": "总盈利 ÷ 总亏损（>1 才是正期望）。",
+    "最好 10% 占总 R": "最赚的那 10% 的交易贡献了总 R 的多少 —— 越高说明越依赖尾部。",
+    "DSR": "通缩夏普（0–1 的概率式指标）：把「试了多少次」折算进去之后的显著性。越高越好。",
+    "DSR 的 k": "DSR 的分母 = 该 preset 声明的 n_comparisons（或族网格组数）+ 这次之前在本平台跑过的次数。",
+  };
   fin(`完成 · 成交 ${m.n_trades} 笔 · 用时 ${st.seconds}s`, box, st.hint || "");
   if (box) {
     box.querySelector(".jbody").innerHTML = `
@@ -1019,7 +1092,7 @@ async function poll(jobId, kind, id) {
           ? "<b class='neg'>失败：" + esc(st.selfcheck.join("；")) + "</b>" : "通过"}
         ${st.hint ? " · " + esc(st.hint) : ""}</div>
       <div class="metrics">${cells.map(([lab, val, c]) =>
-        `<div><span>${lab}</span><b class="${c}">${val}</b></div>`).join("")}</div>
+        `<div title="${esc(METRIC_HELP[lab] || "")}"><span>${lab}</span><b class="${c}">${val}</b></div>`).join("")}</div>
       <div class="bar"><a class="btnlink" href="${st.report}" target="_blank">在新窗口打开逐笔报告</a>
         <a class="btnlink mini" href="${st.report}" download>下载报告 HTML</a>
         ${st.trades_csv ? `<a class="btnlink mini" href="${esc(st.trades_csv)}" download
