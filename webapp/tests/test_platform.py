@@ -229,6 +229,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "结果按 job 分块（并发不互相覆盖）": '"job-" + jobId',
         "已用秒数（冷启动不像假死）": "已用 ${el.toFixed(0)}s",
         "锚点不被常驻顶栏吃掉": "scroll-margin-top",
+        "运气对照开关（标了耗时，默认关）": 'id="ctl"',
+        "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
     assert not missing, f"页面缺这些按钮/导航：{missing}"
@@ -265,3 +267,28 @@ def test_reports_route_lists_past_reports_and_parses_their_header(http, tmp_path
     assert [r["job_id"] for r in reps] == ["abc123def456"], "只该列 web_report_*"
     assert reps[0]["name"] == "family:xs_flow"
     assert reps[0]["window"] == ["2025-01-01", "2025-10-13"]
+
+
+def test_control_arm_can_be_switched_on_and_lands_in_the_report(offline):
+    """运气对照必须能从平台开起来，并**写进报告** —— 那是把运气与本事分开的唯一判词。
+
+    它此前在平台上结构性开不了（`_summary` 把 ctl_* 写死成 NaN），报告因此永远打印
+    "本次未跑"。默认仍然是关（每次约 25 秒），但必须**有入口**。
+    """
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1], "control_runs": 20})["id"])
+    assert st["status"] == "done", st.get("error")
+    rep = (offline / f"web_report_{st['id']}.html").read_text(encoding="utf-8")
+    assert "位于随机分布的" in rep, "开了对照却没在报告里出判词"
+    assert "运气对照本次未跑" not in rep
+    assert any("运气对照" in s["name"] for s in st["steps"]), "步骤里没写这一步"
+    led = [json.loads(x) for x in (offline / "web_runs.jsonl").read_text().splitlines()]
+    assert led[-1]["control_runs"] == 20, "台账要记下这次有没有跑对照"
+
+
+def test_default_run_says_the_control_was_not_run(offline):
+    """默认关时，报告必须**明说未跑**（不能留个 NaN 让它渲染成 "nan 百分位"）。"""
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1]})["id"])
+    rep = (offline / f"web_report_{st['id']}.html").read_text(encoding="utf-8")
+    assert "运气对照本次未跑" in rep and "nan 百分位" not in rep

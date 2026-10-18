@@ -170,6 +170,17 @@ def _run(job_id: str) -> None:
             eq = res["equity"].set_index("date")
             _step(job, f"回测（成交 {len(res['trades'])} 笔）", t0)
 
+            ctl_runs = int(req.get("control_runs") or 0)
+            cagr_now = float(metrics.cagr(eq["equity"], pd.Series(eq.index)))
+            t0 = time.perf_counter()
+            ctl = RR.control_arm(ind, resolve(P), len(res["trades"]), lo, hi, reg,
+                                 ctl_runs, cagr_now)
+            if ctl_runs:
+                # 单独一步 + **真实**耗时（此前把这一步的时间记在渲染步里，且标签上的估时
+                # 是照抄另一条 preset 的测量 —— 实测同一条 preset 只要 3 秒，估时却写 26 秒。
+                # 数字要么是量出来的，要么给区间）。
+                _step(job, f"运气对照：{ctl_runs} 次随机入场（每次约 15–130 毫秒，视笔数）", t0)
+
             # DSR 的 k：声明/网格数 + **平台已跑次数**（§5 迭代记账，页面也显示它）
             prior = prior_runs(f"{kind}:{ident}")
             # k = 声明/网格数 + **平台已跑次数**（§5：手动迭代也是优化，必须记账）
@@ -184,7 +195,7 @@ def _run(job_id: str) -> None:
             doc = H.render_html(res["trades"], eq, ind,
                                 P.get("signal") or P.get("family_params") or {},
                                 _bench_series(reg, eq),
-                                _summary(P, res, sig, eq, name, lo, hi),
+                                _summary(P, res, sig, eq, name, lo, hi, ctl),
                                 explain=_explain_for(P))
             problems = H.selfcheck(doc, len(res["trades"]))
             report = RESULTS / f"web_report_{job_id}.html"
@@ -204,6 +215,7 @@ def _run(job_id: str) -> None:
                    # 就是**死胡同** —— 想再看一眼那次结果只能重跑，而重跑会把 k 推高
                    # （拿统计预算买回已经付过费的结果）。审计实测：盘上 6 份报告、界面 0 个入口。
                    "job_id": job_id, "report": f"web_report_{job_id}.html",
+                   "control_runs": ctl_runs,
                    "seconds": job["seconds"], "note": req.get("note", "")}
             RUNS_LEDGER.parent.mkdir(parents=True, exist_ok=True)
             with RUNS_LEDGER.open("a", encoding="utf-8") as fh:
@@ -213,7 +225,9 @@ def _run(job_id: str) -> None:
                         n_trades=m["n_trades"], excess=round(m["excess"], 6), k=k)
             _step(job, "登记台账", t0)
 
-            job.update({"status": "done", "metrics": m, "hint": hint,
+            job.update({"status": "done", "metrics": m,
+                        "hint": hint + (f"；运气对照已跑 {ctl_runs} 次" if ctl_runs
+                                       else "；运气对照**未跑**（报告里会写明）"),
                         "report": f"/report/{job_id}", "report_path": str(report),
                         "selfcheck": problems})
     except Exception as exc:                          # noqa: BLE001 —— 页面要看到原因
@@ -233,7 +247,7 @@ def _bench_series(reg: pd.DataFrame, eq: pd.DataFrame) -> pd.Series:
 
 
 def _summary(P: dict, res: dict, sig: pd.DataFrame, eq: pd.DataFrame,
-             name: str, lo: str, hi: str) -> dict:
+             name: str, lo: str, hi: str, ctl: dict | None = None) -> dict:
     ts = metrics.tail_stats(res["trades"]) if len(res["trades"]) else {"expectancy_r": float("nan")}
     return {
         "preset_name": name, "preset": resolve(P),
@@ -247,8 +261,8 @@ def _summary(P: dict, res: dict, sig: pd.DataFrame, eq: pd.DataFrame,
         "sig_dates": _signal_dates(res, sig),
         "n_trials": int(P.get("n_comparisons") or 1),
         "verdict": (P.get("verdict") or "").strip() or None,
-        "note": None, "ctl_runs": 0, "ctl_failed": 0, "ctl_p90": float("nan"),
-        "ctl_max": float("nan"), "ctl_pct": float("nan"),
+        "note": None,
+        **{k: v for k, v in (ctl or {}).items()},
     }
 
 

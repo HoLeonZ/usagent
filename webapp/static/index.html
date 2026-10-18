@@ -78,6 +78,9 @@ table.ledger td{white-space:nowrap}
   <a class="nav" href="#reports">历史报告</a>
   <a class="nav" href="#runs">运行台账</a>
   <input type="search" id="q" placeholder="搜索：名字 / 机制 / 参数…（⌘K 聚焦）">
+  <label class="sub" title="同止损止盈、同笔数、随机入场 200 次 ⇒ 这条策略落在随机分布的第几百分位。
+这是把「运气」与「本事」分开的唯一判词；默认关是因为它让每次点击多花约 25 秒。">
+    <input type="checkbox" id="ctl"> 运气对照 200 次（+约 25 秒）</label>
   <span class="sub" id="count"></span>
 </div></div></div>
 
@@ -322,12 +325,12 @@ function jumpToHash() {
 
 // ---------------------------------------------------------------- 回测
 
-function panel(jobId, kind, id, lo, hi, params) {
+function panel(jobId, kind, id, lo, hi, params, controlRuns) {
   const d = document.createElement("div");
   d.id = "job-" + jobId;
   d.innerHTML = `<div class="jhead"><b>${esc(kind)}:${esc(id)}</b>
     <span class="sub">${esc(lo)} .. ${esc(hi)}${params ? " · 参数 " + esc(JSON.stringify(params)) : ""}
-     · job ${esc(jobId)}</span>
+     · job ${esc(jobId)}${controlRuns ? " · 运气对照 " + controlRuns + " 次" : ""}</span>
     <div class="sub">完整命令：<code>${esc(cliCmd(kind, id))}</code></div></div>
     <div class="steps jsteps"><div>… 已提交，等待执行</div></div><div class="jbody"></div>`;
   $("result").appendChild(d);
@@ -340,17 +343,18 @@ async function run(kind, id) {
   const btn = $("btn-" + kind + "-" + id);
   if (btn.disabled) return;                       // 双击守卫：一次点击 = 一次提交 = k+1
   const params = currentParams(kind, id);
+  const controlRuns = $("ctl").checked ? 200 : 0;
   $("run").style.display = "block";
   $("runhead").classList.remove("sub");
   $("runhead").innerHTML = `<b>正在回测…</b>`;
   btn.disabled = true; btn.textContent = "回测中…";
   try {
     const r = await fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({kind, id, lo, hi, params})});
+      body: JSON.stringify({kind, id, lo, hi, params, control_runs: controlRuns})});
     const j = await r.json();
     if (j.error) { $("runhead").innerHTML = `<b class="neg">提交失败：${esc(j.error)}</b>`; return; }
     T0[j.id] = Date.now();
-    panel(j.id, kind, id, lo, hi, params);
+    panel(j.id, kind, id, lo, hi, params, controlRuns);
     $("run").scrollIntoView({block: "start"});
     poll(j.id, kind, id);
   } finally {

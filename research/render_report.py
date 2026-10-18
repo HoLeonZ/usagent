@@ -43,6 +43,42 @@ DEFAULT_PRESET = "us_uptrend_pullback_12m_target"
 WIN_LO, WIN_HI = "2025-10-14", "2026-10-14"
 OUT_HTML = Path(__file__).resolve().parent / "results" / "trades_12m.html"
 
+def control_arm(ind: pd.DataFrame, preset: dict, n_trades: int, lo: str, hi: str,
+                reg, n_runs: int, own_cagr: float) -> dict:
+    """**运气对照**：同止损止盈、同笔数、随机入场 n_runs 次 ⇒ 本配置落在第几百分位。
+
+    为什么必须是一个函数：这条判词是把"运气"和"本事"分开的**唯一**手段
+    （`family_search` 的对照随机的是**日子**，这里随机的是**入场**），而 CLI（`--control-runs`）
+    与本地平台都要出它 —— 两处各写一份必然分叉（本仓库为此建过账）。
+
+    `n_runs <= 0` ⇒ 返回 NaN 并让渲染层**不出那条判词**（绝不能留着 NaN 渲染成
+    "nan 百分位"）。返回的四个键直接 `summary.update(...)`。
+    """
+    if n_runs <= 0:
+        return {"ctl_runs": 0, "ctl_failed": 0, "ctl_p90": float("nan"),
+                "ctl_max": float("nan"), "ctl_pct": float("nan")}
+    from research import search_12m as _S
+    # 对照配置从**已解析的 broker preset** 反推，保证与策略同杠杆同止损止盈。
+    # ⚠️ 按 preset **实际用的那套几何**建对照（审计 G5）：契约允许 ATR 归一化或固定
+    # 百分比两套，直接读 `preset["atr_sl_mult"]` 会让一个合法的 pct preset KeyError。
+    cfg = {"max_hold": preset["max_hold"], "max_positions": preset["max_positions"],
+           "risk_per_trade": preset["risk_per_trade"]}
+    # 保持 `_scheme = exit_scheme(...)` + `if _scheme == "atr"` 这个形状：
+    # `test_contract_gaps` 的源码级护栏钉的正是它（"任何 atr_* 的直接读取都必须在
+    # 按几何分支之后"）。改成内联调用会让那条护栏失效 —— 护栏对了，改代码。
+    _scheme = exit_scheme(preset)
+    if _scheme == "atr":
+        cfg.update({"sl_mult": preset["atr_sl_mult"], "tp_mult": preset["atr_tp_mult"]})
+    else:
+        cfg.update({"sl_pct": preset["sl_pct"], "tp_pct": preset["tp_pct"]})
+    # 必须把 reg 传进去：对照要在**策略自己的机会集**里抽（含 regime 门），
+    # 否则比的是两个不同的池子（见 search_12m._control_pool）。
+    ctl = _S.random_control(ind, cfg, n_trades, n_runs=n_runs, lo=lo, hi=hi, seed=0, reg=reg)
+    return {"ctl_runs": ctl["n_runs"], "ctl_failed": ctl["n_failed"],
+            "ctl_p90": ctl["p90"], "ctl_max": ctl["max"],
+            "ctl_pct": float((ctl["cagrs"] < own_cagr).mean() * 100.0)}
+
+
 def _strategy(preset_name: str = DEFAULT_PRESET, *, family: str | None = None,
               params: dict | None = None, base_preset: str | None = None) -> tuple[dict, str]:
     """策略选择 → (已注册的 preset 字典, 显示名)。**run 与 prepare_chain 共用这一段**。"""
@@ -187,30 +223,8 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
     # ⚠️ 按 preset **实际用的那套几何**建对照（审计 G5）：契约允许 ATR 归一化或
     # 固定百分比两套，而这里此前直接读 `preset["atr_sl_mult"]` —— 一个合法的
     # pct preset 会让它 KeyError。用 `exit_scheme()` 显式分支，两套都支持。
-    _scheme = exit_scheme(preset)
-    cfg = {
-        "max_hold": preset["max_hold"], "max_positions": preset["max_positions"],
-        "risk_per_trade": preset["risk_per_trade"],
-    }
-    if _scheme == "atr":
-        cfg.update({"sl_mult": preset["atr_sl_mult"], "tp_mult": preset["atr_tp_mult"]})
-    else:
-        cfg.update({"sl_pct": preset["sl_pct"], "tp_pct": preset["tp_pct"]})
-    if control_runs > 0:
-        # 必须把 reg 传进去:对照要在**策略自己的机会集**里抽(含 regime 门),
-        # 否则比的是两个不同的池子(见 search_12m._control_pool)。
-        ctl = _S.random_control(ind, cfg, len(res["trades"]),
-                                n_runs=control_runs, lo=lo, hi=hi, seed=0, reg=reg)
-        summary.update({
-            "ctl_runs": ctl["n_runs"], "ctl_failed": ctl["n_failed"],
-            "ctl_p90": ctl["p90"], "ctl_max": ctl["max"],
-            "ctl_pct": float((ctl["cagrs"] < summary["cagr"]).mean() * 100.0),
-        })
-    else:
-        # 跳过运气对照(测试与快速迭代用)。渲染层据此不出那条判词 ——
-        # **不能**留着 NaN 让它渲染成 "nan 百分位"。
-        summary.update({"ctl_runs": 0, "ctl_failed": 0, "ctl_p90": float("nan"),
-                        "ctl_max": float("nan"), "ctl_pct": float("nan")})
+    summary.update(control_arm(ind, preset, len(res["trades"]), lo, hi, reg,
+                               control_runs, summary["cagr"]))
     # 第 6 项是**策略相关**的钩子：呈现层拿它去画信号日清单。
     return res, eq, ind, bench, summary, explain
 
