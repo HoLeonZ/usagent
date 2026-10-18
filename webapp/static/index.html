@@ -78,6 +78,8 @@ button.mini{padding:3px 9px;font-size:12px;background:transparent}
 button:disabled{opacity:.5;cursor:default}
 .pos{color:var(--up)}.neg{color:var(--dn)}.warn{color:var(--warn)}
 details.src{margin:9px 0 0}
+details.src .devhint{font-size:12px;color:#f0d9b5;background:#1a1712;border:1px solid #4a3a12;
+                     border-radius:6px;padding:8px 10px;margin:8px 0 0;line-height:1.6}
 details.src pre{max-height:320px;overflow:auto;background:#0c0f13;border:1px solid var(--line);
                 border-radius:6px;padding:9px;font-size:11.5px;line-height:1.45}
 .run{margin:22px 0 0;padding:14px;border:1px solid var(--btnb);border-radius:8px;background:#12171e;display:none}
@@ -105,6 +107,9 @@ table.ledger td{white-space:nowrap}
   <a class="nav" href="#run">本次结果</a>
   <a class="nav" href="#reports">历史报告</a>
   <a class="nav" href="#runs">运行台账</a>
+  <a class="nav" href="#" onclick="reloadCatalog();return false"
+     title="重新拉一次目录并重渲卡片（你改过的窗口/族参数会回到默认）。
+注意：改了定义体要先重启服务 —— 注册表是启动时读一次的">重新读目录</a>
   <input type="search" id="q" placeholder="搜索：名字 / 机制 / 参数…（⌘K 聚焦）">
   <input type="text" id="note" placeholder="备注（可选：这次改了什么 / 为什么跑）"
          title="写进台账的备注列。台账是拿来对比两次运行的 —— 没有备注，两次点击在纸面上长得一模一样。">
@@ -293,7 +298,8 @@ function card(e, runCount) {
     <div class="clip" id="clip-${a}"></div>
     <div class="sub ${held ? "warn" : ""}" id="flag-${a}">${held ? "⚠ 与 holdout 重叠（只准读一次）" : ""}</div>
     <details class="src" id="src-${a}"><summary class="sub">定义体源码（只读）</summary>
-      <pre id="srcbody-${a}">点「查看定义体」加载…</pre></details>
+      <pre id="srcbody-${a}">点「查看定义体」加载…</pre>
+      <div class="devhint" id="srchint-${a}"></div></details>
     ${vbox}
   </div>`;
 }
@@ -380,6 +386,17 @@ async function showSrc(kind, id) {
   const j = await (await fetch(`/api/source/${kind}/${id}`)).json();
   body.textContent = j.error ? ("读不到：" + j.error) : (j.path + "\n" + "─".repeat(60) + "\n" + j.text);
   body.dataset.loaded = "1";
+  // 开发循环里最容易踩的一步：**注册表是服务启动时读一次的**（research/presets.py 在 import
+  // 时 _build()），所以改完定义体、光刷页面不会生效 —— 不说清这件事，人会在"改了没反应"里打转。
+  if (!j.error) {
+    $("srchint-" + kind + "-" + id).innerHTML =
+      `<b>改这个文件之后</b>：① 重启平台服务（注册表在启动时读一次，光刷新页面不会生效）；
+       ② 再点顶栏的「重新读目录」。<br>
+       ⚠️ 「重新读目录」会<b>重渲卡片</b>，所以你改过的窗口与族参数会回到默认 ——
+       这是有意的：定义体可能刚变，旧输入未必还对得上。<br>
+       运行中：<code>python3 -m webapp.server --port 8765</code>
+       （修改后的 <code>n_comparisons</code> / 网格必须跟着一起改 —— 换了参数空间就是一次新搜索，§5）`;
+  }
 }
 // 排序只 reorder DOM。为什么不重渲 #content（那是最省事的写法）：重渲会把用户改过的窗口、
 // 族参数、展开的源码全部重置 —— 本仓库为此吃过一次亏（审计实测），所以这里是 appendChild。
@@ -489,6 +506,14 @@ async function loadCatalog() {
   });
   applyPoolHint();
   applyFilter();
+}
+
+// 重新读目录 = 重新拉 /api/catalog 并重渲卡片。**注意**：这只解决"页面是旧的"，
+// 不解决"服务是旧的"（注册表在服务启动时读一次）—— 所以文案与提示都写明要重启。
+async function reloadCatalog() {
+  await loadCatalog();
+  await refreshLedger();
+  applyPoolHint();
 }
 
 async function refreshLedger() {

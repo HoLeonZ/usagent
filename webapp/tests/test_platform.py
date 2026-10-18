@@ -412,6 +412,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "卡片显示最近一次读数（开发时第一个问题是「哪条最好」）": "function lastRunLine(",
         "读数写清是「最近一次」而不是策略水平": "不是这条策略的水平",
         "可按最近一次超额排序（没跑过的排最后）": 'data-last=',
+        "顶栏「重新读目录」（页面旧 vs 服务旧要分清）": "reloadCatalog()",
+        "改完定义体要说清「要重启服务」（注册表启动时读一次）": "srchint-",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
