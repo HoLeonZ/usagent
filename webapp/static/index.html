@@ -202,6 +202,11 @@ function card(e, runCount) {
       : "族 · " + e.mechanism)}</p>
     ${paramTable(e)}
     ${familyParamControls(e)}
+    ${e.kind === "family" && e.grid_size ? `<div class="sub">本族有 <b>${e.grid_size}</b> 组预注册参数：
+      <b>这一页一次只跑一组</b>（k 记的是 ${e.grid_size} —— 一次搜索的完整空间）。
+      想把整张网格跑完，用下面的「复制网格命令」：那个工具会把网格 × 折数逐项计入 k。
+      <b>别在这页上把 ${e.grid_size} 个格点各点一次</b> —— 那等于把它记成 ${e.grid_size} 次独立试验，
+      而它们本来就是一次搜索。</div>` : ""}
     <div class="bar">
       ${windowPresets(e).map(([lab, ww]) => ww
         ? `<button class="mini" title="${ww[0]} .. ${ww[1]}"
@@ -215,6 +220,9 @@ function card(e, runCount) {
         → <input type="date" id="hi-${a}" value="${w[1]}" aria-label="窗口终点"></label>
       <button id="btn-${a}" onclick="run('${e.kind}','${e.id}')">回测</button>
       <button class="mini" onclick="copyCmd('${e.kind}','${e.id}')">复制命令</button>
+      ${e.kind === "family" && e.grid_size ? `<button class="mini" title="跑完整张网格（${e.grid_size} 组 × 折数，工具自己逐项记账）。
+⚠️ 这个工具固定用 WFV 搜索窗 —— 它与上面那排窗口按钮无关，窗口在这个工具里是写死的（改它会推翻它自己的基线对照）。"
+        onclick="copyGridCmd('${e.id}', ${runCount || 0})">复制网格命令</button>` : ""}
       <button class="mini" onclick="showSrc('${e.kind}','${e.id}')">查看定义体</button>
       <span class="sub">已跑 <b>${runCount || 0}</b> 次</span>
       <span class="sub poolhint">（池子可评估范围：跑过任意一条后显示）</span>
@@ -277,6 +285,19 @@ function cliCmd(kind, id) {
   if (kind === "preset") return `python3 -m research.render_report --preset ${id}${tail}`;
   const pr = JSON.stringify(currentParams(kind, id)).replace(/'/g, "");
   return `python3 -m research.render_report --family ${id} --params '${pr}'${tail}`;
+}
+// 族的批量入口：`family_search` 是仓库里唯一会跑**整张网格**的工具，它自己把网格 × 折数
+// 逐项计进 n_trials —— 所以"整套一次跑"与 k 的口径是对齐的。--k-offset 用这个族在平台上
+// 已经跑过的次数（那些点击也是评估，§5 迭代记账）。
+function gridCmd(id, priorRuns) {
+  return `python3 -m research.family_search --run --families ${id} --k-offset ${priorRuns || 0}`;
+}
+function copyGridCmd(id, priorRuns) {
+  const cmd = gridCmd(id, priorRuns), box = $("clip-family-" + id);
+  box.style.display = "block";
+  navigator.clipboard?.writeText(cmd).then(
+    () => { box.textContent = `已复制到剪贴板（整张网格一次跑完）：\n${cmd}`; },
+    () => { box.textContent = `（复制失败，请手动选中）\n${cmd}`; });
 }
 function copyCmd(kind, id) {
   const cmd = cliCmd(kind, id), box = $("clip-" + kind + "-" + id);

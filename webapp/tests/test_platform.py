@@ -295,6 +295,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "搜索 0 命中时分节标题说实话（原本还写着「6 条」）": "这一节没有命中",
         "窗口旁显示池子可评估范围（跑过一次后就有）": "池子可评估范围",
         "与池子范围不重叠时当场预警（不必白等一次）": "完全不重叠",
+        "族卡的批量入口（整张网格一次跑完）": "copyGridCmd(",
+        "族卡说清「网格才是一次搜索」（别把 96 个格点各点一次）": "一次搜索的完整空间",
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
     }
     missing = [k for k, v in need.items() if v not in html]
