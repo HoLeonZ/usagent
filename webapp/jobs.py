@@ -93,6 +93,21 @@ def recent_runs(limit: int = 20) -> list[dict]:
     return list(reversed(all_runs()[-limit:]))
 
 
+def counts_by_strategy() -> dict[str, int]:
+    """每条策略**全部**运行次数。
+
+    为什么不能拿 recent_runs(30) 现数：卡片上的「已跑 N 次」与 DSR 的 k 用的是同一个
+    计数（`prior_runs` 读全文），而页面只取最近 30 条 —— 到第 31 次运行时，界面会说
+    "已跑 30" 而 k 已经是 31（同一个量的两个数字，本仓库最忌讳的那种）。
+    """
+    out: dict[str, int] = {}
+    for r in all_runs():
+        k = r.get("strategy_id")
+        if k:
+            out[k] = out.get(k, 0) + 1
+    return out
+
+
 def _chain_for(P: dict) -> tuple:
     """按**取池口径**缓存链路。键取 preset 的 universe 声明 —— 换池子必须换链路。"""
     key = json.dumps(P.get("universe") or {}, sort_keys=True, default=str)

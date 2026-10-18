@@ -252,6 +252,26 @@ def test_no_literal_markdown_leaks_into_visible_copy():
     assert not offenders, f"可见文案里有 markdown 的 **：{offenders}"
 
 
+def test_run_counts_come_from_the_whole_ledger_not_the_shown_window(http, tmp_path, monkeypatch):
+    """卡片「已跑 N 次」必须与 DSR 的 k 用**同一个计数**（都按全文台账数）。
+
+    页面上的表只显示最近 30 条，而 k 用的是全文（`prior_runs` 逐行数）。此前卡片次数是从
+    `/api/runs` 那 30 条里现数的 ⇒ 到第 31 次运行时界面会说"已跑 30"而 k 已经是 31：
+    同一个量的两个数字（本仓库最忌讳的那种）。这里造 35 条，逼出这个分叉。
+    """
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    monkeypatch.setattr(jobs, "RUNS_LEDGER", tmp_path / "web_runs.jsonl")
+    lines = [json.dumps({"ts": f"2026-10-0{1+i%9}T00:00:0{i%9}", "strategy_id": "preset:x",
+                         "n_trials_k": 10 + i, "excess": 0.01 * i, "window": ["2025-01-01", "2025-10-13"]})
+             for i in range(35)]
+    (tmp_path / "web_runs.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    d = json.loads(_get(http + "/api/runs")[1])
+    assert d["total"] == 35 and d["shown"] == 30, d
+    assert d["by_strategy"] == {"preset:x": 35}, d["by_strategy"]
+    # 而且它与 k 的记账读的是同一份东西
+    assert jobs.prior_runs("preset:x") == 35
+
+
 def test_server_binds_localhost_only():
     """**只绑 127.0.0.1**：这个页面能一键跑回测、读本地库、写报告文件。"""
     src = (ROOT / "webapp" / "server.py").read_text(encoding="utf-8")

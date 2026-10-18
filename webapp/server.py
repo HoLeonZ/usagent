@@ -82,7 +82,10 @@ class Handler(BaseHTTPRequestHandler):
             # 表只显示最近 30 条 —— 但**共几条**要说出来（否则读者以为那就是全部）。
             runs = jobs.recent_runs(30)
             return self._json(200, {"runs": runs, "total": len(jobs.all_runs()),
-                                    "shown": len(runs)})
+                                    "shown": len(runs),
+                                    # 卡片「已跑 N 次」与筛选下拉都按**全文**数 —— 它们与
+                                    # DSR 的 k 是同一个计数，不能受"表只显示 30 条"影响
+                                    "by_strategy": jobs.counts_by_strategy()})
         if p == "/api/runs.csv":
             # 完整台账的 CSV（页面上的表有 30 条上限，导出不能跟着被截断）。
             import csv as _csv
