@@ -43,15 +43,9 @@ DEFAULT_PRESET = "us_uptrend_pullback_12m_target"
 WIN_LO, WIN_HI = "2025-10-14", "2026-10-14"
 OUT_HTML = Path(__file__).resolve().parent / "results" / "trades_12m.html"
 
-def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
-        control_runs: int = 200, *, family: str | None = None,
-        params: dict | None = None, base_preset: str | None = None,
-        title: str | None = None, note: str = "") -> tuple:
-    """窗口 + 策略 ⇒ 逐笔明细。见模块 docstring 的三种用法。
-
-    preset_name 与 kw（family/params/base_preset/title/note）都只影响
-    **跑哪条策略**；呈现一律由 `research/html_report.py` 负责。
-    """
+def _strategy(preset_name: str = DEFAULT_PRESET, *, family: str | None = None,
+              params: dict | None = None, base_preset: str | None = None) -> tuple[dict, str]:
+    """策略选择 → (已注册的 preset 字典, 显示名)。**run 与 prepare_chain 共用这一段**。"""
     P = presets.get_preset(preset_name)
     if family:
         # 族型策略：退出/仓位口径取自一条**已注册**的 preset（默认那条 str 族 preset），
@@ -67,7 +61,24 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
         # 那条 preset 的 VERDICT 是**另一条策略**的证据，不能当成本策略的 ⇒ 摘掉。
         # 于是报告会显示"本策略没有声明负面证据"（除非 --note 补一句）—— 这是有意的。
         P.pop("verdict", None)
-        preset_name = "family:" + _fid
+        return P, "family:" + _fid
+    return P, preset_name
+
+
+def prepare_chain(preset_name: str = DEFAULT_PRESET, *, family: str | None = None,
+                  params: dict | None = None, base_preset: str | None = None) -> tuple:
+    """构建 run() 需要的那条**链路**（面板 / 指标 / regime），供重复回测复用。
+
+    为什么单独暴露它：一次"载入面板"要 35–66 秒（3028 只票逐只查询），而本地平台会连着
+    点好几次 ⇒ 必须能缓存。**只有一处接线**：`run()` 在没给 chain 时调的就是这个函数，
+    不是第二份实现（本仓库最忌讳的两条路径）。
+    """
+    P, _ = _strategy(preset_name, family=family, params=params, base_preset=base_preset)
+    return _chain_from(P)
+
+
+def _chain_from(P: dict) -> tuple:
+    """由**已解析的 preset** 建链路。run() 与 prepare_chain() 都走这里，只有一份实现。"""
     p = panel_mod.load_panel_for_preset(P)
     ind = indicators.compute_all(p)
     # 卡片上的均线也要落在 **as-traded** 轴上(与蜡烛、止损止盈线、买卖标记同轴)——
@@ -81,6 +92,34 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
     # ⚠️ 必须把 preset 的 regime 参数传进去:此前这里用函数默认值做择时,而 CLI 用
     #    preset 值 —— preset 的 regime 一改,报告与 CLI 就分叉(审计实测差 13 笔成交)。
     reg = regime.compute_regime(ind, **(P.get("regime") or {}))
+    return p, ind, reg
+
+
+def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
+        control_runs: int = 200, *, family: str | None = None,
+        params: dict | None = None, base_preset: str | None = None,
+        title: str | None = None, note: str = "",
+        chain: tuple | None = None) -> tuple:
+    """窗口 + 策略 ⇒ 逐笔明细。见模块 docstring 的三种用法。
+
+    preset_name 与 kw（family/params/base_preset/title/note）都只影响
+    **跑哪条策略**；呈现一律由 `research/html_report.py` 负责。
+
+    `chain=(panle, ind, reg)` 用于**重复回测**（本地平台）：跳过"读 + 算"这一段，
+    其余一字不改。给了 chain 就不再重新载面板 —— 否则缓存等于白做。
+    """
+    P, preset_name = _strategy(preset_name, family=family, params=params,
+                               base_preset=base_preset)
+    if chain is None:
+        # 直接用**已解析**的 P（不要再用 preset_name 二次解析：族型的显示名是
+        # "family:xxx"，不是注册名 —— 实测会把 KeyError 抛在缓存未命中那条路径上）
+        p, ind, reg = _chain_from(P)
+    else:
+        p, ind, reg = chain
+        _miss = {"raw_ma20", "raw_ma60"} - set(ind.columns)
+        if _miss:
+            raise RenderError(f"chain 里的指标表缺 {sorted(_miss)} —— 请用 prepare_chain() "
+                              f"预载（缺列只会让 K 线卡静默少画均线）")
 
     # 信号:preset 里声明的 signal 字典直接透传(含可选过滤层)。
     # preset 是**单一事实来源** —— 不在这里重新拼参数,否则报告展示的配置

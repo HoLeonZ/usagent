@@ -29,7 +29,8 @@ jobs:
       - name: 提交前预检（快检）
         run: bash tools/preflight.sh
       - name: 测试（含离线行为锁）
-        run: python -m pytest research/tests src/tests -q -rs
+        run: python -m pytest research/tests src/tests webapp/tests -q -rs
+        # webapp/tests 是本地策略平台的测试：离线合成市场 + 真 HTTP 服务在随机端口
       - name: 说明
         if: always()
         run: |

@@ -44,7 +44,8 @@ echo "[preflight] 快检（卫生 / 契约 / 覆盖判据 / 离线行为锁）"
 "$PY" -m pytest "${FAST[@]}" || { echo "[preflight] ✗ 快检未过 —— 不要提交"; exit 1; }
 
 if [ "${1:-}" = "--full" ]; then
-  echo "[preflight] 全量（research/tests + src/tests）"
-  "$PY" -m pytest research/tests src/tests -q || { echo "[preflight] ✗ 全量未过"; exit 1; }
+  echo "[preflight] 全量（research/tests + src/tests + webapp/tests）"
+  "$PY" -m pytest research/tests src/tests webapp/tests -q \
+    || { echo "[preflight] ✗ 全量未过"; exit 1; }
 fi
 echo "[preflight] ✓ 通过"
