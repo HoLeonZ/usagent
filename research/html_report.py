@@ -382,6 +382,26 @@ th{color:var(--dim);font-weight:500;text-align:right}
 th:first-child,td:first-child{text-align:left}
 tr:hover td{background:#1b2029}
 .pos{color:var(--up)}.neg{color:var(--dn)}
+/* 逐笔明细的"只看某一类出场"（纯 CSS：报告不许带脚本标签 —— selfcheck 会直接扫这个字面
+   量，所以这里连注释里都不能写它）。
+   用 radio 而不是 checkbox：多选要表达"任一命中即显示"的并集，纯 CSS 表达不了；
+   而单选的语义正好是读者要的那件事 —— "只看止损那批"。默认"全部"。
+   用 :has() 是为了不把 radio 硬塞成卡片的兄弟节点（那会逼着改整个文档结构）。
+   老浏览器不支持时**静默降级为不过滤** —— 报告照旧可读，只是少一个筛选。 */
+.fbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:10px 0 4px}
+.fbar input{position:absolute;opacity:0;width:1px;height:1px}
+.fbar label{font-size:12.5px;color:var(--fg);border:1px solid var(--line);border-radius:999px;
+            padding:2px 10px;background:var(--card);cursor:pointer}
+.fbar label:hover{border-color:var(--acc)}
+.fbar input:focus-visible + label{outline:2px solid var(--acc);outline-offset:1px}
+.fbar input:checked + label{border-color:var(--acc);color:var(--acc);background:#131a26}
+body:has(#xf-sl:checked) .card:not([data-reason="sl"]),
+body:has(#xf-sl_gap:checked) .card:not([data-reason="sl_gap"]),
+body:has(#xf-tp:checked) .card:not([data-reason="tp"]),
+body:has(#xf-tp_gap:checked) .card:not([data-reason="tp_gap"]),
+body:has(#xf-max_hold:checked) .card:not([data-reason="max_hold"]),
+body:has(#xf-eod:checked) .card:not([data-reason="eod"]),
+body:has(#xf-regime:checked) .card:not([data-reason="regime"]){display:none}
 .reasonbox{margin:12px 0 6px}
 .rsum{font-size:12.5px}
 .rsum td,.rsum th{padding:4px 8px}
@@ -415,7 +435,7 @@ h2{scroll-margin-top:12px}
   .warn{background:#fff;border-color:#8a5a00}
   h2{break-after:avoid}
   a{color:inherit;text-decoration:none}
-  .totopcard,.toc{display:none}
+  .totopcard,.toc,.fbar{display:none}
   tr:hover td{background:transparent}
 }
 """
@@ -593,6 +613,15 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
 
     # ---- 逐笔卡片 ----
     parts.append('<h2 id="s-detail">逐笔明细</h2>')
+    _reasons = exit_reason_rows(trades)
+    if len(_reasons) >= 2 and len(trades) >= 10:
+        parts.append('<div class="fbar"><span class="sub">只看：</span>'
+                     '<input type="radio" name="xf" id="xf-all" checked>'
+                     f'<label for="xf-all">全部 {len(trades)}</label>')
+        for d_ in _reasons:
+            parts.append(f'<input type="radio" name="xf" id="xf-{e(d_["reason"])}">'
+                         f'<label for="xf-{e(d_["reason"])}">{e(d_["reason"])} {d_["n"]}</label>')
+        parts.append('</div>')
     for i, (_, t) in enumerate(trades.iterrows(), 1):
         sym = str(t["symbol"])
         sig_d = pd.Timestamp(summary["sig_dates"][sym])
@@ -609,7 +638,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
         k_exit = int(xj[0]) if len(xj) else j
         win = sub.iloc[max(0, j - PRE_SIG_BARS): k_exit + POST_EXIT_BARS + 1].copy()
         cls = "win" if t["net_pnl"] >= 0 else "loss"
-        parts.append(f'<div class="card" id="t{i}">')
+        parts.append(f'<div class="card" id="t{i}" data-reason="{e(str(t["exit_reason"]))}">')
         # 每张卡自己带「回总表」：总表→逐笔有 #t{i} 锚点（本就有、实测 91 个全命中），
         # 但跳下去之后**没有回去的路**（审计实测 href 只有 #t{i}，无一处回目录）。
         parts.append('<a class="totop" href="#s-trades">↑ 回总表</a>'

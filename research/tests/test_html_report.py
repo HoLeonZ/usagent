@@ -110,8 +110,26 @@ def test_report_navigation_and_print_are_present(chain):
 
     # 3. 打印：必须有 @media（否则白纸上打深色正文），且打印时隐藏浮层与目录
     assert "@media print" in doc, "报告没有打印样式 —— 另存 PDF / 打印会不可读"
-    assert re.search(r"@media print\{.*?\.totopcard,\.toc\{display:none\}", doc, re.S), \
-        "打印样式没把浮层与目录藏起来"
+    assert re.search(r"@media print\{.*?\.totopcard,\.toc,\.fbar\{display:none\}", doc, re.S), \
+        "打印样式没把浮层、目录与筛选条藏起来"
+
+    # 6. 逐笔明细的筛选：只出"只看某一类出场"的单选（radio），计数与卡片数对得上
+    if n >= 10:
+        assert 'class="fbar"' in doc and 'name="xf"' in doc, "没有筛选条"
+        # "全部"那一项不算原因（它的 id 是 xf-all，别把它当成一个出场原因）
+        reasons = [r for r in re.findall(r'id="xf-([a-z_]+)"', doc) if r != "all"]
+        assert len(reasons) >= 2, f"过滤项太少：{reasons}"
+        assert f'<label for="xf-all">全部 {n}</label>' in doc, "「全部」缺总笔数"
+        for r_ in reasons:
+            # 每一项都要带上"这一类有几笔"，否则读者点了不知道会剩几张卡
+            assert re.search(rf'id="xf-{r_}"[^>]*>\s*<label for="xf-{r_}">{r_} (\d+)</label>', doc), \
+                f"{r_} 的筛选按钮缺计数"
+        # 每张逐笔卡都带 data-reason（筛选靠它；用属性而不是 class —— selfcheck 按
+        # class="sl"/class="tp" 数元素，多一个就报错）
+        # ⚠️ 不能数全文档里的 `data-reason="` —— CSS 的 7 条过滤规则里也各有一个（实测 43 vs 36）
+        cards_with_reason = re.findall(r'<div class="card" id="t\d+" data-reason="([a-z_]+)">', doc)
+        assert len(cards_with_reason) == n, f"不是每张卡都能被筛到：{len(cards_with_reason)} != {n}"
+        assert set(cards_with_reason) <= set(reasons), "有卡片的出场原因没有对应的筛选项"
 
     # 4. 加了这些仍然**不许**有脚本或外链（自包含是硬约束，selfcheck 也查一遍）
     assert H.selfcheck(doc, n) == []
