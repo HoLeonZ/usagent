@@ -59,7 +59,7 @@ def _skeleton(doc: str) -> tuple:
     注意**不能**把卡片数放进来：卡片数 = 成交笔数，本来就该随策略变；
     "形式不变"说的是"每笔一张卡"，而不是"卡的数量一样"（第一版就是这么写错的）。
     """
-    heads = tuple(h for h in SKELETON if f"<h2>{h}</h2>" in doc)
+    heads = tuple(h for h in SKELETON if re.search(rf"<h2[^>]*>{re.escape(h)}</h2>", doc))
     css = re.search(r"<style>(.*?)</style>", doc, re.S).group(1)
     return heads, len(css), doc.count("<h1>")
 
@@ -84,6 +84,37 @@ def test_only_the_strategy_changes_the_form_stays(chain):
     plain_verdict = s_p["verdict"].replace("**", "").replace("`", "")
     assert plain_verdict[:40] in plain_doc, "策略自己的 VERDICT 没进报告"
     assert "<b>不得用于实盘。</b>" in d_preset, "VERDICT 的粗体没被转换"
+
+
+def test_report_navigation_and_print_are_present(chain):
+    """报告自己要走得动、也带得走（审计实测原本两样都没有）。
+
+    2026-10-18 实测的原始状态：报告 docHeight 87794px / 91 张逐笔卡，5 个 h2 的 id
+    **全为 null**、`回到顶部` 0 处、href 只有 `#t{i}`（跳下去回不来）；
+    `@media` 规则数 0 —— 深色正文（#e6e8ee）会被打到白纸上。
+    这两个缺口都属于"看完了拿不走 / 走不回去"，所以当场钉住。
+    """
+    doc, n, _ = _render(chain)
+
+    # 1. 每个章节都有 id，且**目录里的每个锚点都命中**（不是"有目录"就算过）
+    ids = set(re.findall(r'<h2 id="([^"]+)"', doc))
+    assert len(ids) == len(SKELETON), f"章节 id 不全：{sorted(ids)}"
+    toc = re.findall(r'class="toc"[^>]*>(.*?)</div>', doc, re.S)[0]
+    hrefs = re.findall(r'href="#([^"]+)"', toc)
+    assert len(hrefs) == len(SKELETON), f"目录没覆盖全部章节：{hrefs}"
+    assert set(hrefs) <= ids | {"top"}, f"目录里有死锚点：{set(hrefs) - ids - {'top'}}"
+
+    # 2. 逐笔卡各自有回去的路（每笔两条：回总表 / 回顶部）
+    assert doc.count('class="totop"') == 2 * n, "不是每张逐笔卡都能回到总表"
+    assert 'class="totopcard"' in doc, "长页面缺一个常驻「回到顶部」"
+
+    # 3. 打印：必须有 @media（否则白纸上打深色正文），且打印时隐藏浮层与目录
+    assert "@media print" in doc, "报告没有打印样式 —— 另存 PDF / 打印会不可读"
+    assert re.search(r"@media print\{.*?\.totopcard,\.toc\{display:none\}", doc, re.S), \
+        "打印样式没把浮层与目录藏起来"
+
+    # 4. 加了这些仍然**不许**有脚本或外链（自包含是硬约束，selfcheck 也查一遍）
+    assert H.selfcheck(doc, n) == []
 
 
 def test_note_overrides_the_missing_verdict_fallback(chain):

@@ -349,6 +349,32 @@ tr:hover td{background:#1b2029}
 .ok{color:var(--up)}.no{color:var(--dn)}
 .nodata{color:var(--dim);padding:16px}
 code{background:#1b2029;padding:1px 5px;border-radius:4px;font-size:12px}
+h2{scroll-margin-top:12px}
+.toc{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 4px}
+.toc a{font-size:12.5px;color:var(--fg);text-decoration:none;border:1px solid var(--line);
+       border-radius:999px;padding:2px 10px;background:var(--card)}
+.toc a:hover{border-color:var(--acc);color:var(--acc)}
+.totop{font-size:12px;color:var(--dim);text-decoration:none;display:inline-block;margin:2px 0 0 8px}
+.totop:hover{color:var(--acc)}
+/* 逐笔明细很长（实测 91 张卡 / 108 屏）—— 走到底之后回得去 */
+.totopcard{position:fixed;right:16px;bottom:16px;background:var(--card);border:1px solid var(--line);
+           border-radius:999px;padding:7px 13px;font-size:12.5px;color:var(--fg);text-decoration:none}
+.totopcard:hover{border-color:var(--acc);color:var(--acc)}
+/* ---- 打印 / 另存 PDF：审计实测整份报告没有任何 @media，深色底上的浅色正文打到白纸上
+   （勾了「背景图形」则整页铺黑）。这一段只改配色与分页，不动任何内容与结构。---- */
+@media print{
+  :root{--bg:#fff;--fg:#111;--dim:#555;--line:#bbb;--up:#0a7a4a;--dn:#b3261e;--acc:#1c4fa1;
+        --sl:#b3261e;--tp:#0a7a4a;--warn:#8a5a00;--card:#fff}
+  body{background:#fff;color:#111}
+  .wrap{max-width:none;padding:0}
+  .card{break-inside:avoid;border-color:#bbb}
+  .kv div{break-inside:avoid;border-color:#bbb}
+  .warn{background:#fff;border-color:#8a5a00}
+  h2{break-after:avoid}
+  a{color:inherit;text-decoration:none}
+  .totopcard,.toc{display:none}
+  tr:hover td{background:transparent}
+}
 """
 
 
@@ -375,7 +401,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
              f'<meta name="viewport" content="width=device-width,initial-scale=1">',
              f'<title>回测明细 · {e(summary["preset_name"])}</title>',
              f'<style>{CSS}</style></head><body><div class="wrap">']
-    parts.append(f'<h1>回测明细 · {e(summary["preset_name"])}</h1>')
+    parts.append(f'<h1 id="top">回测明细 · {e(summary["preset_name"])}</h1>')
     _spec = summary["preset"]
     _slip = (f'含执行滑点(f(ATR,参与率),scale={_spec["atr_slip_scale"]:g})'
              if _spec["atr_slip_scale"] > 0 else '零滑点')
@@ -429,8 +455,17 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                  '信号日清单只用当日及之前的数据 —— 已由截断重算独立验证。</li>'
                  '</ul></div>')
 
+    # ---- 目录：这份报告实测 91 张卡 / 108 屏，此前 5 个 h2 连 id 都没有、也没有一处
+    # 「回到顶部」⇒ 看一眼逐笔就得靠浏览器后退（审计实测 backToTop=0、h2 id 全为 null）。
+    # 纯 <a href="#...">，零 JS —— 报告必须保持自包含（selfcheck 禁 <script>）。
+    parts.append('<div class="toc">'
+                 '<a href="#s-summary">摘要</a><a href="#s-equity">权益曲线</a>'
+                 '<a href="#s-config">配置</a><a href="#s-trades">全部交易</a>'
+                 f'<a href="#s-detail">逐笔明细（{len(trades)} 笔）</a>'
+                 '</div>')
+
     # ---- 摘要 ----
-    parts.append('<h2>摘要</h2><div class="kv">')
+    parts.append('<h2 id="s-summary">摘要</h2><div class="kv">')
     for lab, val, cls in (
         ("CAGR(12个月)", f'{summary["cagr"]*100:+.2f}%', "pos" if summary["cagr"] > 0 else "neg"),
         ("总收益", f'{tot*100:+.2f}%', "pos" if tot > 0 else "neg"),
@@ -444,11 +479,11 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
         parts.append(f'<div><b>{e(lab)}</b><span class="{cls}">{e(val)}</span></div>')
     parts.append('</div>')
 
-    parts.append('<h2>权益曲线 vs 基准</h2><div class="card">')
+    parts.append('<h2 id="s-equity">权益曲线 vs 基准</h2><div class="card">')
     parts.append(equity_svg(eq, bench))
     parts.append('</div>')
 
-    parts.append('<h2>配置</h2><div class="card"><table class="conds">')
+    parts.append('<h2 id="s-config">配置</h2><div class="card"><table class="conds">')
     parts.append('<tr><th>项</th><th>值</th></tr>')
     for k, v in cfg.items():
         parts.append(f'<tr><td>signal.{e(str(k))}</td><td>{e(str(v))}</td></tr>')
@@ -460,7 +495,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     parts.append('</table></div>')
 
     # ---- 交易总表 ----
-    parts.append('<h2>全部交易</h2><div class="card"><table><thead><tr>')
+    parts.append('<h2 id="s-trades">全部交易</h2><div class="card"><table><thead><tr>')
     for h in ("#", "标的", "信号日", "入场日", "入场价", "止损", "止盈", "股数",
               "出场日", "出场价", "出场原因", "持有", "净收益"):
         parts.append(f'<th>{e(h)}</th>')
@@ -480,7 +515,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     parts.append('</tbody></table></div>')
 
     # ---- 逐笔卡片 ----
-    parts.append('<h2>逐笔明细</h2>')
+    parts.append('<h2 id="s-detail">逐笔明细</h2>')
     for i, (_, t) in enumerate(trades.iterrows(), 1):
         sym = str(t["symbol"])
         sig_d = pd.Timestamp(summary["sig_dates"][sym])
@@ -498,6 +533,10 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
         win = sub.iloc[max(0, j - PRE_SIG_BARS): k_exit + POST_EXIT_BARS + 1].copy()
         cls = "win" if t["net_pnl"] >= 0 else "loss"
         parts.append(f'<div class="card" id="t{i}">')
+        # 每张卡自己带「回总表」：总表→逐笔有 #t{i} 锚点（本就有、实测 91 个全命中），
+        # 但跳下去之后**没有回去的路**（审计实测 href 只有 #t{i}，无一处回目录）。
+        parts.append('<a class="totop" href="#s-trades">↑ 回总表</a>'
+                     '<a class="totop" href="#top">↑ 回顶部</a>')
         parts.append('<div class="chead">'
                      f'<span class="sym">{i}. {e(sym)}</span>'
                      f'<span class="tag {cls}">净收益 {t["net_return"]*100:+.2f}%</span>'
@@ -532,6 +571,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                          f'<td>{e(thr)}</td><td class="{_cls}">{_mark}</td></tr>')
         parts.append('</table></div>')
 
+    parts.append('<a class="totopcard" href="#top">↑ 回到顶部</a>')
     parts.append('</div></body></html>')
     return "".join(parts)
 
