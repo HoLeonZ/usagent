@@ -54,6 +54,29 @@ from webapp import catalog, jobs                     # noqa: E402
 STATIC = Path(__file__).resolve().parent / "static"
 RESULTS = ROOT / "research" / "results"
 _JOB_ID = re.compile(r"^[0-9a-f]{6,32}$")            # 报告文件名只接受任务 id 形态
+# 命令行产物的命名规则（页面 cliCmd 给的）：web_report_cli_<策略id>_<lo>_<hi>[_p<指纹>].html
+_CLI_REPORT = re.compile(r"^web_report_cli_.*_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})"
+                         r"(?:_p[0-9a-f]{8})?\.html$")
+
+
+def _cli_holdout_touches() -> int | None:
+    """命令行产物里"碰了 holdout"的次数 —— **只认文件名里带着窗口的那种**。
+
+    为什么不干脆扫所有产物：报告文件里确实有窗口（标题下的副标题），但从渲染好的 HTML 里
+    反推事实是"一份事实两处"（本仓库为此立过规矩）。文件名是页面让用户写进去的、可机器读的
+    那一份，认不出就明说认不出（返回 None 让界面别显示这一半）。
+    """
+    if not RESULTS.is_dir():
+        return None
+    n, saw_cli = 0, False
+    for f in RESULTS.glob("web_report_cli_*.html"):
+        m = _CLI_REPORT.match(f.name)
+        if not m:
+            continue
+        saw_cli = True
+        if catalog.touches_holdout((m.group(1), m.group(2))):
+            n += 1
+    return n if saw_cli else None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -134,6 +157,10 @@ class Handler(BaseHTTPRequestHandler):
                                     # 纪律计数：碰过 holdout 的次数（卡片上那句"只准读一次"
                                     # 必须有个数字，否则它只是句口号）
                                     "holdout_touches": catalog.holdout_touches(allruns),
+                                    # 命令行产物的**文件名**里带着窗口（页面给的命名规则），
+                                    # 能认出来的也数上 —— 但必须与上面那个数分开报（§5 的账
+                                    # 不能静默混两种来源）
+                                    "cli_holdout_touches": _cli_holdout_touches(),
                                     # 当前代码版本：界面据此把"旧代码下跑的"那几次标出来
                                     # （sha 单独不够 —— 脏工作区同样返回一个 sha）
                                     "git_sha": obs.git_sha(), "git_dirty": obs.git_dirty(),
@@ -277,7 +304,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(port: int = 8765, open_browser: bool = False) -> ThreadingHTTPServer:
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)     # 只监听本机
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)     # 只监听本机
+    except OSError as exc:
+        # 端口被占时原先抛 15 行 Python traceback（审计实测），既不说是怎么回事也不说下一步。
+        # 这是**运维**最常撞的一堵墙，值得一句人话。
+        import errno
+        if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+            raise SystemExit(
+                f"端口 {port} 用不了（{'已被占用' if exc.errno == errno.EADDRINUSE else '权限不足'}）——\n"
+                f"  换一个端口：python3 -m webapp.server --port {port + 1}\n"
+                f"  或先停掉原来那个：lsof -ti :{port} | xargs kill") from None
+        raise
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     print(f"策略平台已启动：{url}   （只绑 127.0.0.1；Ctrl-C 退出）")
     print("  目录页读的是注册表本身：preset_defs/ 与 family_defs/ —— 新增策略后刷新即可")

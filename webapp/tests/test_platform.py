@@ -125,6 +125,15 @@ def test_the_maintainer_map_points_only_at_things_that_exist():
             assert (ROOT / tok).is_file(), f"地图指向不存在的文件：{tok}"
     assert EXTERNAL == {"CLAUDE.md"}, "外部例外被扩大了 —— 每个例外都要单独说理由"
 
+    # 命令行入口清单里的模块与脚本也要**真的在**（改名/搬走时这里会红）
+    import importlib
+    mods = re.findall(r"<dt>(research\.[a-z_]+)</dt>", block)
+    assert len(mods) >= 5, f"命令行入口清单不见了？只找到 {mods}"
+    for mod in mods:
+        importlib.import_module(mod)          # 真的能导进来（不是靠文件名猜）
+    for script in re.findall(r"<dt>(src/[a-z_]+\.py)</dt>", block):
+        assert (ROOT / script).is_file(), f"清单里指向不存在的脚本：{script}"
+
     paths = re.findall(r"<dt>(research/[A-Za-z0-9_./*]+)</dt>", block)
     assert len(paths) >= 5, f"地图太薄：{paths}"
     for rel in paths:

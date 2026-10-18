@@ -207,6 +207,21 @@ table.ledger td{white-space:nowrap}
       <dt>research/html_report.py</dt><dd>报告的<b>全部</b>呈现（与策略无关）</dd>
       <dt>core/preset_contract.py</dt><dd>preset 的契约与 <code>resolve()</code>（参数的唯一入口）</dd>
     </dl>
+    <p><b>命令行入口</b>（页面<b>没有</b>按钮直达的那些也都在这里 —— 免得你以为页面上没有的
+      事就做不了。每条都实测过 <code>--help</code> 可用）：</p>
+    <dl>
+      <dt>research.render_report</dt><dd>单条策略的逐笔报告 —— 页面「复制命令」用的就是它</dd>
+      <dt>research.family_search</dt><dd>跑整张预注册网格（网格 × 折数逐项计入 k）—— 页面「复制网格命令」用的它</dd>
+      <dt>research.rank_strategies</dt><dd>所有 preset + 族的横向排名（页面上只能看「最近一次读数」）</dd>
+      <dt>research.run_baseline</dt><dd>成本敏感性 / 逐窗口分解 / 带 HAC 的归因</dd>
+      <dt>research.wfv_search</dt><dd>WFV 搜索 —— holdout claim 的唯一入口</dd>
+      <dt>src/validate.py</dt><dd>数据覆盖体检（「从没尝试过的名字」）</dd>
+      <dt>src/download_ohlcv.py</dt><dd>取数（换机器时的第一步）</dd>
+    </dl>
+    <p class="sub">⚠️ 注意一处不对称：页面上点一次回测会进台账、会推高 k；上面这些命令行的运行
+      <b>不进平台台账</b>（<code>family_search</code> 自带 k 记账，其余靠调用方自己声明）——
+      换句话说，「我在命令行试了几组」这件事，平台上的 k 是看不见的。这本账得自己心里有。</p>
+
     <p style="margin-top:10px"><b>改完必须跑</b>：</p>
     <ul>
       <li><code>bash tools/preflight.sh</code> —— 快检（卫生/契约/离线行为锁，几秒）。提交钩子跑的就是它。</li>
@@ -392,7 +407,10 @@ function card(e, runCount) {
   const verdict = (e.verdict || "").trim();
   const vbox = e.kind === "preset"
     ? `<div class="verdict ${verdict ? "" : "none"}">${verdict ? esc(verdict) : "（本策略没有声明负面证据 —— §5 要求负面证据与参数同时记录）"}</div>`
-    : `<div class="verdict none">族本身没有 VERDICT（它是候选机制，不是交付物）。跑出来的报告会就地写明这一点。</div>`;
+    : `<div class="verdict none">${e.delivered_as && e.delivered_as.length
+        ? `族本身没有 VERDICT（候选机制）；它的交付物 <b>${esc(e.delivered_as.join(" / "))}</b> 有 ——
+           被验证过的是交付出去的那条 preset，不是族。`
+        : "族本身没有 VERDICT（它是候选机制，不是交付物）。跑出来的报告会就地写明这一点。"}</div>`;
   const a = `${e.kind}-${e.id}`;
   const _last = LAST[e.kind + ":" + e.id];
   return `<div class="card" id="${a}" data-runs="${runCount || 0}" data-held="${held ? 1 : 0}"
@@ -462,7 +480,8 @@ function revalidate(kind, id) {
 let TOTAL = 0;                    // 盘上台账**总共**几条（表只显示最近 30 条）
 let BYSTRAT = {};                 // 每条策略全文运行次数（与 k 同一个计数）
 let LAST = {};                    // 每条策略最近一次运行的读数（卡片上显示"现在是多少"）
-let HOULDOUT_TOUCHES = 0;         // 台账里碰过 holdout 的运行次数（"只准读一次"的计数）
+let HOULDOUT_TOUCHES = 0;         // **平台台账**里碰过 holdout 的运行次数
+let CLI_HOLDOUT_TOUCHES = null;   // 命令行产物文件名里能认出来的次数（null = 服务端没给）
 let CUR_SHA = "", CUR_DIRTY = null;   // 当前代码版本（§6 归因：sha 单独不够，脏树要一起看）
 let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
                     catch (e) { return null; } })();
@@ -478,6 +497,13 @@ function currentParams(kind, id) {
   Object.keys(e.grid).forEach(k => { const el = $("p-" + id + "-" + k); if (el) out[k] = JSON.parse(el.value); });
   return out;
 }
+// 短指纹（FNV-1a 取 32 位）—— 只用来让"不同参数的产物不撞名"，不参与任何判据。
+function shortHash(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
 function cliCmd(kind, id) {
   // 这条命令必须与"点一下回测"做的事**逐项一致**，否则"界面不是黑箱"就是空话（审计实测
   // 原本三处不一致：没有 --control-runs ⇒ CLI 默认 200，开关关着也照跑；没有 --note；
@@ -485,8 +511,12 @@ function cliCmd(kind, id) {
   const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
   const ctl = $("ctl").checked ? 200 : 0;
   const note = ($("note") || {}).value || "";
-  // 与平台同一个命名空间（`/api/reports` 会列出来 ⇒ 跑完能在「历史报告」里打开）
-  const out = `research/results/web_report_cli_${id}_${lo}_${hi}.html`.replace(/[^A-Za-z0-9_./-]/g, "");
+  // 与平台同一个命名空间（`/api/reports` 会列出来 ⇒ 跑完能在「历史报告」里打开）。
+  // ⚠️ 文件名必须带上**参数指纹**：同一族、同一窗口、两组不同的网格参数此前会算成同一个
+  // 文件名 ⇒ 后一次把前一次的报告**静默覆盖**（而「历史报告」里看着还是同一份）。
+  const fp = pr ? "p" + shortHash(pr) : "";
+  const out = `research/results/web_report_cli_${id}_${lo}_${hi}${fp ? "_" + fp : ""}.html`
+    .replace(/[^A-Za-z0-9_./-]/g, "");
   const tail = ` --lo ${lo} --hi ${hi} --control-runs ${ctl} --out ${out}`
     + (note ? ` --note '${note.replace(/'/g, "")}'` : "");
   if (kind === "preset") return `python3 -m research.render_report --preset ${id}${tail}`;
@@ -715,6 +745,7 @@ async function refreshLedger() {
     RUNS = rr.runs || []; TOTAL = rr.total || RUNS.length;
     BYSTRAT = rr.by_strategy || {};
     HOULDOUT_TOUCHES = rr.holdout_touches || 0;
+    CLI_HOLDOUT_TOUCHES = (rr.cli_holdout_touches === undefined) ? null : rr.cli_holdout_touches;
     CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
     REPORTS = (await (await fetch("/api/reports")).json()).reports || [];
   } catch (exc) {
@@ -761,9 +792,16 @@ function renderLedger() {
     .sort((a, b) => b[1] - a[1]);
   // holdout 是"只准读一次"的那扇门 —— 它的次数必须显眼：卡片上写着的规矩，
   // 这里给出被跨过几次（>0 就标黄），而不是让它当一句口号
-  const ht = HOULDOUT_TOUCHES > 0
-    ? ` · <span class="warn">其中 <b>${HOULDOUT_TOUCHES}</b> 次运行的窗口碰了 holdout（§5：只准读一次）</span>`
-    : ` · 碰过 holdout 的运行：<b>0</b> 次`;
+  // ⚠️ 口径必须写在这里：这个数是**平台台账**（web_runs.jsonl）里的，命令行跑的从来不进台账。
+  // 另一处来源是命令行产物的**文件名**（里面带着窗口）—— 能认出来的就一起数，认不出的（没按
+  // 页面给的命名跑）就说"认不出"。不说清这一点，读者会以为这 9/10 就是全部（审计实测）。
+  const cliHo = CLI_HOLDOUT_TOUCHES;
+  const scoped = `（平台台账 <b>${HOULDOUT_TOUCHES}</b> 次`
+    + (cliHo == null ? "" : ` + 命令行产物文件名里认得出的 <b>${cliHo}</b> 次`)
+    + `；没按页面命名跑的产物认不出）`;
+  const ht = (HOULDOUT_TOUCHES > 0 || (cliHo || 0) > 0)
+    ? ` · <span class="warn">碰过 holdout 的运行 ${scoped} —— §5：只准读一次</span>`
+    : ` · 碰过 holdout 的运行：<b>0</b> 次 ${scoped}`;
   $("lbar").innerHTML = `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
       ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""}${ht} ·
     <select id="lf" aria-label="按策略筛选台账" onchange="renderLedger()">
