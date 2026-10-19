@@ -653,6 +653,101 @@ def test_the_inline_script_parses(tmp_path):
     assert r.returncode == 0, f"内联脚本语法错（整页会死）：{r.stderr[:500]}"
 
 
+def test_the_inline_script_actually_runs_its_golden_path_functions(tmp_path):
+    """内联脚本必须能**跑起来**，不只是"语法正确"。
+
+    为什么补这条（2026-10-19 我自己捅的 blocking 回归）：我把 `const fp = pr ? …` 写在了
+    `const pr = …` **上面** ⇒ TDZ 运行期 ReferenceError ⇒ `cliCmd` 抛错 ⇒ `panel()` 建不出面板
+    ⇒ **整条回测流程是死的**（点回测：永远不出现面板）。而当时：
+      * `node --check` 通过（TDZ 是运行期错误，不是语法错误）；
+      * 按钮/字符串清单断言全绿（它只看字符串在不在）；
+      * 685 个测试全绿（没有人执行那段 JS）；
+      * 我也"验证"了那一批 —— 但只按 GET 与静态检查验，没再真点一次回测。
+    两个独立审计 agent 各自用真实点击复现了它，我才发现。所以这里补一条**执行**级护栏：
+    把内联脚本装进最小 DOM 桩里在 node 中执行，并调用黄金路径上的几个纯函数。
+
+    没有 node 就 skip（与真数据行为锁在本机没库时跳过是同一种诚实边界）。
+    """
+    import json as _json
+    import shutil
+    import subprocess
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    js = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器没有 node —— 执行级护栏跑不了（CI 也没有 node）")
+
+    prelude = r"""
+// ---- 最小 DOM 桩：够让脚本加载，并能调用几个纯函数 ----
+const fakeEl = (id) => ({ id,
+  // 日期输入给日期串；族参数下拉（id 形如 p-<族>-<轴>）必须给**合法 JSON**——
+  // currentParams 会对它 JSON.parse（我第一版全给 "2025-01-01" ⇒ JSON.parse 当场抛）
+  value: String(id).startsWith("p-") ? "2" : "2025-01-01", checked: false, innerHTML: "", textContent: "",
+  style: {}, dataset: {}, disabled: false, children: [],
+  classList: { add(){}, remove(){}, contains(){ return false; } },
+  appendChild(){}, remove(){}, insertAdjacentHTML(){}, addEventListener(){},
+  querySelector: () => null, querySelectorAll: () => [], closest: () => null,
+  scrollIntoView(){}, focus(){}, setAttribute(){}, getAttribute: () => null,
+  getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }) });
+globalThis.document = { getElementById: (id) => fakeEl(id), querySelector: () => null,
+  querySelectorAll: () => [], addEventListener(){}, createElement: () => fakeEl("x"),
+  body: fakeEl("body"), documentElement: fakeEl("html"), styleSheets: [] };
+globalThis.window = globalThis;
+globalThis.location = { hash: "", pathname: "/" };
+globalThis.navigator = {}; globalThis.alert = () => {};
+globalThis.setInterval = () => 0; globalThis.clearInterval = () => {}; globalThis.setTimeout = () => 0;
+globalThis.fetch = () => new Promise(() => {});        // 永不 resolve：不触发任何后续流程
+globalThis.sessionStorage = { getItem: () => null, setItem: () => {} };
+// 目录的最小形态：够 card()/cliCmd() 走完。脚本自己会 let CAT，所以要在它的作用域里赋值（见尾部探针）
+globalThis.__CAT = {
+  presets: [{ kind: "preset", id: "us_reversal_dip_v1", name: "n", window: ["2025-01-01", "2025-10-13"],
+    engine_spec: [], strategy: { type: "signal", signal_params: { a: 1 } }, n_comparisons: 1,
+    validated: false, touches_holdout: false, is_cli_default: false, delivered_as: [], verdict: "",
+    grid: {}, grid_size: 0, score_col: "x", score_negated: false, needs_regime: false,
+    control_arm: null, fixed: {}, reference: false, mechanism: "m", default_params: {} }],
+  // 族也要有一条：currentParams(kind="family") 会去 CAT.families 里找它
+  families: [{ kind: "family", id: "xs_flow", name: "xs_flow", mechanism: "m", grid: { a: [1, 2, 3] },
+    grid_size: 3, fixed: {}, reference: false, score_col: "x", score_negated: false, needs_regime: false,
+    control_arm: null, delivered_as: [], validated: false, default_params: { a: 2 }, window: null }],
+  notes: { holdout_presets: 0, multiplicity: "" },
+  holdout: ["2025-10-14", "2026-10-13"], train: ["2024-04-09", "2025-10-13"],
+  data_through: null, stale_defs: [],
+};
+"""
+    # 尾部探针**在脚本自己的作用域里**跑（所以能拿到它的 let 绑定），调用黄金路径上的纯函数
+    probe = r"""
+// ---- 探针：黄金路径上那几个"建面板/建卡片/给命令"的纯函数 ----
+CAT = globalThis.__CAT;
+LAST = {}; BYSTRAT = {}; REPORTS = []; RUNS = []; CUR_SHA = "deadbee";
+const out = {
+  cli_preset: cliCmd("preset", "us_reversal_dip_v1"),
+  cli_family: cliCmd("family", "xs_flow"),
+  card: card(CAT.presets[0], 0),
+  steps: stepsHtml({ status: "running", step: "取链路", steps: [] }, "job1", 3),
+  stepsQueued: stepsHtml({ status: "queued", step: "x", steps: [] }, "job2", 1),
+  last: lastRunLine({ kind: "preset", id: "us_reversal_dip_v1" }),
+  reasonRows: typeof exit_reason_rows === "undefined" ? "n/a" : "n/a",
+};
+console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
+  cliHasFamily: out.cli_family.includes("--family xs_flow"),
+  cliHasFingerprint: out.cli_family.includes("_p"),
+  cardLooksReal: out.card.length > 200,
+  stepsHaveCancel: out.steps.includes("取消"), queuedSaysQueued: out.stepsQueued.includes("排队中") }));
+"""
+    f = tmp_path / "run_inline.js"
+    f.write_text(prelude + js + probe, encoding="utf-8")
+    r = subprocess.run([node, str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, f"内联脚本执行失败（整页会死）：\n{r.stderr[-1200:]}"
+    got = _json.loads([ln for ln in r.stdout.splitlines() if ln.startswith("{")][-1])
+    assert got["ok"], got
+    assert got["cliHasFamily"], "cliCmd 没给出族命令"
+    assert got["cliHasFingerprint"], "族命令的产物名缺参数指纹（会导致两组参数撞名）"
+    assert got["cardLooksReal"], "card() 渲出来的卡片太短，八成中途抛了"
+    assert got["stepsHaveCancel"], "运行中的步骤区没有取消按钮"
+    assert got["queuedSaysQueued"], "排队中没如实说「排队中」"
+
+
 def test_server_binds_localhost_only():
     """**只绑 127.0.0.1**：这个页面能一键跑回测、读本地库、写报告文件。"""
     src = (ROOT / "webapp" / "server.py").read_text(encoding="utf-8")
@@ -718,7 +813,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "族卡的批量入口（整张网格一次跑完）": "copyGridCmd(",
         "族卡说清「网格才是一次搜索」（别把 96 个格点各点一次）": "一次搜索的完整空间",
         "台账按策略筛选（对比时要能只看两条）": 'id="lf"',
-        "台账 Δ 列（同一配置重跑的对比）": '["d_excess","Δ超额（同配置）"]',
+        # Δ 列的排序键必须是 `_d`（poll/renderLedger 里算出来的字段名）。曾写成 d_excess：
+        # 表头照样画、aria-sort 照样发，但点下去一行都不动（审计实测）。
+        "台账 Δ 列（同一配置重跑的对比，排序键必须是 _d）": '["_d","Δ超额（同配置）"]',
         "台账完整 CSV 导出（表只有 30 条上限）": '/api/runs.csv',
         "台账窗口可点回填到卡片（但不自动跑）": "fillWindow(",
         "台账明说只显示最近 N 条": "表只取最近",

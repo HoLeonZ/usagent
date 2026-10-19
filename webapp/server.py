@@ -208,6 +208,7 @@ class Handler(BaseHTTPRequestHandler):
             # 平台的产物 **和** CLI `--out` 的产物都要列出来：复制出来的那条命令如果跑完
             # 在页面上看不见，那"界面不是黑箱"就只是句口号（审计实测 --out 的命名对不上）。
             files = list(RESULTS.glob("web_report_*.html")) + list(RESULTS.glob("report_*.html"))
+            total_reports = len(files)
             for f in sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)[:50]:
                 # ⚠️ 读头部不能只取前 N 个字符：CSS 一长，副标题就漂到切片外 —— 实测加了
                 # 打印样式与目录之后，新报告全都解析成 window=None（旧的还能解析，看起来
@@ -230,7 +231,9 @@ class Handler(BaseHTTPRequestHandler):
                             # 参数不是从报告里正则抓的，是按 job_id 回读台账（见 params_by_job）
                             "params": pj.get(jid),
                             "kb": round(st.st_size / 1024), "mtime": int(st.st_mtime)})
-            return self._json(200, {"reports": out})
+            # 截断必须说出来（台账那边是这么做的：静默截断读起来像"这就是全部"）
+            return self._json(200, {"reports": out, "total": total_reports,
+                                    "shown": len(out)})
         m = re.fullmatch(r"/api/source/(preset|family)/([A-Za-z0-9_]{1,64})", p)
         if m:
             # 只读地取**定义体源码**（开发时最常要跳的地方）。两条校验：策略必须存在，
@@ -264,7 +267,13 @@ class Handler(BaseHTTPRequestHandler):
             f = (RESULTS / m.group(1)).resolve()
             if f.parent != RESULTS.resolve():
                 return self._json(400, {"error": "报告路径越界"})
-            return self._report(200, f)
+            # 与 /report/<id> 同判据：平台产物（web_report_<hex>.html）**且**台账里真有这条
+            # 才敢说「这份运行在台账里」—— 否则同一份报告走两条路会给出互相矛盾的说法（审计实测）
+            hexid = re.fullmatch(r"web_report_([0-9a-f]{6,32})\.html", f.name)
+            in_ledger = bool(hexid) and any(r.get("job_id") == hexid.group(1)
+                                            for r in jobs.all_runs())
+            return self._report(200, f, job_id=hexid.group(1) if hexid else None,
+                                ledger=in_ledger)
         m = re.fullmatch(r"/report/([0-9a-f]{6,32})", p)
         if m:
             jid = m.group(1)

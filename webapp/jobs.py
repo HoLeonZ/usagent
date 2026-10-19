@@ -264,6 +264,10 @@ def _run(job_id: str) -> None:
             axis = pd.Index(sorted(panel["date"].unique()))
             lo_ts, hi_ts = pd.Timestamp(lo), pd.Timestamp(hi)
             n_days = int(len(axis[(axis >= lo_ts) & (axis < hi_ts)]))
+            # 范围在**拒收之前**就写进 job：只失败过、还没成功过的会话里，窗口旁那句
+            # 「池子可评估范围」否则会一直是占位文案 —— 而正确范围刚被算出来、就在错误信息里
+            job["pool_range"] = [str(panel_mod.first_signal_date(panel).date()),
+                                 str(axis[-1].date())]
             if not n_days:
                 raise ValueError(
                     f"窗口 {lo}..{hi} 里没有任何交易日 —— 这个池子的数据覆盖 "
@@ -276,10 +280,6 @@ def _run(job_id: str) -> None:
                     f"窗口 {lo}..{hi} 只有 {n_days} 个交易日 —— 至少要 {MIN_WINDOW_DAYS} 个："
                     f"入场、出场各要一天，结算与敞口统计也各要一天；再短的窗口跑出来的"
                     f"DSR/超额是在噪声上算的。（要极致短窗请用命令行 render_report。）")
-            # 可评估范围**顺带说出来**（不是错误，只是"这一段会空着"）：界面据此在窗口旁边
-            # 显示范围，省掉"跑完才发现起点太早/终点超出数据"。
-            job["pool_range"] = [str(panel_mod.first_signal_date(panel).date()),
-                                 str(axis[-1].date())]
 
             # k 的规则**只写一次**，提示与 DSR 的 k 都用它 —— 分头写必然各自漂移（下面那条注释
             # 记的就是这么漂出去的一次）。

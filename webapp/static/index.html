@@ -30,8 +30,9 @@ input[type=text]{background:#0c0f13;color:var(--fg);border:1px solid var(--line)
                  padding:5px 9px;font-size:12.5px;min-width:210px}
 /* 窄屏（手机/半屏窗口）：顶栏是 sticky 的，每一行都从正文里**永久**扣走一条 ——
    把两个输入框的 min-width 收窄，让它们并排，顶栏从 186px 降到约一屏的四分之一以下。 */
+/* ⚠️ 窄屏那档必须放在**样式表末尾**：媒体查询不提高优先级，同优先级的后写规则会盖掉它 ——
+   上一版把它写在前面，于是 132px 从来没生效过（实测 1280→480 全是 96px）。 */
 @media (max-width:560px){
-  h2,.card,#run{scroll-margin-top:132px}   /* 窄屏顶栏换行到 114–118px */
   input[type=search]{min-width:150px}
   input[type=text]{min-width:140px;flex:1 1 140px}
   .top h1{font-size:15px}
@@ -97,6 +98,9 @@ button.thbtn{background:none;border:0;padding:6px 4px;min-height:24px;min-width:
              font:inherit;cursor:pointer}
 button.thbtn:hover{color:var(--fg)}
 button.thbtn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+@media (max-width:560px){
+  h2,.card,#run{scroll-margin-top:132px}      /* 窄屏顶栏换行到 114–118px（放末尾才不被盖） */
+}
 /* 兜底：将来任何一格再塞进不可断的内容，也只让**这张表**横滚，不再把整页顶破 */
 .scrollx{overflow-x:auto}
 .verdict{margin:9px 0 0;padding:8px 9px;background:#141a16;border-left:3px solid var(--up);
@@ -148,7 +152,8 @@ table.ledger td{white-space:nowrap}
   <a class="nav" href="#" onclick="reloadCatalog();return false"
      title="重新拉一次目录并重渲卡片（你改过的窗口/族参数会回到默认）。
 注意：改了定义体要先重启服务 —— 注册表是启动时读一次的">重新读目录</a>
-  <input type="search" id="q" aria-label="搜索策略卡片" placeholder="搜索：名字 / 机制 / 参数…（⌘K 聚焦）">
+  <input type="search" id="q" aria-label="搜索策略卡片与历史报告" title="过滤策略卡片与「历史报告」表（台账不过滤）"
+         placeholder="搜索：策略卡片 + 历史报告（⌘K 聚焦）">
   <input type="text" id="note" aria-label="本次运行的备注（写进台账）"
          placeholder="备注（可选：这次改了什么 / 为什么跑）"
          title="写进台账的备注列。台账是拿来对比两次运行的 —— 没有备注，两次点击在纸面上长得一模一样。">
@@ -511,6 +516,10 @@ function cliCmd(kind, id) {
   const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
   const ctl = $("ctl").checked ? 200 : 0;
   const note = ($("note") || {}).value || "";
+  // ⚠️ 顺序要紧：`pr` 必须在 `fp` **之前**声明。上一版把 `const fp = pr ? …` 写在了
+  // `const pr = …` 上面 ⇒ TDZ ReferenceError ⇒ cliCmd 抛错 ⇒ panel() 建不出面板 ⇒
+  // **整条回测流程是死的**（而没有一条静态断言看得出来：语法正确、字符串都在）。
+  const pr = kind === "family" ? JSON.stringify(currentParams(kind, id)).replace(/'/g, "") : "";
   // 与平台同一个命名空间（`/api/reports` 会列出来 ⇒ 跑完能在「历史报告」里打开）。
   // ⚠️ 文件名必须带上**参数指纹**：同一族、同一窗口、两组不同的网格参数此前会算成同一个
   // 文件名 ⇒ 后一次把前一次的报告**静默覆盖**（而「历史报告」里看着还是同一份）。
@@ -520,7 +529,6 @@ function cliCmd(kind, id) {
   const tail = ` --lo ${lo} --hi ${hi} --control-runs ${ctl} --out ${out}`
     + (note ? ` --note '${note.replace(/'/g, "")}'` : "");
   if (kind === "preset") return `python3 -m research.render_report --preset ${id}${tail}`;
-  const pr = JSON.stringify(currentParams(kind, id)).replace(/'/g, "");
   return `python3 -m research.render_report --family ${id} --params '${pr}'${tail}`;
 }
 // 族的批量入口：`family_search` 是仓库里唯一会跑**整张网格**的工具，它自己把网格 × 折数
@@ -618,6 +626,12 @@ function applyFilter() {
       ? `（${perGrid[i]} / ${total} 匹配${perGrid[i] ? "" : "：这一节没有命中"}）`
       : `（${total} ${unit}）`;
   });
+  // 「历史报告」表也跟着同一个搜索词过滤（找三天前那份报告的人第一反应就是往这里敲名字）
+  if (typeof REPORTS !== "undefined") {
+    document.querySelectorAll("#reports_body tbody tr").forEach(tr => {
+      tr.style.display = (!q || tr.innerText.toLowerCase().includes(q)) ? "" : "none";
+    });
+  }
   $("count").textContent = filtering
     ? `${shown} / ${CAT.presets.length + CAT.families.length} 张卡片匹配` : "";
 }
@@ -760,10 +774,16 @@ function renderLedger() {
   // 结果在纸面上无法分辨，而这张表就是拿来对比的）。「超额」必须写成「曝光匹配超额」：
   // 它与报告摘要里那个 tot−bench 的「超额」**不是同一个量**（实测同一 job −19.59% vs −43.93pp）。
   const cols = [["ts","时间"],["strategy_id","策略"],["window","窗口"],["params","参数"],
-                ["n_trades","笔数"],["excess","曝光匹配超额"],["d_excess","Δ超额（同配置）"],
+                ["n_trades","笔数"],["excess","曝光匹配超额"],["_d","Δ超额（同配置）"],
+                // ⚠️ Δ 列的排序键必须是 `_d`（算出来的字段名）—— 曾写成 d_excess：
+                // 表头照样画、aria-sort 照样发，但点下去一行都不动（审计实测）。
                 ["dsr","DSR"],["n_trials_k","k"],["git_sha","代码"],["note","备注"]];
+  // ⚠️ 这一条 return 必须放在**渲染 lbar 之后**：台账空时整条栏（刷新读数 / 导出 CSV /
+  // holdout 纪律计数 / 当前代码版本）曾一起消失 —— 而"首次使用"恰恰是最需要它们的时刻。
   if (!RUNS.length) {
-    $("ledger").innerHTML = `<div class="sub">还没有运行记录 —— 在上面任一策略卡片上点「回测」。</div>`;
+    $("lbar").innerHTML = `还没有运行记录 —— 在任何一张策略卡片上点「回测」，这里会出现每一次的账。
+      <span class="sub">（同一策略跑两次或两条策略的对比就看下面这张表）</span>`;
+    $("ledger").innerHTML = "";
     return;
   }
   // Δ = 与**同一配置**（同策略 + 同参数 + **同窗口**）的上一次比，按时间（不是按当前排序）。
@@ -816,7 +836,9 @@ function renderLedger() {
     当前代码 <b>${esc(CUR_SHA || "?")}</b>${CUR_DIRTY
       ? '<span class="warn">（工作区有未提交改动 —— 现在跑出来的结果标注不了确定的代码版本）</span>'
       : ""} ·
-    <span class="sub">Δ = 与 <b>同一配置</b>（同策略 + 同参数 + <b>同窗口</b>）的上一次比。
+    <span class="sub">⚠️ Δ 只在<b>表内这 ${RUNS.length} 条</b>里找"上一次同配置"（k / 已跑次数按全台账算 ——
+      两个口径不同，第 31 次之后 Δ 可能显示"（第一次）"而其实不是）。
+      Δ = 与 <b>同一配置</b>（同策略 + 同参数 + <b>同窗口</b>）的上一次比。
       引擎是确定性的 ⇒ 同配置重跑应当差 0；<b>不是 0 就说明变的东西在配置之外</b>（数据换了或代码改了）。</span>`;
   // 列头用**真按钮**：原来的 `<th onclick>` 键盘 Tab 够不到（实测 tabIndex=-1），
   // 而"对比两次运行"这件事只有靠排序才能做。aria-sort 让读屏也知道现在按哪列排。
@@ -1221,6 +1243,8 @@ pandas.read_csv(..., comment='#') 可直接读">下载逐笔 CSV</a>` : ""}
 
 // 目录与台账**各自独立**取数：此前台账被串在 loadCatalog 的 then 链上 ⇒ 目录接口一挂，
 // 连「还没有运行记录」都不渲染（审计实测）。两条路径各自失败、各自可见，跳锚点不依赖它们。
-loadCatalog().then(refreshLedger).then(recoverInflight).then(jumpToHash);
+// ⚠️ 卡片是在 loadCatalog 里渲的，而 REPORTS（"这份报告还在不在盘上"的判据）要等
+// refreshLedger 才拿到 ⇒ 少了这一步，首屏每张卡都会把「最近一次·报告」写成「报告已不在盘上」。
+loadCatalog().then(refreshLedger).then(refreshReadouts).then(recoverInflight).then(jumpToHash);
 </script>
 </body></html>
