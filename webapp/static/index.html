@@ -401,9 +401,12 @@ function haveReport(jobId) {
   return !!jobId && REPORTS.some(x => x.job_id === jobId);
 }
 function reportLink(jobId) {
-  return haveReport(jobId)
-    ? `· <a href="/report/${esc(jobId)}" target="_blank">报告</a>`
-    : (jobId ? `<span class="sub" title="台账里有这条运行，但盘上已经没有对应的报告文件了">· 报告已不在盘上</span>` : "");
+  if (haveReport(jobId)) return `· <a href="/report/${esc(jobId)}" target="_blank">报告</a>`;
+  if (jobId) return `<span class="sub" title="台账里有这条运行，但盘上已经没有对应的报告文件了">· 报告已不在盘上</span>`;
+  // ⚠️ 没有 job_id 的老记录不能说"盘上没有" —— 实测那 6 条**盘上都有**同名同窗的报告
+  // （5–6 份），只是这条记录没记 id、指不到具体哪一份。诚实的说法是"指不到"，不是"没有了"。
+  return `<span class="sub" title="这条记录早于 job_id 记账（2026-10-18 之前）—— 报告可能还在「历史报告」里，
+但同名同窗的可能有好几份，这条记录无法按 id 定位到其中一份">· 无 job_id，指不到</span>`;
 }
 
 function card(e, runCount) {
@@ -879,7 +882,10 @@ function renderLedger() {
       <td>${esc((r.note || "").slice(0, 24))}</td>
       <td>${haveReport(r.job_id)
             ? `<a href="/report/${esc(r.job_id)}" target="_blank">打开</a>`
-            : `<span class="sub" title="盘上没有这份报告（可能被清理过）">—</span>`}</td>
+            : (("job_id" in r)
+               ? `<span class="sub" title="盘上没有这份报告（可能被清理过）">—</span>`
+               : `<span class="sub" title="这条记录早于 job_id 记账（2026-10-18 之前）—— 报告可能还在
+「历史报告」里，但这条记录无法按 id 定位到它">— 无 id</span>`)}</td>
     </tr>`).join("")}</tbody></table>`;
 }
 // 把某张卡的窗口填成这一对日期（不自动提交）：台账里看到"上次用这个窗口跑过"，
