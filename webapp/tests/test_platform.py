@@ -878,6 +878,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "定义体在服务启动后被改过要主动警告（不只是提示）": "CAT.stale_defs",
         "逐笔 CSV 下载（报告是给人看的，这份给脚本）": "st.trades_csv",
         "历史报告列表里的逐笔 CSV 列": "r.has_trades",
+        # 边界实测（造 40 行台账 / 60 份报告）抓到的两处半拉子修复
+        "报告区的截断要说出来（接口有 total，页面此前从没显示）": "盘上共 <b>${REPORTS_TOTAL}</b> 份",
+        "报告的参数列在 job 不在台账里时不说「在定义体里」": "（台账里没有这条运行）",
         "数据覆盖到哪天（拿多新的数据跑的结论）": "数据覆盖到",
         "数据陈旧时才提示，并给出取数命令": "download_ohlcv.py",
         "首次使用的入门块（三步 + 六个词）": 'id="firsttime"',

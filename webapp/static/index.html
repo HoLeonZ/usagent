@@ -492,6 +492,7 @@ let HOULDOUT_TOUCHES = 0;         // **平台台账**里碰过 holdout 的运行
 let CLI_HOLDOUT_TOUCHES = null;   // 命令行产物文件名里能认出来的次数（null = 服务端没给）
 let CUR_SHA = "", CUR_DIRTY = null;   // 当前代码版本（§6 归因：sha 单独不够，脏树要一起看）
 let SKIPPED_LINES = 0;                // 台账里读不出来的行数（>0 = 记账可能偏小，必须说出来）
+let REPORTS_TOTAL = null;             // 盘上报告总份数（接口的 50 条上限之外还有多少）
 let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
                     catch (e) { return null; } })();
 function applyPoolHint() {
@@ -745,7 +746,8 @@ async function refreshReadouts() {
   BYSTRAT = rr.by_strategy || {}; HOULDOUT_TOUCHES = rr.holdout_touches || 0;
   CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
   LAST = rr.last_by_strategy || {};
-  REPORTS = (await (await fetch("/api/reports")).json()).reports || [];
+  const rp = await (await fetch("/api/reports")).json();
+  REPORTS = rp.reports || []; REPORTS_TOTAL = rp.total;
   document.querySelectorAll("#content .card").forEach(c => {
     const kind = c.id.startsWith("preset-") ? "preset" : "family";
     const id = c.id.slice(kind.length + 1);
@@ -766,7 +768,8 @@ async function refreshLedger() {
     CLI_HOLDOUT_TOUCHES = (rr.cli_holdout_touches === undefined) ? null : rr.cli_holdout_touches;
     SKIPPED_LINES = rr.skipped_lines || 0;
     CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
-    REPORTS = (await (await fetch("/api/reports")).json()).reports || [];
+    const rp = await (await fetch("/api/reports")).json();
+    REPORTS = rp.reports || []; REPORTS_TOTAL = rp.total;
   } catch (exc) {
     $("ledger").innerHTML = `<div class="sub neg">读台账失败：${esc(exc.message)} —— 刷新页面重试</div>`;
     return;
@@ -916,11 +919,18 @@ function keyOf(r) {
 }
 function renderReports() {
   if (!REPORTS.length) { $("reports_body").innerHTML = `<div class="sub">（盘上还没有报告）</div>`; return; }
-  $("reports_body").innerHTML = `<table class="ledger"><thead><tr><th>时间</th><th>策略</th>
+  // ⚠️ 接口一直发着 total/shown（50 条上限），但页面从没显示过 —— 40 行台账那边有
+  // 「表只取最近 30 条，盘上共 40 条」，报告这边此前一个字都没有（边界实测抓到的半拉子修复）。
+  const trunc = (typeof REPORTS_TOTAL === "number" && REPORTS_TOTAL > REPORTS.length)
+    ? `<div class="sub">盘上共 <b>${REPORTS_TOTAL}</b> 份，下面只列最近 <b>${REPORTS.length}</b> 份 ——
+       更旧的仍在 <code>research/results/</code>（按名字里的 job id 可直接用 <code>/report/&lt;id&gt;</code> 打开）</div>`
+    : "";
+  $("reports_body").innerHTML = trunc + `<table class="ledger"><thead><tr><th>时间</th><th>策略</th>
     <th>窗口</th><th>参数</th><th>大小</th><th>打开</th><th>逐笔</th></tr></thead><tbody>${REPORTS.map(r => `<tr>
       <td>${new Date(r.mtime * 1000).toLocaleString().slice(0, 19)}</td>
       <td>${esc(r.name)}</td><td>${esc((r.window || []).join(".."))}</td>
-      <td><code class="p">${esc(paramsOf(r.params, r.job_id ? null : (r.params ? null : "cli")))}</code></td>
+      <td><code class="p">${esc(paramsOf(r.params, r.params ? null
+            : (inLedger(r.job_id) ? null : "unknown")))}</code></td>
       <td>${r.kb} KB</td>
       <td><a href="/report-file/${esc(r.file)}" target="_blank">打开报告</a></td>
       <td>${r.has_trades ? `<a href="/api/trades/${esc(r.job_id)}.csv" download>CSV</a>`
@@ -957,7 +967,14 @@ function paramsOf(p, why) {
   if (p && Object.keys(p).length) return Object.entries(p).map(([k, v]) => k + "=" + v).join(" ");
   if (why === "missing") return "（这条记录早于参数记账）";
   if (why === "cli") return "（命令行传入，未记账）";
+  // unknown：这份报告对应的运行**根本不在台账里**（CLI --out 的产物、或台账被清理过）——
+  // 这时候说"参数在定义体里"是猜的（边界实测：造 60 份没有台账行的报告，页面一律这么写）
+  if (why === "unknown") return "（台账里没有这条运行）";
   return "（在定义体里）";
+}
+// 这份报告对应的 job 在不在**当前这一页拿到的**台账里（台账表最多 30 条，所以措辞留了余地）
+function inLedger(jobId) {
+  return !!jobId && RUNS.some(r => r.job_id === jobId);
 }
 function sortLedger(key) { SORT = {key, dir: SORT.key === key ? -SORT.dir : -1}; renderLedger(); }
 function jumpToHash() {
