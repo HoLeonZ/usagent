@@ -491,6 +491,7 @@ let LAST = {};                    // 每条策略最近一次运行的读数（�
 let HOULDOUT_TOUCHES = 0;         // **平台台账**里碰过 holdout 的运行次数
 let CLI_HOLDOUT_TOUCHES = null;   // 命令行产物文件名里能认出来的次数（null = 服务端没给）
 let CUR_SHA = "", CUR_DIRTY = null;   // 当前代码版本（§6 归因：sha 单独不够，脏树要一起看）
+let SKIPPED_LINES = 0;                // 台账里读不出来的行数（>0 = 记账可能偏小，必须说出来）
 let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
                     catch (e) { return null; } })();
 function applyPoolHint() {
@@ -763,6 +764,7 @@ async function refreshLedger() {
     BYSTRAT = rr.by_strategy || {};
     HOULDOUT_TOUCHES = rr.holdout_touches || 0;
     CLI_HOLDOUT_TOUCHES = (rr.cli_holdout_touches === undefined) ? null : rr.cli_holdout_touches;
+    SKIPPED_LINES = rr.skipped_lines || 0;
     CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
     REPORTS = (await (await fetch("/api/reports")).json()).reports || [];
   } catch (exc) {
@@ -822,9 +824,13 @@ function renderLedger() {
   const scoped = `（平台台账 <b>${HOULDOUT_TOUCHES}</b> 次`
     + (cliHo == null ? "" : ` + 命令行产物文件名里认得出的 <b>${cliHo}</b> 次`)
     + `；没按页面命名跑的产物认不出）`;
+  const sk = SKIPPED_LINES > 0
+    ? ` · <span class="warn">⚠️ 台账里有 <b>${SKIPPED_LINES}</b> 行读不出来（已跳过）—— 那等于少记了
+        ${SKIPPED_LINES} 次试验，k 可能偏小；先去 <code>research/results/web_runs.jsonl</code> 看看坏行</span>`
+    : "";
   const ht = (HOULDOUT_TOUCHES > 0 || (cliHo || 0) > 0)
-    ? ` · <span class="warn">碰过 holdout 的运行 ${scoped} —— §5：只准读一次</span>`
-    : ` · 碰过 holdout 的运行：<b>0</b> 次 ${scoped}`;
+    ? ` · <span class="warn">碰过 holdout 的运行 ${scoped} —— §5：只准读一次</span>${sk}`
+    : ` · 碰过 holdout 的运行：<b>0</b> 次 ${scoped}${sk}`;
   $("lbar").innerHTML = `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
       ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""}${ht} ·
     <select id="lf" aria-label="按策略筛选台账" onchange="renderLedger()">
@@ -1196,7 +1202,10 @@ async function poll(jobId, kind, id) {
   const cells = [["成交笔数", m.n_trades, ""], ["自身收益", pct(m.own_ret), cls(m.own_ret)],
     ["CAGR", pct(m.cagr), cls(m.cagr)], ["平均敞口", pct(m.exposure, 1), ""],
     ["同窗等权池 CAGR", pct(m.bench_cagr), cls(m.bench_cagr)],
-    ["曝光匹配超额", pp(m.excess), cls(m.excess)],
+    ["曝光匹配超额", pp(m.excess) + (m.excess_clamped
+        ? ` <span class="sub" title="这个窗口有一部分早于池子指数的覆盖范围（池子要预热）——
+口径只比较了两者共同覆盖的那些交易日；被裁掉的区间不参与超额">（只比了一部分）</span>` : ""),
+      cls(m.excess)],
     ["超额/敞口", pp(m.excess_per_exposure, 1), cls(m.excess_per_exposure)],
     ["beta", num(m.beta, 2), ""], ["alpha 年化", pct(m.alpha_annual), cls(m.alpha_annual)],
     ["t(alpha)", num(m.t_alpha, 2), ""], ["判据折为正", m.folds_positive + "/4", ""],

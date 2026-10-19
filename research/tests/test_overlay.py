@@ -118,3 +118,40 @@ def test_family_search_delegates_to_the_single_definition():
         "family_search.overlay 必须委托给 research.overlay 的唯一定义"
     assert "w * sret" not in src, "公式被抄了第二份 —— 这就是两把尺"
     assert "365.25" not in src, "年化折算也被抄了第二份"
+
+
+def test_a_window_reaching_before_the_pool_coverage_is_clamped_and_disclosed():
+    """窗口伸到池子覆盖之外时，两条腿必须裁到**共同覆盖**的日子上比，并如实说明裁过。
+
+    2026-10-19 边界实测：池子（reg 的等权指数）要预热，起得比面板晚（面板 2023-10-17、
+    池子 2024-01-12）。此前 `overlay_from_equity` 会把池子收益 reindex 到权益的日期轴上、
+    **缺失的日子补 0 收益**（"池子那天没有数据"被当成"那天没涨"），而窗口基准用的是池子自己的
+    切片 ⇒ 一个**什么都不做**的窗口报出 **−15.09pp** 的"曝光匹配超额"（平台面板上最显眼的那个数）。
+
+    修法是把权益裁到池子真有数据的日子上；并把比较区间与"是否裁过"放回结果里（不静默截断）。
+    """
+    import numpy as np
+    import pandas as pd
+    from research.overlay import OverlayError, excess_vs_pool
+
+    eq_idx = pd.date_range("2024-01-01", periods=120, freq="B")
+    eq = pd.DataFrame({"equity": 100000.0, "exposure": 0.0}, index=eq_idx)
+    # 池子只有后半段有数据（模拟"池子起得晚"）
+    pool_idx = eq_idx[60:]
+    lvl = pd.Series(np.linspace(100.0, 130.0, len(pool_idx)), index=pool_idx)
+    reg = lvl.rename("ew_index").reset_index().rename(columns={"index": "date"})
+
+    out = excess_vs_pool(eq, reg, "2024-01-01", str(eq_idx[-1].date()))
+    assert out["clamped"] is True, "窗口伸到池子覆盖之外时应当标明被裁过"
+    assert out["compared_from"].startswith(str(pool_idx[0].date())), out["compared_from"]
+    # 共同覆盖的日子 = 池子的日子（60 天），不是权益的 120 天
+    assert out["n_days"] == len(pool_idx), out["n_days"]
+
+    # 池子完全没有覆盖 ⇒ 拒绝，而不是拿一段空气去算年化
+    early = excess_vs_pool.__wrapped__ if hasattr(excess_vs_pool, "__wrapped__") else None
+    try:
+        excess_vs_pool(eq.iloc[:30], reg, "2024-01-01", str(eq_idx[29].date()))
+        raise AssertionError("共同覆盖为 0 天时应当拒绝")
+    except OverlayError:
+        pass
+    assert early is None or True

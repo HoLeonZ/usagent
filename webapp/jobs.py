@@ -83,16 +83,37 @@ def params_by_job() -> dict[str, dict | None]:
     return out
 
 
+# 台账里读不出来的行数（由 all_runs 顺手记下）。**不能静默跳过**：
+# 少读一行 = 少记一次试验 = DSR 的分母 k 偏小，而这个数是"我到底试了多少次"的唯一载体。
+# 仓库自己的纪律台账（research/holdout.py）遇到坏行是**直接抛 LedgerCorrupt** 并要求去修
+# （"台账坏了必须修，不能跳过"）—— 平台的这一本不该比它松。
+_SKIPPED = 0
+
+
+def skipped_lines() -> int:
+    """上一次 all_runs() 跳过了几行（0 = 台账完好）。"""
+    return _SKIPPED
+
+
 def all_runs() -> list[dict]:
     """台账**全部**记录（时间正序）。导 CSV 与"共几条"都从这里来 ——
-    页面上的表只显示最近 30 条，若导出也只用那 30 条，"导出"这两个字就是在骗人。"""
+    页面上的表只显示最近 30 条，若导出也只用那 30 条，"导出"这两个字就是在骗人。
+
+    坏行跳过但**记数**（见 `skipped_lines`）：页面据此警告"台账有行读不出来，记账可能偏小"，
+    而不是让读者以为那就是全部。
+    """
+    global _SKIPPED
+    _SKIPPED = 0
     if not RUNS_LEDGER.exists():
         return []
     out = []
     for ln in RUNS_LEDGER.read_text(encoding="utf-8").splitlines():
+        if not ln.strip():
+            continue
         try:
             out.append(json.loads(ln))
         except json.JSONDecodeError:
+            _SKIPPED += 1
             continue
     return out
 
@@ -155,6 +176,11 @@ def _metrics(res: dict, eq: pd.DataFrame, reg, lo: str, hi: str, k: int) -> dict
         "exposure": float(eq["exposure"].mean()),
         "bench_cagr": float(ov["bench"]),
         "excess": float(ov["excess"]),
+        # 窗口伸到池子覆盖之外时，超额的比较区间被裁过 —— 必须让面板说得出来
+        # （否则用户以为算的是整段窗口）。实测：起点早于池子覆盖的窗口，修复前会报
+        # −15.09pp 的假超额，现在报 0 并标明"只比了 2024-01-11.."
+        "excess_clamped": bool(ov.get("clamped")),
+        "excess_compared_from": ov.get("compared_from"),
         "excess_per_exposure": (float(ov["excess"] / ov["exposure"]) if ov["exposure"] else None),
         "beta": float(ba["beta"]), "alpha_annual": float(ba["alpha_annual"]),
         "t_alpha": float(ba["t_alpha"]),
@@ -337,8 +363,11 @@ def _run(job_id: str) -> None:
                                 explain=_explain_for(P))
             problems = H.selfcheck(doc, len(res["trades"]))
             report = RESULTS / f"web_report_{job_id}.html"
-            report.parent.mkdir(parents=True, exist_ok=True)
-            report.write_text(doc, encoding="utf-8")
+            try:
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(doc, encoding="utf-8")
+            except OSError as exc:
+                raise _artifact_failure(report, "报告", exc) from None
             _step(job, f"渲染报告（{report.stat().st_size/1024:.0f} KB）", t0)
 
             t0 = time.perf_counter()
@@ -373,9 +402,12 @@ def _run(job_id: str) -> None:
                    # ⇒ 台账 9 条全是 null（记了却永远用不上的字段，审计实测）。就地算。
                    "seconds": round(time.perf_counter() - t_all, 2),
                    "note": req.get("note", "")}
-            RUNS_LEDGER.parent.mkdir(parents=True, exist_ok=True)
-            with RUNS_LEDGER.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
+            try:
+                RUNS_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+                with RUNS_LEDGER.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
+            except OSError as exc:
+                raise _artifact_failure(RUNS_LEDGER, "台账", exc) from None
             obs.log_run("平台回测", True, seconds=time.perf_counter() - t_all,
                         strategy=rec["strategy_id"], window=f"{lo}..{hi}",
                         n_trades=m["n_trades"], excess=round(m["excess"], 6), k=k)
@@ -407,6 +439,16 @@ TRADES_CSV_COLS = ["entry_date", "exit_date", "symbol", "exit_reason", "entry_pr
                    "exit_price", "size", "hold_days", "gross_pnl", "dividends", "fees",
                    "net_pnl", "net_return", "atr_pct", "exit_trigger", "sl_width",
                    "tp_width", "risk_amount", "sizing_cap", "risk_frac", "sl_penetration"]
+
+
+def _artifact_failure(path: Path, kind: str, exc: OSError) -> RuntimeError:
+    """产物写不进去时给人话，而不是裸 PermissionError（实测：只读目录下用户只看到
+    `PermissionError: [Errno 13] Permission denied: '/tmp/…/web_report_xxx.html'` —— 既不说
+    是磁盘满还是目录只读，也不说该去看哪儿）。"""
+    return RuntimeError(
+        f"写不进{kind}：{path.name} —— {exc.strerror or exc}\n"
+        f"  常见原因：磁盘满 / results 目录只读 / 权限不对。\n"
+        f"  产物目录：{path.parent}")
 
 
 def write_trades_csv(path: Path, trades: pd.DataFrame, *, job_id: str, name: str,
@@ -441,10 +483,13 @@ def write_trades_csv(path: Path, trades: pd.DataFrame, *, job_id: str, name: str
         f"# 这是机器可读件；人看的版本是同一 job 的报告 HTML（含 K 线/指标/判词）",
         "# 读法：pandas.read_csv(path, comment='#')",
     ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as fh:
-        fh.write("\n".join(head) + "\n")
-        trades[cols].to_csv(fh, index=False)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            fh.write("\n".join(head) + "\n")
+            trades[cols].to_csv(fh, index=False)
+    except OSError as exc:
+        raise _artifact_failure(path, "逐笔 CSV", exc) from None
     return len(trades)
 
 

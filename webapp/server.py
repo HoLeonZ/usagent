@@ -168,7 +168,10 @@ class Handler(BaseHTTPRequestHandler):
                                     # DSR 的 k 是同一个计数，不能受"表只显示 30 条"影响
                                     "by_strategy": jobs.counts_by_strategy(),
                                     # 卡片「最近一次」也按全台账（与 by_strategy 同源）
-                                    "last_by_strategy": jobs.last_by_strategy()})
+                                    "last_by_strategy": jobs.last_by_strategy(),
+                                    # 台账里读不出来的行数：>0 时页面要警告（少读一行 =
+                                    # 少记一次试验 = k 偏小），不能让它静默
+                                    "skipped_lines": jobs.skipped_lines()})
         if p == "/api/jobs":
             # 在途任务（页面刷新后据此重建面板/徽标/取消入口）。只给这个页面用得上的最小字段。
             jobs_now = jobs.inflight()
