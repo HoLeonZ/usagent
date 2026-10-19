@@ -814,6 +814,28 @@ def test_api_json_never_contains_bare_nan_or_infinity(http, monkeypatch):
     assert parsed["metrics"]["excess"] is None, "±Inf 也该变成 null"
 
 
+def test_runs_limit_can_widen_the_window_and_rejects_garbage(http, tmp_path, monkeypatch):
+    """台账的 30 条窗口要能被**界面**要求放宽 —— 否则"第 31 条"只能去 CSV 里看（把人赶出界面）。
+
+    `?limit=` 必须夹住上限（台账是线性的，一个查询不该把它拉爆），且坏值要明说。
+    """
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    monkeypatch.setattr(jobs, "RUNS_LEDGER", tmp_path / "web_runs.jsonl")
+    lines = [json.dumps({"ts": f"2026-10-0{1 + i % 9}T00:00:0{i % 9}", "strategy_id": "preset:x",
+                         "window": ["2025-01-01", "2025-10-13"]}) for i in range(45)]
+    (tmp_path / "web_runs.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    d0 = json.loads(_get(http + "/api/runs")[1])
+    assert d0["total"] == 45 and d0["shown"] == 30, d0
+    d1 = json.loads(_get(http + "/api/runs?limit=45")[1])
+    assert len(d1["runs"]) == 45 and d1["total"] == 45, len(d1["runs"])
+    # 超大值被夹到 500（这里只有 45 条，所以给全）
+    assert len(json.loads(_get(http + "/api/runs?limit=99999")[1])["runs"]) == 45
+    assert len(json.loads(_get(http + "/api/runs?limit=0")[1])["runs"]) == 1, "下限为 1"
+    code, body = _get(http + "/api/runs?limit=abc")
+    assert code == 400 and "limit" in body.decode(), (code, body[:60])
+
+
 def test_a_deleted_report_gives_a_human_page_not_json(http, tmp_path, monkeypatch):
     """报告文件被清理之后，那条链接要给人看的东西 —— 不是一坨 JSON。
 
@@ -939,6 +961,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "报告区的截断要说出来（接口有 total，页面此前从没显示）": "盘上共 <b>${REPORTS_TOTAL}</b> 份",
         "报告的参数列在 job 不在台账里时不说「在定义体里」": "（台账里没有这条运行）",
         "权威 holdout 台账的状态要并排显示（两本账不能混）": "权威 holdout 台账",
+        "台账可视「载入全部」（此前第 31 条只能在 CSV 里看）": "载入全部（共 ${TOTAL} 条）",
         "平台越界运行里登记进权威账本的条数要说出来": "条登记进了这本账",
         "数据覆盖到哪天（拿多新的数据跑的结论）": "数据覆盖到",
         "数据陈旧时才提示，并给出取数命令": "download_ohlcv.py",

@@ -760,6 +760,23 @@ async function refreshReadouts() {
   renderLedger(); renderReports();
 }
 
+// 「载入全部」：把表从最近 30 条扩到全部（此前"想看一眼第 31 条"的唯一出路是去用 CSV 导出 ——
+// 那是把用户赶出界面）。只改**显示多少行**，不碰任何记账。
+async function loadAllRuns() {
+  try {
+    const rr = await (await fetch("/api/runs?limit=500")).json();
+    RUNS = rr.runs || []; TOTAL = rr.total || RUNS.length;
+    BYSTRAT = rr.by_strategy || {}; HOULDOUT_TOUCHES = rr.holdout_touches || 0;
+    CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
+    LAST = rr.last_by_strategy || {}; SKIPPED_LINES = rr.skipped_lines || 0;
+    HLEDGER = rr.holdout_ledger || null;
+    renderLedger();
+  } catch (exc) {
+    document.getElementById("lbar").insertAdjacentHTML("beforeend",
+      `<div class="sub neg">载入全部失败：${esc(exc.message)}</div>`);
+  }
+}
+
 async function refreshLedger() {
   try {
     const rr = await (await fetch("/api/runs")).json();
@@ -873,6 +890,10 @@ function renderLedger() {
       ${opts.map(([s, n]) => `<option value="${esc(s)}"${s === strat ? " selected" : ""}>${esc(s)}（${n}）</option>`).join("")}
     </select>
     <a href="/api/runs.csv" download><button class="mini">导出全部 CSV</button></a>
+    ${(typeof TOTAL === "number" && TOTAL > RUNS.length)
+      ? `<button class="mini" onclick="loadAllRuns()"
+           title="把台账表从最近 ${RUNS.length} 条扩到全部 ${TOTAL} 条（只多取行，不改任何记账）">
+           载入全部（共 ${TOTAL} 条）</button>` : ""}
     <button class="mini" onclick="refreshReadouts()"
       title="重新拉台账与报告清单，并就地更新卡片上的「已跑 N 次 / 最近一次」。
 不重渲卡片，所以改过的窗口与族参数不会被吞掉。另一个标签页跑完回来看这里时也要点它。">
@@ -890,8 +911,8 @@ function renderLedger() {
     // 空表不能一声不吭（审计实测：筛选到一条"运行都在更早记录里"的策略 ⇒ 表格空、零解释）
     const total = BYSTRAT[strat] || 0;
     $("ledger").innerHTML = `<div class="sub">${total
-      ? `这条策略共跑过 <b>${total}</b> 次，但都不在最近 ${RUNS.length} 条里（表只显示最近 30 条）。
-         看全部请用上面的「导出全部 CSV」。`
+      ? `这条策略共跑过 <b>${total}</b> 次，但都不在表里这 ${RUNS.length} 条内 ——
+         点上面的「载入全部（共 ${TOTAL} 条）」把它们取进来（也可以导出 CSV 看）。`
       : `这条策略还没有运行记录 —— 在它的卡片上点「回测」。</div>`}</div>`;
     return;
   }

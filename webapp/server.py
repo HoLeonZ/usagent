@@ -32,6 +32,7 @@ import json
 import math
 import re
 import sys
+import urllib.parse
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -191,8 +192,16 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/catalog":
             return self._json(200, catalog.build())
         if p == "/api/runs":
-            # 表只显示最近 30 条 —— 但**共几条**要说出来（否则读者以为那就是全部）。
-            runs, allruns = jobs.recent_runs(30), jobs.all_runs()
+            # 表默认只显示最近 30 条 —— 但**共几条**要说出来（否则读者以为那就是全部），
+            # 并且 `?limit=` 可以要更多（我此前给"看不见第 31 条"开的方子只是"去用 CSV 导出"，
+            # 那是把用户赶出界面）。上限 500：台账是线性的，不该被一个查询拉爆。
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            try:
+                limit = int((q.get("limit") or ["30"])[0])
+            except ValueError:
+                return self._json(400, {"error": "limit 必须是整数"})
+            limit = max(1, min(limit, 500))
+            runs, allruns = jobs.recent_runs(limit), jobs.all_runs()
             return self._json(200, {"runs": runs, "total": len(allruns),
                                     "shown": len(runs),
                                     # 纪律计数：碰过 holdout 的次数（卡片上那句"只准读一次"
