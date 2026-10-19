@@ -778,6 +778,27 @@ def test_api_json_never_contains_bare_nan_or_infinity(http, monkeypatch):
     assert parsed["metrics"]["excess"] is None, "±Inf 也该变成 null"
 
 
+def test_a_deleted_report_gives_a_human_page_not_json(http, tmp_path, monkeypatch):
+    """报告文件被清理之后，那条链接要给人看的东西 —— 不是一坨 JSON。
+
+    边界实测（把报告文件删掉，模拟 research/results/ 被手工清理）：浏览器里显示的是一行
+    `{"error": "找不到 web_report_xxx.html"}` —— 而报告是**人点链接打开**的（新标签页、书签），
+    这是最没用的一种脸。现在两条报告路由都回一个自包含的小页面：说清"不在盘上了"、文件名、
+    常见原因，并给回台账的入口；**API 路由照旧回 JSON**（那边的读者是程序）。
+    """
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    code, body = _get(http + "/report/deadbeef0001")            # 合法 id、盘上没有这份文件
+    text = body.decode()
+    assert code == 404, code
+    assert "这份报告已经不在盘上了" in text and "回到平台" in text, text[:200]
+    assert not text.lstrip().startswith("{"), "又回 JSON 了"
+    code2, body2 = _get(http + "/report-file/web_report_deadbeef0001.html")
+    assert code2 == 404 and "不在盘上" in body2.decode()
+    # 程序读的那条路仍然是 JSON（不要把两种读者混在一起）
+    code3, body3 = _get(http + "/api/job/deadbeef0001")
+    assert code3 == 404 and body3.decode().lstrip().startswith("{"), body3[:80]
+
+
 def test_server_binds_localhost_only():
     """**只绑 127.0.0.1**：这个页面能一键跑回测、读本地库、写报告文件。"""
     src = (ROOT / "webapp" / "server.py").read_text(encoding="utf-8")

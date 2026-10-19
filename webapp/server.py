@@ -121,6 +121,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(code, path.read_bytes(), "text/html; charset=utf-8")
 
+    def _report_missing(self, name: str) -> None:
+        """报告文件不在了 —— 给人看的页面，而不是一坨 JSON。
+
+        报告是由人**点链接打开**的（新标签页、甚至书签），而 research/results/ 里的产物会被
+        手工清理 ⇒ 链接会变陈旧。实测：那种情况下浏览器里显示的是一行
+        `{"error": "找不到 web_report_xxx.html"}` —— 对一个被点开的链接来说这是最没用的一种脸。
+        API 路由照旧回 JSON（那边的读者是程序）。"""
+        page = (
+            '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+            '<title>报告不在盘上 · usagent</title></head>'
+            '<body style="font:14px/1.7 -apple-system,PingFang SC,Arial,sans-serif;background:#0f1115;'
+            'color:#e6e8ee;max-width:640px;margin:80px auto;padding:0 20px">'
+            '<h1 style="font-size:18px">这份报告已经不在盘上了</h1>'
+            f'<p style="color:#9aa3b2">文件名：<code style="color:#cbd5e1">{name}</code></p>'
+            '<p>常见原因：<code>research/results/</code> 里的产物被手工清理过（报告不入库，'
+            '也不该入库 —— §7）。</p>'
+            '<p>这次运行本身仍在<strong>运行台账</strong>里（若它有 job id）：'
+            '<a href="/#runs" style="color:#7aa7ff">回到平台 → 运行台账</a>。'
+            '想重新生成就在对应策略卡片上再跑一次 —— 注意每跑一次都会记进台账、推高 k。</p>'
+            '</body></html>')
+        self._send(404, page.encode("utf-8"), "text/html; charset=utf-8")
+
     def _report(self, code: int, path: Path, job_id: str | None = None,
                 ledger: bool = False) -> None:
         """托管一份报告 —— **在服务端**给它加一条"回到平台"的返回条。
@@ -289,6 +311,8 @@ class Handler(BaseHTTPRequestHandler):
             f = (RESULTS / m.group(1)).resolve()
             if f.parent != RESULTS.resolve():
                 return self._json(400, {"error": "报告路径越界"})
+            if not f.is_file():
+                return self._report_missing(f.name)
             # 与 /report/<id> 同判据：平台产物（web_report_<hex>.html）**且**台账里真有这条
             # 才敢说「这份运行在台账里」—— 否则同一份报告走两条路会给出互相矛盾的说法（审计实测）
             hexid = re.fullmatch(r"web_report_([0-9a-f]{6,32})\.html", f.name)
@@ -302,6 +326,9 @@ class Handler(BaseHTTPRequestHandler):
             if not _JOB_ID.match(jid):
                 return self._json(400, {"error": "任务 id 非法"})
             # 只接受由本次服务生成的报告文件（不拼用户输入、不做目录遍历）
+            _f = RESULTS / f"web_report_{jid}.html"
+            if not _f.is_file():
+                return self._report_missing(_f.name)
             # 台账里有没有这一条：只有平台自己产出的才在（CLI `--out` 的从来不在）——
             # 返回条那句「这份运行在台账里」必须是真的（审计实测：CLI 产物上它是假的）
             return self._report(200, RESULTS / f"web_report_{jid}.html", job_id=jid,
