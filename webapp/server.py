@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 import threading
@@ -79,6 +80,24 @@ def _cli_holdout_touches() -> int | None:
     return n if saw_cli else None
 
 
+def _finite(obj):
+    """把 NaN / ±Inf 换成 `null` —— **Python 的 json 默认会写出裸 `NaN`，而那不是合法 JSON**。
+
+    2026-10-19 边界实测：一个 0 成交（或退化）的运行，metrics 里带 `t_alpha: NaN` / `E_R: NaN`
+    ⇒ `/api/job/<id>` 的响应体里出现裸 `NaN` ⇒ **浏览器的 `JSON.parse` 直接抛错** ⇒ 页面永远
+    渲染不出这次运行的结果（而台账里已经记下了），前端还会把它误报成"读不到任务状态" ——
+    服务器明明好好的。所以在这条唯一的出口上统一净化：非有限浮点一律 null，前端对 null
+    本来就渲染成「—」。
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite(v) for v in obj]
+    return obj
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "usagent-platform/1"
 
@@ -93,7 +112,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, code: int, obj) -> None:
-        self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+        self._send(code, json.dumps(_finite(obj), ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
 
     def _html(self, code: int, path: Path) -> None:

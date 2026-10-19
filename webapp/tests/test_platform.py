@@ -748,6 +748,36 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
     assert got["queuedSaysQueued"], "排队中没如实说「排队中」"
 
 
+def test_api_json_never_contains_bare_nan_or_infinity(http, monkeypatch):
+    """接口的 JSON 里**不许出现裸 `NaN`/`Infinity`** —— Python 会写，JS 的 `JSON.parse` 会拒。
+
+    2026-10-19 边界实测：一个 0 成交（或退化）的运行，metrics 里有 `t_alpha: NaN` / `E_R: NaN`
+    ⇒ `/api/job/<id>` 的响应体里出现裸 `NaN` ⇒ **浏览器直接抛 `SyntaxError`** ⇒ 这次运行的结果
+    永远渲染不出来（台账里却已经记下了），而前端还会把它误报成"读不到任务状态"。服务器其实是好的
+    —— 所以这条锁钉在**唯一的出口**（`server._json`）上，用 JS 的语义（严格解析）验，而不是
+    用 Python 的 `json.loads`（它对 NaN 是宽容的，验不出这个洞）。
+    """
+    fake = {"id": "abc123abc123", "status": "done", "seconds": 1.0, "selfcheck": [],
+            "metrics": {"n_trades": 0, "t_alpha": float("nan"), "E_R": float("nan"),
+                        "excess": float("-inf"), "dsr": float("nan"),
+                        "k_breakdown": {"declared_or_grid": 1, "platform_runs_before": 0}},
+            "hint": "", "report": "/report/abc123abc123"}
+
+    monkeypatch.setattr(jobs, "status", lambda jid: fake if jid == "abc123abc123" else None)
+
+    def _strict(txt: str):
+        # 模拟 JS 的 JSON.parse：遇到 NaN/Infinity 直接抛
+        return json.loads(txt, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"裸 {c}")))
+
+    code, body = _get(http + "/api/job/abc123abc123")
+    assert code == 200
+    text = body.decode()
+    assert "NaN" not in text and "Infinity" not in text, f"响应体里有裸 NaN/Infinity：{text[:200]}"
+    parsed = _strict(text)                      # 这一行在修复前会抛 ValueError
+    assert parsed["metrics"]["t_alpha"] is None and parsed["metrics"]["E_R"] is None
+    assert parsed["metrics"]["excess"] is None, "±Inf 也该变成 null"
+
+
 def test_server_binds_localhost_only():
     """**只绑 127.0.0.1**：这个页面能一键跑回测、读本地库、写报告文件。"""
     src = (ROOT / "webapp" / "server.py").read_text(encoding="utf-8")
