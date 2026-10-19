@@ -212,7 +212,10 @@ class Handler(BaseHTTPRequestHandler):
                                     "last_by_strategy": jobs.last_by_strategy(),
                                     # 台账里读不出来的行数：>0 时页面要警告（少读一行 =
                                     # 少记一次试验 = k 偏小），不能让它静默
-                                    "skipped_lines": jobs.skipped_lines()})
+                                    "skipped_lines": jobs.skipped_lines(),
+                                    # 权威 holdout 台账的状态（平台运行**不登记**进去）——
+                                    # 不并排显示，读者会把平台那个数当成纪律账本上的次数
+                                    "holdout_ledger": catalog.holdout_ledger_state(allruns)})
         if p == "/api/jobs":
             # 在途任务（页面刷新后据此重建面板/徽标/取消入口）。只给这个页面用得上的最小字段。
             jobs_now = jobs.inflight()

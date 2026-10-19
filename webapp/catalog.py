@@ -190,6 +190,50 @@ def _plain_mechanism(line: str) -> str:
     return t.strip()
 
 
+def holdout_ledger_state(runs: list[dict] | None = None) -> dict:
+    """仓库**权威** holdout 台账的状态（`research/results/holdout_ledger.jsonl`）。
+
+    为什么页面上必须有它：卡片写着「与 holdout 重叠（只准读一次）」，而页面上此前只有**平台自己
+    数的**那个数（`web_runs.jsonl` 里数窗口）。可"只准读一次"这条规矩真正被登记的地方是这本
+    台账（`wfv_search` / `family_search` 通过 `holdout.consume` 写它），而**平台运行从不登记
+    进去**（`webapp/jobs.py` 不调 `consume`）。两本账不并排显示，读者就会把平台那个数误当成
+    "纪律账本上的次数"。
+
+    三类事实缺一不可：① 权威账本里有几条 claim（真读过 holdout 的）、几条 lock（只登记不烧窗口）；
+    ② **规范窗口自己被 claim 过没有**；③ 平台的越界运行里有几条以 claim 身份登记进去了。
+    """
+    try:
+        from research import holdout as H
+        hist = H.history()
+    except Exception as exc:                     # noqa: BLE001
+        # 台账坏了要说出来（H 自己就是抛 LedgerCorrupt 的态度："坏了必须修，不能跳过"）
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    claims = [r for r in hist if r.get("kind") == H.KIND_CLAIM]
+    out = {
+        "claims": len(claims),
+        "locks": len(hist) - len(claims),
+        "windows": H.n_windows(),
+        "claimed_windows": H.claimed_windows(),
+        "current_window_claimed": f"{HOLDOUT[0]}..{HOLDOUT[1]}" in set(H.claimed_windows()),
+        "last_claim": ({k: claims[-1].get(k) for k in ("ts", "script", "tag", "window")}
+                       if claims else None),
+    }
+    if runs is not None:
+        claimed = set(out["claimed_windows"])
+        crossers, registered = 0, 0
+        for r in runs or []:
+            w = r.get("window")
+            if not (isinstance(w, (list, tuple)) and len(w) == 2):
+                continue
+            if touches_holdout((w[0], w[1])):
+                crossers += 1
+                if f"{w[0]}..{w[1]}" in claimed:
+                    registered += 1
+        out["platform_crossers"] = crossers
+        out["platform_registered"] = registered
+    return out
+
+
 def stale_definitions(started_at: float | None = None) -> list[str]:
     """比"服务启动时刻"更新的定义体文件 —— 改了它们但还没重启，服务读的是旧值。
 

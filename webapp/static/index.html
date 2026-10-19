@@ -493,6 +493,7 @@ let CLI_HOLDOUT_TOUCHES = null;   // 命令行产物文件名里能认出来的�
 let CUR_SHA = "", CUR_DIRTY = null;   // 当前代码版本（§6 归因：sha 单独不够，脏树要一起看）
 let SKIPPED_LINES = 0;                // 台账里读不出来的行数（>0 = 记账可能偏小，必须说出来）
 let REPORTS_TOTAL = null;             // 盘上报告总份数（接口的 50 条上限之外还有多少）
+let HLEDGER = null;                   // **权威** holdout 台账的状态（research/results/holdout_ledger.jsonl）
 let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
                     catch (e) { return null; } })();
 function applyPoolHint() {
@@ -767,6 +768,7 @@ async function refreshLedger() {
     HOULDOUT_TOUCHES = rr.holdout_touches || 0;
     CLI_HOLDOUT_TOUCHES = (rr.cli_holdout_touches === undefined) ? null : rr.cli_holdout_touches;
     SKIPPED_LINES = rr.skipped_lines || 0;
+    HLEDGER = rr.holdout_ledger || null;
     CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
     const rp = await (await fetch("/api/reports")).json();
     REPORTS = rp.reports || []; REPORTS_TOTAL = rp.total;
@@ -789,8 +791,18 @@ function renderLedger() {
   // ⚠️ 这一条 return 必须放在**渲染 lbar 之后**：台账空时整条栏（刷新读数 / 导出 CSV /
   // holdout 纪律计数 / 当前代码版本）曾一起消失 —— 而"首次使用"恰恰是最需要它们的时刻。
   if (!RUNS.length) {
+    // 空台账时也要说权威 holdout 台账的状态 —— "我还没跑过，但 holdout 已经被读过",
+    // 恰恰是新读者最该知道的一件事（它决定了他能拿哪段窗口做结论）
+    const hl0 = HLEDGER && !HLEDGER.error
+      ? `<div class="sub">曲线外的另一件事：仓库的<b>权威 holdout 台账</b>里已有
+         <b>${HLEDGER.claims}</b> 条 claim（最近一条：${esc((HLEDGER.last_claim && HLEDGER.last_claim.window) || "?")}
+         / ${esc((HLEDGER.last_claim && HLEDGER.last_claim.script) || "?")}）——
+         也就是说 holdout 那段窗口<b>已经被读过</b>；规范窗口
+         ${esc(HOLDOUT[0])}..${esc(HOLDOUT[1])} ${HLEDGER.current_window_claimed
+           ? "<b>已被 claim</b>" : "本身<b>从未被 claim</b>（但读过它的子集）"}。</div>`
+      : "";
     $("lbar").innerHTML = `还没有运行记录 —— 在任何一张策略卡片上点「回测」，这里会出现每一次的账。
-      <span class="sub">（同一策略跑两次或两条策略的对比就看下面这张表）</span>`;
+      <span class="sub">（同一策略跑两次或两条策略的对比就看下面这张表）</span>` + hl0;
     $("ledger").innerHTML = "";
     return;
   }
@@ -831,10 +843,30 @@ function renderLedger() {
     ? ` · <span class="warn">⚠️ 台账里有 <b>${SKIPPED_LINES}</b> 行读不出来（已跳过）—— 那等于少记了
         ${SKIPPED_LINES} 次试验，k 可能偏小；先去 <code>research/results/web_runs.jsonl</code> 看看坏行</span>`
     : "";
+  // 权威 holdout 台账（与上面那个"平台自己数的"是**两本账**）：平台运行从不登记进去，
+  // 所以必须并排显示，否则读者会把上面那个数当成纪律账本上的次数。
+  const hl = (() => {
+    if (!HLEDGER) return "";
+    if (HLEDGER.error) return ` · <span class="warn">⚠️ 权威 holdout 台账读不出来：${esc(HLEDGER.error)}
+      —— 那本账坏了必须修（它记的是"哪段窗口被真读过"）</span>`;
+    const c = HLEDGER.claims, l = HLEDGER.locks;
+    const cur = HLEDGER.current_window_claimed
+      ? `<b>已被 claim</b>（用的是 ${esc((HLEDGER.last_claim && HLEDGER.last_claim.window) || "?")}）`
+      : `<b>从未被 claim</b>（唯一那条 claim 用的是 ${esc((HLEDGER.last_claim && HLEDGER.last_claim.window) || "?")}）`;
+    const reg = (HLEDGER.platform_crossers === undefined) ? ""
+      : `；平台的 <b>${HLEDGER.platform_crossers}</b> 条越界运行里 <b>${HLEDGER.platform_registered}</b> 条登记进了这本账`;
+    return `<div class="sub">权威 holdout 台账（<code>research/results/holdout_ledger.jsonl</code>）：
+      <b>${c}</b> 条 claim、<b>${l}</b> 条 lock（lock 只登记、不烧窗口）；共动过 ${HLEDGER.windows} 个窗口。
+      规范窗口 ${esc(HOLDOUT[0])}..${esc(HOLDOUT[1])} ${cur}${reg}。
+      <span title="两本账的区别：这一本由 wfv_search / family_search 通过 holdout.consume 写，
+      是「哪段 holdout 被真读过」的权威记录；平台上点一次回测不会写它（jobs.py 不调 consume），
+      所以上面那个'碰过 holdout 的运行'是平台自己数的第三本账。">两本账的区别</span></div>`;
+  })();
   const ht = (HOULDOUT_TOUCHES > 0 || (cliHo || 0) > 0)
     ? ` · <span class="warn">碰过 holdout 的运行 ${scoped} —— §5：只准读一次</span>${sk}`
     : ` · 碰过 holdout 的运行：<b>0</b> 次 ${scoped}${sk}`;
-  $("lbar").innerHTML = `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
+  const htLine = `<div class="sub">${ht.trim().replace(/^·\s*/, "")}</div>${hl}`;
+  $("lbar").innerHTML = htLine + `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
       ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""}${ht} ·
     <select id="lf" aria-label="按策略筛选台账" onchange="renderLedger()">
       <option value="">全部策略</option>

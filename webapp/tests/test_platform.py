@@ -628,6 +628,42 @@ def test_run_counts_come_from_the_whole_ledger_not_the_shown_window(http, tmp_pa
     assert jobs.prior_runs("preset:x") == 35
 
 
+def test_holdout_ledger_state_reports_both_kinds_and_refuses_to_hide_corruption(
+        tmp_path, monkeypatch):
+    """权威 holdout 台账的状态：claim 与 lock 分开数，坏了**要说出来**。
+
+    为什么页面上必须有它：卡片写着「只准读一次」，而平台此前只显示**自己数的**那个数
+    （web_runs.jsonl 里数窗口）。可"哪段 holdout 被真读过"的权威记录是这本台账，由
+    wfv_search / family_search 通过 holdout.consume 写 —— **平台运行从不登记进去**。
+    两本账不并排显示，读者会把平台那个数当成纪律账本上的次数。
+    """
+    from research import holdout as H
+    led = tmp_path / "holdout_ledger.jsonl"
+    led.write_text(
+        json.dumps({"window": "2025-10-14..2026-10-01", "kind": "claim",
+                    "script": "factor_probe", "tag": "stability"}) + "\n" +
+        json.dumps({"window": "2024-01-01..2024-06-30", "kind": "lock"}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(H, "LEDGER_PATH", led)
+    st = catalog.holdout_ledger_state()
+    assert st["claims"] == 1 and st["locks"] == 1, st
+    assert st["claimed_windows"] == ["2025-10-14..2026-10-01"], st
+    # 规范窗口本身**没**被 claim 过（唯一那条用的是它的子集）—— 这个区别必须能显示出来
+    assert st["current_window_claimed"] is False, st
+    assert st["last_claim"]["script"] == "factor_probe"
+    # 平台越界运行里登记进这本账的条数（自己造两条：一条是那条 claim 的窗口、一条不是）
+    st2 = catalog.holdout_ledger_state([
+        {"window": ["2025-10-14", "2026-10-01"]},      # 正是被 claim 的那个窗口
+        {"window": ["2024-04-09", "2026-10-14"]},      # 越界但没登记
+        {"window": ["2024-01-01", "2025-01-01"]},      # 不越界
+    ])
+    assert st2["platform_crossers"] == 2 and st2["platform_registered"] == 1, st2
+
+    # 台账坏了：要说出来，不能装作没事（H 自己的态度就是"坏了必须修，不能跳过"）
+    led.write_text("{ 这不是合法 JSON\n", encoding="utf-8")
+    st3 = catalog.holdout_ledger_state()
+    assert "error" in st3 and "LedgerCorrupt" in st3["error"], st3
+
+
 def test_the_inline_script_parses(tmp_path):
     """内联脚本必须能**解析** —— 一个语法错就让整页变成死的（没有 JS，卡片都渲不出来）。
 
@@ -902,6 +938,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         # 边界实测（造 40 行台账 / 60 份报告）抓到的两处半拉子修复
         "报告区的截断要说出来（接口有 total，页面此前从没显示）": "盘上共 <b>${REPORTS_TOTAL}</b> 份",
         "报告的参数列在 job 不在台账里时不说「在定义体里」": "（台账里没有这条运行）",
+        "权威 holdout 台账的状态要并排显示（两本账不能混）": "权威 holdout 台账",
+        "平台越界运行里登记进权威账本的条数要说出来": "条登记进了这本账",
         "数据覆盖到哪天（拿多新的数据跑的结论）": "数据覆盖到",
         "数据陈旧时才提示，并给出取数命令": "download_ohlcv.py",
         "首次使用的入门块（三步 + 六个词）": 'id="firsttime"',
