@@ -141,17 +141,20 @@ def test_a_window_reaching_before_the_pool_coverage_is_clamped_and_disclosed():
     lvl = pd.Series(np.linspace(100.0, 130.0, len(pool_idx)), index=pool_idx)
     reg = lvl.rename("ew_index").reset_index().rename(columns={"index": "date"})
 
-    out = excess_vs_pool(eq, reg, "2024-01-01", str(eq_idx[-1].date()))
+    # 窗口右端是**排他**的（与全仓库一致）—— 传"最后一天的次日"，与真实调用方一致
+    hi = str((eq_idx[-1] + pd.Timedelta(days=1)).date())
+    out = excess_vs_pool(eq, reg, "2024-01-01", hi)
     assert out["clamped"] is True, "窗口伸到池子覆盖之外时应当标明被裁过"
     assert out["compared_from"].startswith(str(pool_idx[0].date())), out["compared_from"]
     # 共同覆盖的日子 = 池子的日子（60 天），不是权益的 120 天
     assert out["n_days"] == len(pool_idx), out["n_days"]
+    # 而且**裁过之后零敞口仍然恰好等于 0**（这一点我一度以为修不掉，实测证明成立：裁剪后的
+    # 首日是池子水平值的第一个点，本来就没有收益 ⇒ 置零在那边是空操作，两条腿自然对齐）。
+    assert abs(out["excess"]) < 1e-9, f"裁过之后零敞口却报出超额 {out['excess']:+.4%}"
 
     # 池子完全没有覆盖 ⇒ 拒绝，而不是拿一段空气去算年化
-    early = excess_vs_pool.__wrapped__ if hasattr(excess_vs_pool, "__wrapped__") else None
     try:
-        excess_vs_pool(eq.iloc[:30], reg, "2024-01-01", str(eq_idx[29].date()))
+        excess_vs_pool(eq.iloc[:30], reg, "2024-01-01", str((eq_idx[29] + pd.Timedelta(days=1)).date()))
         raise AssertionError("共同覆盖为 0 天时应当拒绝")
     except OverlayError:
         pass
-    assert early is None or True

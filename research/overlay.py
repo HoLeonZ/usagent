@@ -54,14 +54,15 @@ def overlay_from_equity(eq: pd.DataFrame, bench_ret: pd.Series, *,
     # 不置零的后果是**可测的**（2026-10-17 实测，台账 H1）：0 信号 / 0 成交 / 0 敞口的
     # 策略会显示 **+0.44pp** 的"超额"，而 win 1.5 年的窗口上那个数就是首日池子收益的
     # 年化 —— 于是"什么都不做"看起来赢了基准，任何候选也白得同样的分。
-    # 置零之后，"零敞口 ⇒ 超额恰好 0" 在**窗口完全落在池子覆盖范围内**时成立
-    # （tests/test_overlay.py 钉住）。⚠️ 窗口若伸到池子覆盖之外（池子要预热，起得比面板晚，
-    # 实测面板 2023-10-17 起 / 池子 2024-01-12 起），`excess_vs_pool` 会把两条腿裁到共同覆盖的
-    # 那些日子上再比 —— 但此时**首日那一天仍有不对称**：这里把首日池子收益置零（因为它是
-    # "窗口之前 → 窗口首日"的那一段，组合赚不到），而 `window_benchmark_cagr` 是 last/first、
-    # 不置零 ⇒ 残余可达几个百分点（实测 6 个月窗口上 +3.73pp）。这条残余比 H1 那处（+0.44pp）
-    # 大，**没有修**（改它会动到所有窗口的 baseline，属要单独决策的事）—— 如实记在这里，
-    # 别让"不变量"这句话读起来像无条件的。
+    # 置零之后，"零敞口 ⇒ 超额恰好 0" 成立 —— **两种窗口都成立**（tests/test_overlay.py 钉住）：
+    #   * 窗口完全落在池子覆盖内（常见）：首日池子收益就是"窗口之前 → 首日"那一段，置零 ✓；
+    #   * 窗口伸到池子覆盖之外：`excess_vs_pool` 先把两条腿裁到共同覆盖的日子上，而**裁剪后的
+    #     首日是池子水平值的第一个点、它本来就没有收益（NaN→0）**，所以置零这一步在那边是空操作,
+    #     两条腿自然对齐。
+    # 实测（真数据）：2023-10-17..2024-04-10（池子 2024-01-11 起，裁过）零敞口窗口
+    # overlay 与基准都是 +28.8530% ⇒ 超额 **−0.0000pp** ✓；2025-01-01..2025-10-13（未裁）
+    # 首日池子收益 +1.1512% 被置零 ⇒ 超额 −3.4189pp（这条口径不能动：不置零会给出 −1.3519pp，
+    # 那是另一种算法，不是修 bug）。
     if len(b):
         b.iloc[0] = 0.0
     ov = w * sret + (1.0 - w) * b
@@ -104,18 +105,26 @@ def excess_vs_pool(eq: pd.DataFrame, reg: pd.DataFrame, lo: str, hi: str) -> dic
     # 于是两条腿又差一天（实测：连那条不变式测试都会红，+0.6988%）。
     pool_ret = pool_daily_returns(reg)
     levels = reg.set_index("date")["ew_index"].dropna()
-    idx = eq.index.intersection(levels.index)
+    # 两条腿都要**显式**落在 [lo, hi) 内：基准腿（`window_benchmark_cagr`）本来就是这么切的，
+    # 权益腿此前默认"调用方已经切好了"。真实调用方（broker 产出的权益、平台、报告）确实都切好了，
+    # 所以这个洞没露过面；但一旦有人传进来一条更宽的权益曲线，这里就会多算窗口最后一天
+    # （实测：合成夹具里 60 天 vs 基准的 59 天 ⇒ 零敞口也会报出 +1.01% 的"超额"）。
+    # 显式切一刀之后，函数与调用方的行为解耦，"零敞口 ⇒ 恰好 0" 也变成结构性成立。
+    _lo, _hi = pd.Timestamp(lo), pd.Timestamp(hi)
+    eq_win = eq.loc[(eq.index >= _lo) & (eq.index < _hi)]
+    idx = eq_win.index.intersection(levels.index)
     if len(idx) < 3:
         raise OverlayError(
             f"窗口 {lo}..{hi} 里权益与池子**共同覆盖**的交易日只有 {len(idx)} 天 —— 太少，"
             f"折算年化没有意义（池子指数覆盖 "
             f"{levels.index.min() if len(levels) else '?'} 起，窗口请落在它的覆盖范围内）")
-    eq_c = eq.loc[idx]
+    eq_c = eq_win.loc[idx]
     ov = overlay_from_equity(eq_c, pool_ret)
     bench = window_bench_cagr(reg, lo, hi)
     return {**ov, "bench": bench, "excess": ov["cagr"] - bench,
             "compared_from": str(idx.min()), "compared_to": str(idx.max()),
-            "clamped": bool(len(idx) != len(eq))}
+            # clamped 说的是"口径只比较了两者共同覆盖的那一段"（相对**请求窗口内**的权益天数）
+            "clamped": bool(len(idx) != len(eq_win))}
 
 
 def mean_excess_over_windows(results: list[tuple[dict, dict]], reg: pd.DataFrame,
