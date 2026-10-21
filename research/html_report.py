@@ -725,6 +725,17 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
         parts.append('</table></div>')
 
     parts.append('<a class="totopcard" href="#top">↑ 回到顶部</a>')
+    # 凭证头（§6 归因）：报告是**会被存下来、被打印、被转发**的东西 —— 几个月后没人说得清
+    # 它是哪份代码跑出来的。台账里记着 sha，但**报告本身一个字都没有**（CLI 跑的报告更是
+    # 哪儿都没有）。这里把时间 / 代码版本（脏树也标出来）/ 解释器版本印在页脚：
+    # 纯文字，不破坏"自包含、零脚本"。
+    _mf = summary.get("manifest") or {}
+    if _mf:
+        parts.append('<div class="sub" style="margin-top:16px;opacity:.72">'
+                     f'生成于 {e(str(_mf.get("ts") or "?"))} · '
+                     f'代码版本 {e(str(_mf.get("git_sha") or "?"))}'
+                     f'{"（生成时工作区有未提交改动 —— 这一份结果标注不了确定的代码版本）" if _mf.get("git_dirty") else ""}'
+                     f' · Python {e(str(_mf.get("python") or "?"))}</div>')
     parts.append('</div></body></html>')
     return "".join(parts)
 

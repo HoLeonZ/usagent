@@ -306,6 +306,18 @@ def test_the_config_section_says_which_parameters_it_prints(chain):
     assert "未设" in doc
 
 
+def test_the_report_says_which_code_produced_it(chain):
+    """报告页脚要带**凭证头**：时间 / 代码版本（脏树也标）/ 解释器版本（§6 归因）。
+
+    为什么：报告是会被存下来、打印、转发的东西 —— 几个月后没人说得清它是哪份代码跑出来的。
+    台账里记着 sha，但**报告本身一个字都没有**；CLI 跑的报告更是哪儿都没有。
+    """
+    doc, n, _ = _render(chain)
+    assert H.selfcheck(doc, n) == []
+    assert "代码版本" in doc, "报告页脚没有凭证头（这份结果说不清出自哪份代码）"
+    assert "生成于" in doc
+
+
 def test_family_rows_render_the_third_state_not_a_checkmark(chain):
     """族的行在报告里必须是「·」而不是「✓」—— 一个**假 ✓** 比没有这一列更坏。"""
     doc, _, _ = _render(chain, family="str")

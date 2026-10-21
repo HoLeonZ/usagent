@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import obs   # src/ 已在 sys.path（research/__init__ 的垫片）—— 凭证头用
 from core.preset_contract import describe_engine_spec, exit_scheme, resolve
 from research import (broker, indicators, metrics, panel as panel_mod, presets,
                       regime, signals)
@@ -203,6 +204,9 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
         # 这组参数**来自哪儿**（报告的「配置」那一节据此写前缀：族型 preset 的族网格轴
         # 不能被标成 "signal.*" —— 那是同一件事的两种说法）
         "signal_source": ("signal" if P.get("signal") else "family_params"),
+        # 凭证头：这份报告是哪份代码、什么时候跑出来的（§6 归因）。报告是会被存下来、
+        # 打印、转发的东西 —— 没有这一行，几个月后没人说得清它出自哪份代码。
+        "manifest": obs.manifest(),
         # 判读依据 = **策略自己声明的负面证据**（§5：负面证据必须与参数同时记录）。
         # 此前这里是写死"30% 目标"那段文字 —— 只对某一条 preset 成立，换一条就成了假陈述
         # （本文件的历史注释里记着两次翻车）。现在任何策略都渲染它自己的 verdict。
