@@ -232,6 +232,18 @@ table.ledger td{white-space:nowrap}
         <b>动手的那一步不用手抄</b>：preset 卡上的「复制成新候选」会把骨架生成好（NAME 与文件名
         改成 <code>&lt;id&gt;_cand</code>、<code>n_comparisons</code> 已 +1、已声明 <code>derived_from</code>、
         VERDICT 已换成「尚未判定」），并给出建议落盘路径。它<b>只生成、不写盘</b> —— 存与改由你决定。</dd>
+      <dt>交付一条候选前（四条判据）</dt><dd>四条<b>同时</b>满足才算战胜（定义与现状出处：
+        <code>research/preset_defs/</code> 里那条 preset 的 docstring 顶部、<code>research/family_search.py</code> 的裁决输出）：
+        ① 池化测试窗平均 CAGR &gt; 基准线　② 连续净值 CAGR &gt; 基准线
+        ③ 4 折里 ≥3 折为正　④ 4 折里 ≥3 折打赢「同止损止盈、同笔数、同机会集」的随机入场对照（中位以上）。<br>
+        <b>这一页能答到哪</b>：② = 结果面板的「CAGR」对「同窗等权池 CAGR」；③ = 「判据折为正」；
+        ④ 勾了「运气对照」后有一格，但那是<b>整窗一个数</b>，不是逐折 ——
+        <b>① 的池化口径（4 折 CAGR 的均值）与 ④ 的逐折口径本页不出</b>。判定以
+        <code>research.family_search</code> / <code>research.wfv_search</code> 的裁决为准；别拿面板的数去声称过了 ①/④。<br>
+        另外三件交付前置：<code>NAME</code> 与文件名一致（注册表校验）、<code>n_comparisons</code> 是这一条
+        <b>声明的试验次数</b>（派生候选要在父策略那个数上<b>加上本轮新做的试验</b>；
+        <code>preset_defs/</code> 里 <code>wfv_noearn</code> / <code>wfv_postearn</code> 的 docstring 就是累加的先例）、
+        行为锁基线在（卡片上的「行为锁基线」行）。</dd>
       <dt>research.run_baseline</dt><dd>成本敏感性 / 逐窗口分解 / 带 HAC 的归因</dd>
       <dt>research.wfv_search</dt><dd>WFV 搜索 —— holdout claim 的唯一入口</dd>
       <dt>src/validate.py</dt><dd>数据覆盖体检（「从没尝试过的名字」）</dd>

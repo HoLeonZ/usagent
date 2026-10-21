@@ -648,6 +648,20 @@ def test_no_literal_markdown_leaks_into_visible_copy():
     assert not offenders, f"可见文案里有 markdown 的 **：{offenders}"
 
 
+def test_static_markup_has_no_stray_backticks_or_markdown():
+    """静态标记里的文案不许出现反引号 —— 页面上的代码是 `<code>`，反引号会原样打出来。
+
+    为什么单独一条：`**` 那条锁扫的是**标记里**的文案（静态 HTML + 去掉注释的 JS），
+    而我在维护者地图里写 `research/preset_defs/` 时就是手滑用了 markdown 的反引号
+    （那一段现在是 `<code>`）。这条只扫 `<script>` 之前的部分 —— JS 里反引号是模板串，
+    扫不得。当前实测：静态部分反引号 0 个，所以这条锁是空的、不会误报。
+    """
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    body = html[:html.index("<script>")]
+    offenders = [ln.strip()[:70] for ln in body.splitlines() if "`" in ln]
+    assert not offenders, f"静态文案里出现了 markdown 反引号：{offenders}"
+
+
 def test_run_counts_come_from_the_whole_ledger_not_the_shown_window(http, tmp_path, monkeypatch):
     """卡片「已跑 N 次」必须与 DSR 的 k 用**同一个计数**（都按全文台账数）。
 
@@ -1164,6 +1178,10 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         # 判据④的读数此前只藏在报告里（面板上只有"跑过 200 次"这句计数）
         "运气对照的读数上面板（判词是在面板上写的）": "随机入场百分位",
         "只有一边跑了对照就不给可比值": "control_mismatch",
+        # 交付的判据此前只写在定义体的 docstring 里：页面上有"delivered/validated"的字样，
+        # 但没有任何一处说**四条判据是什么**、以及这一页能答到哪一条
+        "交付前置条件（四条判据是什么、这一页能答到哪）": "交付一条候选前（四条判据）",
+        "明说哪两条口径本页不出（别拿面板的数去声称过了）": "与 ④ 的逐折口径本页不出",
     }
     missing = [k for k, v in need.items() if v not in html]
     assert not missing, f"页面缺这些按钮/导航：{missing}"
