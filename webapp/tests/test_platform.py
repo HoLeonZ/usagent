@@ -895,6 +895,29 @@ def test_the_ledger_records_the_dynamic_metrics_the_compare_view_needs(offline):
     assert rec["cagr"] == pytest.approx(st["metrics"]["cagr"]), "台账与任务状态的同一个量不一致"
 
 
+def test_the_csv_export_covers_every_field_the_ledger_records(offline, http):
+    """「把数字拿出去算」拿到的东西要**不多不少**是台账记的那些。
+
+    为什么值得钉住（2026-10-21 实测）：导出的 CSV 之前只有 18 列，而台账里记着的
+    cagr / exposure / bench_cagr / maxdd / win_pct / e_r / profit_factor / folds_positive /
+    alpha_annual / t_alpha / ctl_pct **一列都没有** ⇒ 拿 CSV 去算的人正好少了对比视图
+    要用的那些数字。这条测试把"台账里多一个字段 ⇒ CSV 必须多一列"钉住：以后加了字段
+    却忘了加列，这里就红。
+    """
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1], "control_runs": 20})["id"])
+    assert st["status"] == "done", st.get("error")
+    rec = [json.loads(x) for x in (offline / "web_runs.jsonl").read_text().splitlines()][-1]
+    code, body = _get(http + "/api/runs.csv")
+    assert code == 200
+    text = body.decode("utf-8-sig")
+    header = text.splitlines()[0].split(",")
+    missing = sorted(k for k in rec if k not in header)
+    assert not missing, f"台账记了但 CSV 没导出的字段：{missing}"
+    # 动态指标必须真的在里面（不是"名字在、值是空"）
+    assert "cagr" in header and "ctl_pct" in header and "pool_range" in header, header
+
+
 def test_k_accounting_inherits_the_parents_platform_runs(tmp_path, monkeypatch):
     """派生候选的 k 必须继承**父策略**在本平台的运行次数（§5 记账）。
 
@@ -1362,6 +1385,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "入门块默认收起（老手不必每次多滚一屏）": 'class="ft">',
         "入门块说清第一次要 30–70 秒（否则像挂了）": "第一次要 30–70 秒",
         "接手者用的代码地图（引擎在哪儿）": 'id="maintain"',
+        "地图里也要有**页面自己**的源码（接手的人找得到这个工具的代码）": "<dt>webapp/jobs.py</dt>",
+        "并说清改哪个文件要重启服务、哪个只要刷新": "改那几个 <code>.py</code>",
         "地图说明改完跑什么（含 --regen 的边界）": "tools/preflight.sh",
         "台账「代码」列（哪份代码跑的）": '["git_sha","代码"]',
         "台账顶栏写当前代码版本": "当前代码 <b>",

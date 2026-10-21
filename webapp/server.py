@@ -282,9 +282,19 @@ class Handler(BaseHTTPRequestHandler):
             import csv as _csv
             import io as _io
             rows = jobs.all_runs()
-            cols = ["ts", "strategy_id", "window", "params", "n_trades", "excess", "dsr",
-                    "n_trials_k", "prior_runs", "derived_from", "control_runs", "seconds", "note",
-                    "job_id", "git_sha", "git_dirty", "kind", "name"]
+            # ⚠️ 列要**覆盖台账记录的每一个字段** —— 之前这里只有 18 列，而台账里记着的
+            # cagr / exposure / bench_cagr / maxdd / win_pct / e_r / profit_factor /
+            # folds_positive / alpha_annual / t_alpha / ctl_pct 都没进去 ⇒ "把数字拿出去算"
+            # 拿到的正好是**对比视图**要用的那些数字的缺失版。现在全列出来，
+            # 并有一条测试钉住"台账里多一个字段，CSV 就得跟着多一列"。
+            cols = ["ts", "kind", "strategy_id", "name", "window", "params",
+                    "n_trades", "excess", "cagr", "exposure", "bench_cagr", "maxdd",
+                    "win_pct", "e_r", "profit_factor", "folds_positive",
+                    "alpha_annual", "t_alpha", "dsr",
+                    "n_trials_k", "prior_runs", "derived_from",
+                    "control_runs", "ctl_pct", "ctl_failed",
+                    "job_id", "report", "pool_range", "seconds", "note",
+                    "git_sha", "git_dirty"]
             buf = _io.StringIO()
             w = _csv.writer(buf)
             w.writerow(cols + ["excess_pct"])

@@ -214,6 +214,24 @@ table.ledger td{white-space:nowrap}
       <dt>research/overlay.py</dt><dd>曝光匹配口径（<b>唯一</b>一处实现）</dd>
       <dt>research/html_report.py</dt><dd>报告的<b>全部</b>呈现（与策略无关）</dd>
       <dt>core/preset_contract.py</dt><dd>preset 的契约与 <code>resolve()</code>（参数的唯一入口）</dd>
+      <dt>research/preset_defs/*.py</dt><dd>每条已交付 preset 的定义体（<code>NAME</code>、
+        参数、<code>n_comparisons</code>、<code>VERDICT</code>、声明窗）—— 交付一条新候选就是
+        在这里加一个文件（页面上的「复制成新候选」给你改好的骨架）</dd>
+    </dl>
+    <p><b>这个页面自己的源码</b>（你在看的这个东西；没有构建步骤、没有依赖安装 —— 它只跑标准库。
+      改 <code>webapp/static/index.html</code> <b>刷新浏览器即可</b>；改那几个 <code>.py</code>
+      要<b>重启服务</b>（模块与注册表都是启动时读一次的，刷新不管用）：</p>
+    <dl>
+      <dt>webapp/server.py</dt><dd>HTTP 路由（只绑 127.0.0.1，<code>http.server</code>；
+        每个 <code>/api/*</code> 一条路由）</dd>
+      <dt>webapp/jobs.py</dt><dd>跑一次任务：取链路 → 信号 → 回测 → 渲染 → <b>记账</b>。
+        <b>DSR 的 k 在这里算，且只在这里算</b>（面板、台账、测试都读它）</dd>
+      <dt>webapp/catalog.py</dt><dd>把注册表编译成页面用的目录（卡片上的口径标签、族网格、
+        行为锁基线状态、候选骨架）</dd>
+      <dt>webapp/static/index.html</dt><dd>页面的全部前端：内联的样式与脚本（原生 DOM，
+        无框架无构建）。改完刷新即可</dd>
+      <dt>webapp/tests/test_platform.py</dt><dd>平台的测试：路由、记账口径、页面里"按钮还在不在"
+        的清单断言，以及把内联脚本装进最小 DOM 桩<b>真的执行</b>的护栏</dd>
     </dl>
     <p><b>命令行入口</b>（页面<b>没有</b>按钮直达的那些也都在这里 —— 免得你以为页面上没有的
       事就做不了。每条都实测过 <code>--help</code> 可用）：</p>
@@ -931,24 +949,11 @@ function renderLedger() {
                 // ⚠️ Δ 列的排序键必须是 `_d`（算出来的字段名）—— 曾写成 d_excess：
                 // 表头照样画、aria-sort 照样发，但点下去一行都不动（审计实测）。
                 ["dsr","DSR"],["n_trials_k","k"],["git_sha","代码"],["note","备注"]];
-  // ⚠️ 这一条 return 必须放在**渲染 lbar 之后**：台账空时整条栏（刷新读数 / 导出 CSV /
-  // holdout 纪律计数 / 当前代码版本）曾一起消失 —— 而"首次使用"恰恰是最需要它们的时刻。
-  if (!RUNS.length) {
-    // 空台账时也要说权威 holdout 台账的状态 —— "我还没跑过，但 holdout 已经被读过",
-    // 恰恰是新读者最该知道的一件事（它决定了他能拿哪段窗口做结论）
-    const hl0 = HLEDGER && !HLEDGER.error
-      ? `<div class="sub">曲线外的另一件事：仓库的<b>权威 holdout 台账</b>里已有
-         <b>${HLEDGER.claims}</b> 条 claim（最近一条：${esc((HLEDGER.last_claim && HLEDGER.last_claim.window) || "?")}
-         / ${esc((HLEDGER.last_claim && HLEDGER.last_claim.script) || "?")}）——
-         也就是说 holdout 那段窗口<b>已经被读过</b>；规范窗口
-         ${esc(HOLDOUT[0])}..${esc(HOLDOUT[1])} ${HLEDGER.current_window_claimed
-           ? "<b>已被 claim</b>" : "本身<b>从未被 claim</b>（但读过它的子集）"}。</div>`
-      : "";
-    $("lbar").innerHTML = `还没有运行记录 —— 在任何一张策略卡片上点「回测」，这里会出现每一次的账。
-      <span class="sub">（同一策略跑两次或两条策略的对比就看下面这张表）</span>` + hl0;
-    $("ledger").innerHTML = "";
-    return;
-  }
+  // ⚠️ 台账**空**的时候，lbar 里的东西**一个都不能少**（刷新读数 / 导出 CSV / holdout
+  // 纪律计数 / 当前代码版本）—— "首次使用"恰恰是最需要它们的时刻。此前这里有个提前
+  // return，空台账时整条栏一起消失（实测：连"现在这份代码是哪个 sha"都看不到，
+  // 而"我还没跑过、但 holdout 已经被读过"这件事也一起没了）。所以：**只**换掉表格那一块。
+  const emptyLedger = !RUNS.length;
   // Δ = 与**同一配置**（同策略 + 同参数 + **同窗口**）的上一次比，按时间（不是按当前排序）。
   // 为什么要算进窗口：只在同配置下这个差才有确定含义 —— 引擎是确定性的，同配置两次应当
   // 一模一样；若它不是 0，变的东西就在配置**之外**（数据换了、或代码改了）。这正是"改完
@@ -1010,13 +1015,19 @@ function renderLedger() {
     : ` · 碰过 holdout 的运行：<b>0</b> 次 ${scoped}${sk}`;
   const htLine = `<div class="sub">${ht.trim().replace(/^·\s*/, "")}</div>${hl}`;
   renderCompareBar();
-  $("lbar").innerHTML = htLine + `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
-      ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""}${ht} ·
+  $("lbar").innerHTML = htLine + (emptyLedger
+      ? `还没有运行记录 —— 在任何一张策略卡片上点「回测」，这里会出现每一次的账。
+         <span class="sub">（同一策略跑两次或两条策略的对比就看下面这张表）</span> ·`
+      : `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
+      ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""}${ht} ·`) + `
     <select id="lf" aria-label="按策略筛选台账" onchange="renderLedger()">
       <option value="">全部策略</option>
       ${opts.map(([s, n]) => `<option value="${esc(s)}"${s === strat ? " selected" : ""}>${esc(s)}（${n}）</option>`).join("")}
     </select>
-    <a href="/api/runs.csv" download><button class="mini">导出全部 CSV</button></a>
+    <a class="btnlink mini" href="/api/runs.csv" download
+      title="台账「全部」记录的 CSV（表里只显示最近 30 条，导出不跟着截断）。
+⚠️ 表上的「Δ 超额（同配置）」不在 CSV 里：它是按 ts 排序后与「同一配置」
+（同策略 + 同参数 + 同窗口）的上一条比出来的，脚本可自行复算。">导出全部 CSV</a>
     ${(typeof TOTAL === "number" && TOTAL > RUNS.length)
       ? `<button class="mini" onclick="loadAllRuns()"
            title="把台账表从最近 ${RUNS.length} 条扩到全部 ${TOTAL} 条（只多取行，不改任何记账）">
@@ -1037,10 +1048,12 @@ function renderLedger() {
   if (!rows.length) {
     // 空表不能一声不吭（审计实测：筛选到一条"运行都在更早记录里"的策略 ⇒ 表格空、零解释）
     const total = BYSTRAT[strat] || 0;
-    $("ledger").innerHTML = `<div class="sub">${total
+    $("ledger").innerHTML = `<div class="sub">${emptyLedger
+      ? `还没有运行记录 —— 在任何一张策略卡片上点「回测」，这里会出现每一次的账。`
+      : total
       ? `这条策略共跑过 <b>${total}</b> 次，但都不在表里这 ${RUNS.length} 条内 ——
          点上面的「载入全部（共 ${TOTAL} 条）」把它们取进来（也可以导出 CSV 看）。`
-      : `这条策略还没有运行记录 —— 在它的卡片上点「回测」。</div>`}</div>`;
+      : `这条策略还没有运行记录 —— 在它的卡片上点「回测」。`}</div>`;
     return;
   }
   // 「回填这一行」要用的完整配置（含参数）——**每次重渲都重建**，否则"载入全部"之后
