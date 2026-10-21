@@ -221,6 +221,12 @@ table.ledger td{white-space:nowrap}
       <dt>research.render_report</dt><dd>单条策略的逐笔报告 —— 页面「复制命令」用的就是它</dd>
       <dt>research.family_search</dt><dd>跑整张预注册网格（网格 × 折数逐项计入 k）—— 页面「复制网格命令」用的它</dd>
       <dt>research.rank_strategies</dt><dd>所有 preset + 族的横向排名（页面上只能看「最近一次读数」）</dd>
+      <dt>做一条兄弟候选时</dt><dd>复制一条 preset 改一个参数来试，是这套工具最常见的用法 —— 但有一处
+        <b>必须自己记账</b>：平台按<b>策略名</b>各自数运行次数，新名字的 prior 恒为 0，所以它的
+        DSR 分母 k 会<b>偏小、判词偏乐观</b>。实测过一次：同一片搜索空间里，基线 k=20（17+3），
+        而兄弟记成 k=17（17+0），实际应为 17+3+1=21。⇒ 复制候选时把 <code>n_comparisons</code>
+        设成「基线的 n_comparisons + 基线在本平台上跑过的次数 + 1」，并且<b>别拿两次 k 不同的
+        DSR 互相比较</b>。</dd>
       <dt>research.run_baseline</dt><dd>成本敏感性 / 逐窗口分解 / 带 HAC 的归因</dd>
       <dt>research.wfv_search</dt><dd>WFV 搜索 —— holdout claim 的唯一入口</dd>
       <dt>src/validate.py</dt><dd>数据覆盖体检（「从没尝试过的名字」）</dd>

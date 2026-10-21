@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1]
@@ -25,7 +25,11 @@ import trading_calendar as TC  # noqa: E402
 # 不能让它去读 sys.argv（在 pytest 下那是测试自己的参数）。
 import validate  # noqa: E402
 
-RECENT = TC.expected_sessions(date(2026, 9, 1), date(2026, 10, 16))
+# ⚠️ 这份夹具必须**相对今天**构造。断言说的是「数据新鲜（缺的交易日 ≤ 1）」，而夹具此前写死到
+# 一个固定日期 —— 日历往前走，它必然变红（2026-10-21 实测：「最新 2026-10-16；其后应有 3 个
+# 交易日」）。那不是校验逻辑坏了，是<夹具>过期了：一个"关于现在"的断言，不能用"当时"的数据喂。
+_TODAY = date.today()
+RECENT = TC.expected_sessions(_TODAY - timedelta(days=45), _TODAY - timedelta(days=1))
 OLD = TC.expected_sessions(date(2025, 1, 2), date(2025, 2, 28))
 
 
