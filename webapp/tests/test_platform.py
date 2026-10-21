@@ -373,6 +373,13 @@ def test_inflight_route_lists_a_queued_job_and_the_page_can_recover_it(offline, 
         assert jid in got, "排队中的任务没被列出来"
         assert got[jid]["kind"] == "preset" and got[jid]["strategy"] == "us_reversal_dip_v1"
         assert got[jid]["status"] == "queued" and got[jid]["lo"] == WIN[0]
+        # 面板要靠这几个字段重建标题**与"完整命令"**（否则刷新后的命令是拿卡片当前输入现拼的）
+        fam = jobs.submit({"kind": "family", "id": "str", "lo": WIN[0], "hi": WIN[1],
+                           "params": {"a": 3}, "control_runs": 200, "note": "n"})["id"]
+        d1 = json.loads(_get(http + "/api/jobs")[1])
+        g = {j["id"]: j for j in d1["jobs"]}[fam]
+        assert g["params"] == {"a": 3} and g["control_runs"] == 200 and g["note"] == "n"
+        jobs.cancel(fam)
     finally:
         jobs._LOCK.release()
     st = _wait(jid)
@@ -921,6 +928,10 @@ const offGridKept = document.getElementById("p-xs_flow-a").value;   // 99 不该
 const presetRow = applyRunConfig({ strategy_id: "preset:us_reversal_dip_v1",
   window: ["2024-04-04", "2024-10-10"], params: { drop5: 0.12 } });
 const presetWindow = document.getElementById("lo-preset-us_reversal_dip_v1").value;
+// ---- 命令的输入必须能**由调用方给**（刷新后从服务端找回的任务靠它，2026-10-21）----
+const cmdExplicit = cliCmdFor("family", "xs_flow", "2024-05-05", "2024-11-11", { a: 3 }, 200, "");
+const cmdLive = cliCmd("family", "xs_flow");      // 按卡片当前输入拼（桩里 ctl 未勾、a=2）
+const pnl = panel("job9", "family", "xs_flow", "2024-05-05", "2024-11-11", { a: 3 }, 200, cmdExplicit);
 const out = {
   cli_preset: cliCmd("preset", "us_reversal_dip_v1"),
   cli_family: cliCmd("family", "xs_flow"),
@@ -943,7 +954,16 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
   fillOffGridKept: offGridKept,
   fillPresetSkipsNothing: presetRow.ok && presetRow.applied.length === 0
     && presetRow.skipped.length === 0,
-  fillPresetWindow: presetWindow }));
+  fillPresetWindow: presetWindow,
+  // 显式输入的命令：运气对照与产物名要跟着**给的**参数走（不是卡片当前状态）
+  cliCtlExplicit: cmdExplicit.includes("--control-runs 200"),
+  cliCtlLive: cmdLive.includes("--control-runs 0"),
+  cliOutFromArgs: cmdExplicit.includes("web_report_cli_xs_flow_2024-05-05_2024-11-11_p"),
+  cliCtlNotLeaked: !cmdLive.includes("--control-runs 200"),
+  // 面板要印**传进去的**那条命令（刷新后找回的任务走这条），而不是现拼一条
+  panelCmd: pnl.innerHTML.includes("web_report_cli_xs_flow_2024-05-05_2024-11-11_p"),
+  panelParams: pnl.innerHTML.includes("&quot;a&quot;:3"),
+  panelCtl: pnl.innerHTML.includes("运气对照 200 次") }));
 """
     f = tmp_path / "run_inline.js"
     f.write_text(prelude + js + probe, encoding="utf-8")
@@ -965,6 +985,12 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
     # preset 行的参数在页面上改不了 ⇒ 既不算"填了"也不算"没填进去"
     assert got["fillPresetSkipsNothing"], f"preset 行不该报 skipped：{got}"
     assert got["fillPresetWindow"] == "2024-04-04", "preset 行的窗口没填上"
+    # 命令的输入由调用方给：刷新后找回的面板要靠这条印出**那个任务自己的**配置
+    assert got["cliCtlExplicit"] and got["cliCtlNotLeaked"], f"命令没跟着显式输入走：{got}"
+    assert got["cliCtlLive"], "卡片上的命令没按当前勾选框拼"
+    assert got["cliOutFromArgs"], "产物名没跟着显式窗口/参数走"
+    assert got["panelCmd"], "面板没印传进去的那条命令（刷新后会印成另一套配置）"
+    assert got["panelParams"] and got["panelCtl"], f"面板标题缺参数/运气对照：{got}"
 
 
 def test_api_json_never_contains_bare_nan_or_infinity(http, monkeypatch):
@@ -1177,6 +1203,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "取消说清「不进台账」": "已取消的运行<b>不进台账</b>",
         # 2026-10-19 六视角对抗审计验出的「面板说假话」一族
         "刷新后能把在途任务找回来（服务端 GET /api/jobs）": "recoverInflight",
+        "找回的面板印的是**那个任务自己的**配置与命令（不是卡片当前输入）": "cliCmdFor(",
         "失败时显示服务端的真实原因（不再一律「任务丢失」）": "st.status === undefined",
         "终态写回唯一的 live region（读屏才听得到）": "function fin(",
         "排队中如实说「排队中」（不再假装在取链路）": "服务端一次只跑一个任务",

@@ -558,17 +558,19 @@ function shortHash(str) {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-function cliCmd(kind, id) {
+// 命令的**唯一**构造点：输入全部由调用方给。
+// 为什么要把"输入"抽出来（2026-10-21 实测的缺陷）：这个函数原来直接读卡片上的**当前**输入
+// （窗口输入框、族参数下拉、运气对照勾选框、备注框）。那是"按现在这些输入，该跑哪条命令"的
+// 正确写法 —— 但面板上那句「完整命令」描述的是**已经在跑的那个任务**。页面刷新之后
+// （`recoverInflight` 重建面板）卡片输入已回到默认值，于是面板上印出一条**像是这次任务的
+// 命令、其实是另一套配置**的命令。刷新后要复制命令复现它的人会被带到别处，而且不报错。
+function cliCmdFor(kind, id, lo, hi, params, controlRuns, note) {
   // 这条命令必须与"点一下回测"做的事**逐项一致**，否则"界面不是黑箱"就是空话（审计实测
   // 原本三处不一致：没有 --control-runs ⇒ CLI 默认 200，开关关着也照跑；没有 --note；
   // --out 用了 report_*.html 而 /api/reports 只认 web_report_* ⇒ 命令的产物页面上看不见）。
-  const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
-  const ctl = $("ctl").checked ? 200 : 0;
-  const note = ($("note") || {}).value || "";
-  // ⚠️ 顺序要紧：`pr` 必须在 `fp` **之前**声明。上一版把 `const fp = pr ? …` 写在了
-  // `const pr = …` 上面 ⇒ TDZ ReferenceError ⇒ cliCmd 抛错 ⇒ panel() 建不出面板 ⇒
-  // **整条回测流程是死的**（而没有一条静态断言看得出来：语法正确、字符串都在）。
-  const pr = kind === "family" ? JSON.stringify(currentParams(kind, id)).replace(/'/g, "") : "";
+  const ctl = Number(controlRuns) || 0;
+  const nt = note || "";
+  const pr = kind === "family" ? JSON.stringify(params).replace(/'/g, "") : "";
   // 与平台同一个命名空间（`/api/reports` 会列出来 ⇒ 跑完能在「历史报告」里打开）。
   // ⚠️ 文件名必须带上**参数指纹**：同一族、同一窗口、两组不同的网格参数此前会算成同一个
   // 文件名 ⇒ 后一次把前一次的报告**静默覆盖**（而「历史报告」里看着还是同一份）。
@@ -576,9 +578,18 @@ function cliCmd(kind, id) {
   const out = `research/results/web_report_cli_${id}_${lo}_${hi}${fp ? "_" + fp : ""}.html`
     .replace(/[^A-Za-z0-9_./-]/g, "");
   const tail = ` --lo ${lo} --hi ${hi} --control-runs ${ctl} --out ${out}`
-    + (note ? ` --note '${note.replace(/'/g, "")}'` : "");
+    + (nt ? ` --note '${nt.replace(/'/g, "")}'` : "");
   if (kind === "preset") return `python3 -m research.render_report --preset ${id}${tail}`;
   return `python3 -m research.render_report --family ${id} --params '${pr}'${tail}`;
+}
+function cliCmd(kind, id) {
+  // 卡片上的「复制命令」：按**现在**这些输入拼（用户接下来要跑什么）
+  // ⚠️ 顺序要紧：`pr` 必须在 `fp` **之前**声明。上一版把 `const fp = pr ? …` 写在了
+  // `const pr = …` 上面 ⇒ TDZ ReferenceError ⇒ cliCmd 抛错 ⇒ panel() 建不出面板 ⇒
+  // **整条回测流程是死的**（而没有一条静态断言看得出来：语法正确、字符串都在）。
+  return cliCmdFor(kind, id, $("lo-" + kind + "-" + id).value, $("hi-" + kind + "-" + id).value,
+                   currentParams(kind, id), $("ctl").checked ? 200 : 0,
+                   ($("note") || {}).value || "");
 }
 // 族的批量入口：`family_search` 是仓库里唯一会跑**整张网格**的工具，它自己把网格 × 折数
 // 逐项计进 n_trials —— 所以"整套一次跑"与 k 的口径是对齐的。--k-offset 用这个族在平台上
@@ -1279,13 +1290,16 @@ function jumpToHash() {
 
 // ---------------------------------------------------------------- 回测
 
-function panel(jobId, kind, id, lo, hi, params, controlRuns) {
+function panel(jobId, kind, id, lo, hi, params, controlRuns, cmd) {
   const d = document.createElement("div");
   d.id = "job-" + jobId;
+  // `cmd`：这次任务**自己的**命令（刷新后从服务端找回的任务要传它）。
+  // 不传时按卡片当前输入现拼 —— 只有"刚点下回测"那条路径可以这么做（那时两者必然一致）。
+  const cmdText = cmd || cliCmd(kind, id);
   d.innerHTML = `<div class="jhead"><b>${esc(kind)}:${esc(id)}</b>
     <span class="sub">${esc(lo)} .. ${esc(hi)}${params ? " · 参数 " + esc(JSON.stringify(params)) : ""}
      · job ${esc(jobId)}${controlRuns ? " · 运气对照 " + controlRuns + " 次" : ""}</span>
-    <div class="sub">完整命令：<code>${esc(cliCmd(kind, id))}</code></div></div>
+    <div class="sub">完整命令：<code>${esc(cmdText)}</code></div></div>
     <div class="steps jsteps"><div>… 已提交，等待执行</div></div><div class="jbody"></div>`;
   $("result").appendChild(d);
   return d;
@@ -1413,7 +1427,11 @@ async function recoverInflight() {
     const r = await (await fetch("/api/jobs")).json();
     for (const job of (r.jobs || [])) {
       T0[job.id] = Date.now() - (Number(job.seconds) || 0) * 1000;
-      panel(job.id, job.kind, job.strategy, job.lo, job.hi, null, 0);
+      // 参数 / 运气对照 / 备注都从**服务端找回的那份请求**来（不是卡片上的当前输入），
+      // 命令也按那份请求拼 —— 否则刷新后的面板会印出"像是这个任务、其实是另一套配置"的命令。
+      panel(job.id, job.kind, job.strategy, job.lo, job.hi, job.params, job.control_runs,
+            cliCmdFor(job.kind, job.strategy, job.lo, job.hi, job.params,
+                      job.control_runs, job.note));
       const box = $("job-" + job.id);
       if (box) box.querySelector(".jsteps").innerHTML = stepsHtml(job, job.id, null);
       trackInflight(job.id, true);

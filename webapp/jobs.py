@@ -238,6 +238,12 @@ def inflight() -> list[dict]:
         out.append({"id": jid, "status": j["status"], "step": j.get("step"),
                     "kind": req.get("kind"), "strategy": req.get("id"),
                     "lo": req.get("lo"), "hi": req.get("hi"),
+                    # 参数 / 运气对照 / 备注也要给：页面用它重建面板的标题**与"完整命令"**。
+                    # 漏了它们会得到一句**看起来对、其实不是这个任务**的命令 ——
+                    # 面板上的命令原来是拿卡片**当前**的输入现拼的，刷新之后那些输入已经
+                    # 回到默认值了，而任务跑的是提交那一刻的配置（2026-10-21 实测）。
+                    "params": req.get("params"), "control_runs": req.get("control_runs") or 0,
+                    "note": req.get("note") or "",
                     "steps": j.get("steps") or [],
                     "seconds": None if j.get("seconds") is None else float(j["seconds"])})
     return out
