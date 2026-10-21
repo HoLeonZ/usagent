@@ -240,7 +240,10 @@ class Handler(BaseHTTPRequestHandler):
                       ("n_trades", "成交笔数", "int"), ("win_pct", "胜率", "pct"),
                       ("e_r", "E[R]", "num"), ("profit_factor", "盈亏比 PF", "num"),
                       ("maxdd", "最大回撤", "pct"), ("folds_positive", "4 折为正", "int"),
-                      ("alpha_annual", "alpha 年化", "pct"), ("dsr", "DSR", "num")]
+                      ("alpha_annual", "alpha 年化", "pct"), ("dsr", "DSR", "num"),
+                      # 随机入场百分位：**整窗一个数**（判据④要的是逐折 ≥3/4 折在中位以上，
+                      # 那是 family_search 的逐折输出）。只有跑过运气对照的那次才有。
+                      ("ctl_pct", "随机入场百分位", "num")]
             rows = []
             for key, lab, kind in fields:
                 va, vb = a.get(key), b.get(key)
@@ -250,16 +253,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {
                 "a": {"job_id": a.get("job_id"), "strategy_id": a.get("strategy_id"),
                       "window": a.get("window"), "k": ka, "ts": a.get("ts"),
-                      "params": a.get("params"), "derived_from": a.get("derived_from")},
+                      "params": a.get("params"), "derived_from": a.get("derived_from"),
+                      "control_runs": a.get("control_runs"), "ctl_pct": a.get("ctl_pct")},
                 "b": {"job_id": b.get("job_id"), "strategy_id": b.get("strategy_id"),
                       "window": b.get("window"), "k": kb, "ts": b.get("ts"),
-                      "params": b.get("params"), "derived_from": b.get("derived_from")},
+                      "params": b.get("params"), "derived_from": b.get("derived_from"),
+                      "control_runs": b.get("control_runs"), "ctl_pct": b.get("ctl_pct")},
                 "rows": rows,
                 # 两条纪律提醒（这是"对比"视图最该说的话）
                 "k_differs": (ka is not None and kb is not None and ka != kb),
                 "window_differs": (a.get("window") != b.get("window")),
                 "params_differ": (json.dumps(a.get("params"), sort_keys=True)
                                   != json.dumps(b.get("params"), sort_keys=True)),
+                # 运气对照是**勾选框**（默认不跑）⇒ 两次里常常只有一次有那个数。
+                # 不标出来的话，那一行的"差值"是拿一个数减一个空格，读起来像"变好了"。
+                "control_mismatch": (a.get("ctl_pct") is None) != (b.get("ctl_pct") is None),
             })
         if p == "/api/jobs":
             # 在途任务（页面刷新后据此重建面板/徽标/取消入口）。只给这个页面用得上的最小字段。

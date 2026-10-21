@@ -741,6 +741,37 @@ def test_compare_gives_deltas_and_flags_the_discipline_breaks(http, tmp_path, mo
     assert _get(http + "/api/compare/nothex/bbbbbbbbbbbb")[0] == 400
 
 
+def test_compare_flags_a_control_that_only_one_side_ran(http, tmp_path, monkeypatch):
+    """只有一次跑了运气对照时，「随机入场百分位」那一行**没有可比值** —— 必须说出来。
+
+    勾选框默认不跑（每次约 3–26 秒），所以"只有一边有"是常态而不是边界。不标出来的话，
+    那一行是拿一个数减一个空，读起来像"乙变好了"，实则只是乙多付了一次对照的开销。
+    """
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    monkeypatch.setattr(jobs, "RUNS_LEDGER", tmp_path / "web_runs.jsonl")
+    base = {"window": ["2025-01-01", "2025-10-13"], "n_trials_k": 20, "cagr": 0.10,
+            "params": {"a": 1}}
+    rows = [
+        dict(base, ts="2026-10-20T10:00:00", job_id="cccccccccccc", strategy_id="preset:x"),
+        dict(base, ts="2026-10-20T11:00:00", job_id="dddddddddddd", strategy_id="preset:y",
+             control_runs=20, ctl_pct=83.0),
+    ]
+    (tmp_path / "web_runs.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    d = json.loads(_get(http + "/api/compare/cccccccccccc/dddddddddddd")[1])
+    assert d["control_mismatch"] is True
+    assert d["a"]["ctl_pct"] is None and d["b"]["ctl_pct"] == 83.0
+    row = next(r for r in d["rows"] if r["key"] == "ctl_pct")
+    assert row["a"] is None and row["b"] == 83.0 and row["delta"] is None, row
+    # 两边都跑过 ⇒ 不报那条提醒
+    rows[0]["control_runs"], rows[0]["ctl_pct"] = 20, 50.0
+    (tmp_path / "web_runs.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    d2 = json.loads(_get(http + "/api/compare/cccccccccccc/dddddddddddd")[1])
+    assert d2["control_mismatch"] is False
+    assert next(r for r in d2["rows"] if r["key"] == "ctl_pct")["delta"] == 33.0
+
+
 def test_the_ledger_records_the_dynamic_metrics_the_compare_view_needs(offline):
     """对比视图要的动态指标必须**记进台账** —— 否则只能去翻两份报告（或从渲染好的 HTML 里
     反推事实，那是一份事实两处）。"""
@@ -1130,9 +1161,30 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         # 候选生命周期的**第一步**（此前最手工：改名 / n_comparisons+1 / derived_from / 换 VERDICT）
         "复制成新候选（四件易忘的事由平台填好）": "newCandidate(",
         "新候选按钮只出现在 preset 卡上（族没有这几样要改的）": 'e.kind === "preset" ? `<button class="mini" title="拷一份改好的骨架',
+        # 判据④的读数此前只藏在报告里（面板上只有"跑过 200 次"这句计数）
+        "运气对照的读数上面板（判词是在面板上写的）": "随机入场百分位",
+        "只有一边跑了对照就不给可比值": "control_mismatch",
     }
     missing = [k for k, v in need.items() if v not in html]
     assert not missing, f"页面缺这些按钮/导航：{missing}"
+
+
+def test_metric_tooltips_are_plain_text():
+    """19 个格子悬停时的定义必须是**纯文本** —— 它走 `title="${esc(...)}"`。
+
+    为什么值得一条护栏：`esc()` 会把 `<b>` 转成 `&lt;b&gt;`，属性值解析时再解码回字面
+    `<b>` ⇒ 浏览器悬停框里显示的是**这几个字符本身**，不是加粗。我写这条 tooltip 时
+    第一版就带了 `<b>`（同时踩了另一个护栏：METRIC_HELP 属于可见文案，不许有 markdown 的 **）。
+    """
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    i = html.index("const METRIC_HELP = {")
+    block = html[i:html.index("};", i)]
+    # 只认"像标签"的 `<`（`<[a-z]` / `</`）—— 数学写法「|t| < 2」是合法文本（实测第一版
+    # 把这条也扫红了，那是我把判据写宽了）
+    offenders = [l for l in block.splitlines() if re.search(r"</?[a-zA-Z]", l)]
+    assert not offenders, f"tooltip 里有标签：{offenders}"
+    n = len(re.findall(r'^\s{4}"[^"]+":', block, re.M))
+    assert n >= 18, f"只找到 {n} 条 tooltip（应当是全部格子）"
 
 
 def test_source_route_serves_the_strategy_file_and_refuses_traversal(http):
@@ -1330,6 +1382,11 @@ def test_control_arm_can_be_switched_on_and_lands_in_the_report(offline):
     assert any("运气对照" in s["name"] for s in st["steps"]), "步骤里没写这一步"
     led = [json.loads(x) for x in (offline / "web_runs.jsonl").read_text().splitlines()]
     assert led[-1]["control_runs"] == 20, "台账要记下这次有没有跑对照"
+    # 对照的**读数**也要到面板与台账（此前只有报告里有 —— 判词是在面板上写的，
+    # 写的时候手上没有这个数，就只能抄别的候选的）
+    assert st["metrics"]["ctl_runs"] == 20
+    assert 0.0 <= st["metrics"]["ctl_pct"] <= 100.0, "百分位没进 metrics ⇒ 面板上没有判据④的数"
+    assert led[-1]["ctl_pct"] == st["metrics"]["ctl_pct"], "台账与面板各说一套"
 
 
 def test_default_run_says_the_control_was_not_run(offline):

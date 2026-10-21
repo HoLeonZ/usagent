@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 import time
@@ -354,6 +355,12 @@ def _run(job_id: str) -> None:
             prior = kb["platform_runs_before"]
             m = _metrics(res, eq, reg, lo, hi, k)
             m["k_breakdown"] = kb
+            # 运气对照的**读数**也并进 metrics。此前它只进报告摘要，面板上只有"跑过 200 次"
+            # 这句**计数** —— 于是判据④（打赢随机入场）的百分位只能靠打开报告才看得到，
+            # 而判词是人在面板上写的（写的时候手上没有那个数，就只能抄别的候选的）。
+            if ctl_runs:
+                m.update({kk: ctl[kk] for kk in ("ctl_runs", "ctl_failed", "ctl_pct",
+                                                 "ctl_p90", "ctl_max")})
 
             t0 = time.perf_counter()
             # ⚠️ render_html 返回的是**字符串**（不是 (doc, n) 二元组）—— 实测踩过
@@ -408,6 +415,13 @@ def _run(job_id: str) -> None:
                    # （拿统计预算买回已经付过费的结果）。审计实测：盘上 6 份报告、界面 0 个入口。
                    "job_id": job_id, "report": f"web_report_{job_id}.html",
                    "control_runs": ctl_runs,
+                   # 对照的**读数**也要进台账：不然"跑完两条候选怎么比"里，唯一能分开
+                   # 运气与本事的那个数没有可比的一列（只有跑过的次数）。没跑就是 None。
+                   "ctl_pct": (float(ctl["ctl_pct"]) if ctl_runs and
+                               math.isfinite(float(ctl["ctl_pct"])) else None),
+                   # 对照**全部**失败时百分位是 NaN（对照组一笔都没成交）—— 那种情况必须
+                   # 记下来，否则台账上看起来像"跑过对照、只是没记数"。
+                   "ctl_failed": (int(ctl["ctl_failed"]) if ctl_runs else None),
                    # ⚠️ 不能写 job["seconds"]：它由 finally 赋值，而这一行在 finally **之前**
                    # ⇒ 台账 9 条全是 null（记了却永远用不上的字段，审计实测）。就地算。
                    "seconds": round(time.perf_counter() - t_all, 2),

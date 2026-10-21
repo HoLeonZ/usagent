@@ -1063,6 +1063,13 @@ function verdictDraft(st) {
       + `曝光匹配超额 ${pp(m.excess)}，CAGR ${pct(m.cagr)}（同窗等权池 ${pct(m.bench_cagr)}）；`
       + `DSR ${num(m.dsr, 3)}（${kPart}）；4 折为正 ${m.folds_positive ?? "—"}/4，`
       + `胜率 ${pct(m.win_pct, 1)}，盈亏比 ${num(m.profit_factor, 2)}，最大回撤 ${pct(m.maxdd, 1)}。`,
+    // 判据④的数字：勾了运气对照才有。**整窗一个数**，与判据④要的逐折口径不是一回事 ——
+    // 写进判词时必须连口径一起写，否则下一个人会拿这个百分位去声称"过了判据④"。
+    ...(m.ctl_runs ? [`运气对照（同止损止盈、同笔数、同机会集随机入场 ${m.ctl_runs} 次）：`
+      + (m.ctl_pct == null ? "全部失败，没出百分位（对照组一笔都没成交）"
+         : `本窗口收益落在第 ${num(m.ctl_pct, 1)} 百分位`)
+      + `。⚠️ 这是整窗一个数；判据④要的是逐折 ≥3/4 折在随机分布中位以上，`
+      + `那要读 family_search / wfv_search 的逐折输出。`] : []),
     `⛔ 尚未判定 ⇒ 「不得用于实盘、不得当作选股能力的证据」。`
       + `把上面这些「本窗口」的数字写进结论，并说明它与哪些窗口/参数比过。`,
   ].join("\n");
@@ -1110,11 +1117,16 @@ async function doCompare() {
   if (d.error) { $("cmpout").innerHTML = `<div class="sub neg">${esc(d.error)}</div>`; return; }
   const head = (x, tag) => `<b>${tag}</b> ${esc(x.strategy_id)} · ${esc((x.window || []).join(".."))} · k=${x.k ?? "?"}`
     + (x.derived_from ? ` <span class="sub">（派生自 ${esc(x.derived_from)}）</span>` : "")
-    + (x.params ? ` <code class="p">${esc(paramsOf(x.params))}</code>` : "");
+    + (x.params ? ` <code class="p">${esc(paramsOf(x.params))}</code>` : "")
+    + (x.control_runs ? ` <span class="sub">· 运气对照 ${x.control_runs} 次`
+        + (x.ctl_pct == null ? "（全部失败，没出百分位）" : `，第 ${num(x.ctl_pct, 1)} 百分位`) + `</span>` : "");
   const warn = [];
   if (d.k_differs) warn.push(`⚠️ 两次的 <b>k 不同</b>（${d.a.k} vs ${d.b.k}）⇒ <b>DSR 不可直接比</b> —— 它俩的试验次数不同`);
   if (d.window_differs) warn.push(`⚠️ 两次<b>窗口不同</b> ⇒ 除 DSR 外，其它指标也不是同口径比较`);
   if (d.params_differ) warn.push(`⚠️ 两次<b>参数不同</b> —— 这是两个配置，不是同配置重跑`);
+  // 运气对照是勾选框（默认不跑）⇒ 常常只有一次有那个数。不标出来的话，"Δ"会拿一个数
+  // 减一个空格，读起来像"乙变好了"，实则只是乙多付了一次对照的开销。
+  if (d.control_mismatch) warn.push(`⚠️ 只有一次跑了<b>运气对照</b> ⇒「随机入场百分位」这一行<b>没有可比值</b>（那次跑了对照才有这个数）`);
   $("cmpout").innerHTML = `<div class="card"><div class="sub">${head(d.a, "甲：")}</div>
     <div class="sub">${head(d.b, "乙：")}</div>
     ${warn.length ? `<div class="verdict none">${warn.join("<br>")}</div>` : ""}
@@ -1435,6 +1447,11 @@ async function poll(jobId, kind, id) {
     ["超额/敞口", pp(m.excess_per_exposure, 1), cls(m.excess_per_exposure)],
     ["beta", num(m.beta, 2), ""], ["alpha 年化", pct(m.alpha_annual), cls(m.alpha_annual)],
     ["t(alpha)", num(m.t_alpha, 2), ""], ["判据折为正", m.folds_positive + "/4", ""],
+    // 判据④的数字（此前只有"跑过 200 次"这句计数在标题里，读数只能打开报告才看得到）
+    ...(m.ctl_runs ? [["随机入场百分位",
+        (m.ctl_pct == null ? "未出数" : "第 " + num(m.ctl_pct, 1) + " 百分位")
+        + ` <span class="sub">（${m.ctl_runs} 次随机入场`
+        + (m.ctl_failed ? `，${m.ctl_failed} 次没成交` : "") + `；整窗一个数）</span>`, ""]] : []),
     ["最大回撤", pct(m.maxdd, 1), "neg"], ["E[R]", num(m.E_R), cls(m.E_R)],
     ["胜率", pct(m.win_pct, 1), ""], ["盈亏比 PF", num(m.profit_factor, 2), ""],
     ["最好 10% 占总 R", pct(m.top_decile_share, 1), ""], ["DSR", num(m.dsr), ""],
@@ -1458,6 +1475,10 @@ async function poll(jobId, kind, id) {
     "alpha 年化": "扣掉 beta 暴露后的年化超额收益（单位 %）。",
     "t(alpha)": "alpha 的 t 值（HAC 调整）；|t| < 2 时 alpha 与 0 无法区分。",
     "判据折为正": "把窗口切成 4 折，收益为正的折数（x/4）。",
+    "随机入场百分位": "运气对照：同止损止盈、同笔数、在同一机会集里「随机」入场 N 次，本配置的收益"
+      + "落在这些随机策略的第几百分位（越高越不像运气）。⚠️ 这里算的是「整个窗口一个数」；"
+      + "预注册判据④要的是「逐折」≥3/4 折在随机分布中位以上 —— 那是 family_search / wfv_search "
+      + "的逐折输出，不是这个格子。没勾「运气对照」就没有这个数。",
     "最大回撤": "窗口内权益从峰值回落的最大幅度（越低越好）。",
     "E[R]": "每笔的期望收益，以「计划风险（1R）」为单位：+1R = 赚到一个止损宽度。",
     "胜率": "盈利笔数占全部成交笔数的比例。",
