@@ -128,6 +128,7 @@ METADATA_KEYS: frozenset[str] = frozenset({
     "universe", "universe_note",             # 口径声明(引擎不读,见模块 docstring)
     "n_comparisons", "validated", "verdict", "notes",   # §5 纪律与负面证据
     "position_sizing",                       # 派生量,声明值必须与键一致(见 validate)
+    "derived_from",                           # §5 记账：本条候选由哪条策略复制而来
     "earnings_filter_validated",              # 声明"这个过滤器的口径已被人工核对过"
     "trailing_sl_validated",
 })

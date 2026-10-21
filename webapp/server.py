@@ -239,7 +239,7 @@ class Handler(BaseHTTPRequestHandler):
             import io as _io
             rows = jobs.all_runs()
             cols = ["ts", "strategy_id", "window", "params", "n_trades", "excess", "dsr",
-                    "n_trials_k", "prior_runs", "control_runs", "seconds", "note",
+                    "n_trials_k", "prior_runs", "derived_from", "control_runs", "seconds", "note",
                     "job_id", "git_sha", "git_dirty", "kind", "name"]
             buf = _io.StringIO()
             w = _csv.writer(buf)

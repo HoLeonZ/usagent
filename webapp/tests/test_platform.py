@@ -664,6 +664,47 @@ def test_holdout_ledger_state_reports_both_kinds_and_refuses_to_hide_corruption(
     assert "error" in st3 and "LedgerCorrupt" in st3["error"], st3
 
 
+def test_k_accounting_inherits_the_parents_platform_runs(tmp_path, monkeypatch):
+    """派生候选的 k 必须继承**父策略**在本平台的运行次数（§5 记账）。
+
+    这条是**用平台真做一次迭代**时撞出来的：平台按**策略名**各自数运行次数，而"复制一条 preset
+    改个参数"得到的新名字 prior 恒为 0 ⇒ 它的 DSR 分母偏小、判词偏乐观 —— 可它其实是**同一片
+    搜索空间**里的又一次试验。实测：基线 k=20（声明 17 + 平台 3），兄弟记成 17（17+0），
+    正确值是 17+3+1=**21**。机制：定义体里声明 derived_from。
+    """
+    led = tmp_path / "web_runs.jsonl"
+    led.write_text("\n".join(json.dumps({"strategy_id": x}) for x in
+                             ["preset:base"] * 3 + ["preset:cand"]) + "\n", encoding="utf-8")
+    monkeypatch.setattr(jobs, "RUNS_LEDGER", led)
+
+    kb0 = jobs.k_accounting({"n_comparisons": 17}, "preset", "cand", 17)
+    assert kb0 == {"declared_or_grid": 17, "inherited_from_parent": 0, "inherited_parent": None,
+                   "platform_runs_before": 1, "k": 18}, kb0
+
+    kb1 = jobs.k_accounting({"derived_from": "base"}, "preset", "cand", 17)
+    assert kb1["inherited_parent"] == "base" and kb1["inherited_from_parent"] == 3, kb1
+    assert kb1["k"] == 21, f"应为 17+3+1=21，实际 {kb1['k']}"
+
+    # 父策略的**声明值**不并进来 —— 那属于作者要写进本条 n_comparisons 的那一半（这里传 10）
+    assert jobs.k_accounting({"derived_from": "base"}, "preset", "cand", 10)["k"] == 10 + 3 + 1
+
+
+def test_derived_from_is_a_known_metadata_key_and_lands_in_the_ledger(offline):
+    """`derived_from` 必须被契约接受（§2(a)：声明了就得有人读 —— 读它的是 jobs.k_accounting），
+    并且要落进台账（否则事后没人能看出这条候选是从哪来的）。"""
+    from core.preset_contract import METADATA_KEYS, validate
+    assert "derived_from" in METADATA_KEYS
+    base = dict(presets.get_preset("us_reversal_dip_v1"))
+    base["derived_from"] = "us_uptrend_pullback_v1"
+    validate(base)                                   # 未知键会抛；这里不该抛
+
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert st["status"] == "done", st.get("error")
+    rec = [json.loads(x) for x in (offline / "web_runs.jsonl").read_text().splitlines()][-1]
+    assert "derived_from" in rec and rec["derived_from"] is None, rec.get("derived_from")
+
+
 def test_the_inline_script_parses(tmp_path):
     """内联脚本必须能**解析** —— 一个语法错就让整页变成死的（没有 JS，卡片都渲不出来）。
 
@@ -963,6 +1004,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "权威 holdout 台账的状态要并排显示（两本账不能混）": "权威 holdout 台账",
         # 用平台真做一次迭代时撞出来的（界面审计看不见）：兄弟候选的 k 会偏小
         "开发指引里写明兄弟候选的记账规则（k 会偏乐观）": "别拿两次 k 不同的",
+        "开发指引给出机制（derived_from），不只是规矩": "derived_from",
         "台账可视「载入全部」（此前第 31 条只能在 CSV 里看）": "载入全部（共 ${TOTAL} 条）",
         "平台越界运行里登记进权威账本的条数要说出来": "条登记进了这本账",
         "数据覆盖到哪天（拿多新的数据跑的结论）": "数据覆盖到",

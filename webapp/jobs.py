@@ -348,11 +348,12 @@ def _run(job_id: str) -> None:
                 _step(job, f"运气对照：{ctl_runs} 次随机入场（每次约 15–130 毫秒，视笔数）", t0)
 
             # DSR 的 k：声明/网格数 + **平台已跑次数**（§5 迭代记账，页面也显示它）
-            prior = prior_runs(f"{kind}:{ident}")
-            # k = 声明/网格数（上面算过的 declared）+ **平台已跑次数**（§5：手动迭代也是优化）
-            k = declared + prior
+            # k 的组成**只有这一处算法**（面板、台账、测试都读它）
+            kb = k_accounting(P, kind, ident, declared)
+            k = kb["k"]
+            prior = kb["platform_runs_before"]
             m = _metrics(res, eq, reg, lo, hi, k)
-            m["k_breakdown"] = {"declared_or_grid": declared, "platform_runs_before": prior}
+            m["k_breakdown"] = kb
 
             t0 = time.perf_counter()
             # ⚠️ render_html 返回的是**字符串**（不是 (doc, n) 二元组）—— 实测踩过
@@ -392,6 +393,8 @@ def _run(job_id: str) -> None:
                    "params": (req.get("params") or P.get("family_params")
                               or P.get("signal") or None),
                    "n_trials_k": k, "prior_runs": prior,
+                   # 这条候选从哪条策略复制而来（§5：派生候选要把父策略的平台运行次数并进 k）
+                   "derived_from": P.get("derived_from"),
                    "n_trades": m["n_trades"], "excess": m["excess"], "dsr": m["dsr"],
                    # ⚠️ job_id 必须记：报告文件名就是 web_report_<job_id>.html，不记它这条台账
                    # 就是**死胡同** —— 想再看一眼那次结果只能重跑，而重跑会把 k 推高
@@ -491,6 +494,29 @@ def write_trades_csv(path: Path, trades: pd.DataFrame, *, job_id: str, name: str
     except OSError as exc:
         raise _artifact_failure(path, "逐笔 CSV", exc) from None
     return len(trades)
+
+
+def k_accounting(P: dict, kind: str, ident: str, declared: int) -> dict:
+    """DSR 分母 k 的组成 —— **一处算法**：面板、台账、测试都读它。
+
+    k = 声明值/网格数 + **继承自父策略的平台运行次数** + 本条策略在本平台的运行次数。
+
+    为什么要"继承"这一项（2026-10-20 用平台**真做**一次迭代时撞出来的）：平台按**策略名**各自
+    数运行次数，而"复制一条 preset 改个参数"得到的新名字 prior 恒为 0 ⇒ 它的 DSR 分母偏小、
+    判词偏乐观 —— 可它其实是**同一片搜索空间**里的又一次试验。实测：基线 k=20（17+3），
+    兄弟记成 17（17+0），实际应为 17+3+1=21。
+
+    机制：候选在定义体里声明 `derived_from: "<父策略 id>"`（已进 METADATA_KEYS）。
+    **父策略的声明值不继承** —— 那该由作者写进本条候选自己的 n_comparisons（它属于"这片空间
+    试过多少次"）；平台只补**运行期才知道**的那一半：父策略在这台机器上被跑过几次。
+    """
+    parent = P.get("derived_from")
+    inherited = prior_runs(f"preset:{parent}") if parent else 0
+    own = prior_runs(f"{kind}:{ident}")
+    return {"declared_or_grid": int(declared), "inherited_from_parent": inherited,
+            "inherited_parent": (str(parent) if parent else None),
+            "platform_runs_before": own,
+            "k": int(declared) + inherited + own}
 
 
 def _bench_series(reg: pd.DataFrame, eq: pd.DataFrame) -> pd.Series:
