@@ -999,6 +999,60 @@ function renderCompareBar() {
     <span class="sub">（逐项差值 + k/窗口口径提醒 —— 两条候选怎么比就看这里）</span>`;
 }
 
+// 按**这次运行**生成 VERDICT 草稿。
+// 为什么要有它：§5 要求 VERDICT 与参数同时记录，而 VERDICT 里的数字是**手抄**的 —— 抄错一次
+// （抄成别的候选的、或抄成上一轮的），报告与判词就互相矛盾，而报告本身不会报错
+// （我 2026-10-20 亲自踩过：把基线的 VERDICT 一字不差复制给兄弟候选，于是两条报告的
+// 「结论行」必然一样 ⇒ 看起来像"结论没变"，其实是没比过）。
+// 所以草稿只给「数字与口径」，结论仍由人写；并明确写"尚未判定 ⇒ 不得用于实盘"。
+function verdictDraft(st) {
+  const m = st.metrics || {}, k = m.k_breakdown || {};
+  // 窗口在 status 的 request 里（st.window 是比较视图用的字段，不一定有）
+  const req = st.request || {};
+  const w = st.window || [req.lo, req.hi];
+  const num = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—"
+    : (typeof v === "number" ? v.toFixed(d) : String(v));
+  const pct = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v * 100).toFixed(d) + "%";
+  const pp = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v * 100).toFixed(d) + "pp";
+  const kPart = `k=${m.dsr_k}（= 声明 ${k.declared_or_grid || 0}`
+    + (k.inherited_from_parent ? ` + 继承自 ${k.inherited_parent} 的 ${k.inherited_from_parent} 次` : "")
+    + ` + 本条已跑 ${k.platform_runs_before || 0}）`;
+  return [
+    `【候选草稿 · 平台按本次运行生成；结论由人写，不要复制别的候选的那段】`,
+    `窗口 ${w[0]}..${w[1]}：成交 ${m.n_trades} 笔，敞口 ${pct(m.exposure, 1)}；`
+      + `曝光匹配超额 ${pp(m.excess)}，CAGR ${pct(m.cagr)}（同窗等权池 ${pct(m.bench_cagr)}）；`
+      + `DSR ${num(m.dsr, 3)}（${kPart}）；4 折为正 ${m.folds_positive ?? "—"}/4，`
+      + `胜率 ${pct(m.win_pct, 1)}，盈亏比 ${num(m.profit_factor, 2)}，最大回撤 ${pct(m.maxdd, 1)}。`,
+    `⛔ 尚未判定 ⇒ 「不得用于实盘、不得当作选股能力的证据」。`
+      + `把上面这些「本窗口」的数字写进结论，并说明它与哪些窗口/参数比过。`,
+  ].join("\n");
+}
+
+const RUNSTATUS = {};            // job id → 那次运行的完整状态（草稿要引用它的数字）
+
+function copyVerdictDraft(st) {
+  if (!st) { const el = document.getElementById("verdictDraftOut");
+             if (el) el.textContent = "没有这次运行的状态可引用（刷新一下页面再试）"; return; }
+  const text = verdictDraft(st);
+  // ⚠️ **先落字，再试剪贴板**：浏览器可能不给剪贴板权限、或 writeText 既不 resolve 也不 reject
+  //   （实测 headless 里就是这样）—— 那时用户就什么也看不到。所以正文先写进页面，
+  //   剪贴板只是"顺手也复制一份"。
+  const el = document.getElementById("verdictDraftOut");
+  if (el) el.textContent = text;
+  const mark = (ok) => {
+    const e = document.getElementById("verdictDraftOut");
+    if (e) e.textContent = (ok ? "已复制到剪贴板（正文在下面，可直接粘进定义体的 VERDICT）：\n"
+                                : "（剪贴板不可用，请手动选中下面这段）：\n") + text;
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      const pr = navigator.clipboard.writeText(text);
+      if (pr && pr.then) pr.then(() => mark(true), () => mark(false));
+      else mark(true);
+    } catch (exc) { mark(false); }
+  } else mark(false);
+}
+
 function fmtCell(v, unit) {
   if (v === null || v === undefined || (typeof v === "number" && !isFinite(v))) return "—";
   if (unit === "pct") return (v * 100).toFixed(2) + "%";
@@ -1373,6 +1427,7 @@ async function poll(jobId, kind, id) {
     "DSR 的 k": "DSR 的分母 = 该 preset 声明的 n_comparisons（或族网格组数）+ 这次之前在本平台跑过的次数。",
   };
   fin(`完成 · 成交 ${m.n_trades} 笔 · 用时 ${st.seconds}s`, box, st.hint || "");
+  RUNSTATUS[st.id] = st;                       // 草稿要引用「这次运行」的数字
   if (box) {
     box.querySelector(".jbody").innerHTML = `
       <div class="sub">完成，用时 ${esc(st.seconds)}s ·
@@ -1386,7 +1441,14 @@ async function poll(jobId, kind, id) {
         ${st.trades_csv ? `<a class="btnlink mini" href="${esc(st.trades_csv)}" download
           title="逐笔那 21 列的机器可读版（含窗口/成本/价格口径的注释行）；
 pandas.read_csv(..., comment='#') 可直接读">下载逐笔 CSV</a>` : ""}
+        <button class="mini" onclick="copyVerdictDraft(RUNSTATUS['${esc(st.id)}'])"
+          title="按「这次运行的数字」生成一段 VERDICT 草稿（窗口/笔数/超额/CAGR/DSR/k 的构成…），
+粘进候选定义体的 VERDICT 里再补你的判断。之所以要这个：结论里引用的数字一旦抄错
+（抄成别的候选的、或抄成上一轮的），报告与判词就会互相矛盾 —— 这是我 2026-10-20 亲自踩的坑
+（复制了基线的 VERDICT，于是两条报告的结论行一模一样）。">
+          复制 VERDICT 草稿</button>
         <span class="sub">报告自包含（无外链、无脚本）—— 下面就是它；它也进了「历史报告」</span></div>
+      <div class="sub" id="verdictDraftOut" style="white-space:pre-wrap"></div>
       <iframe src="${st.report}" loading="lazy" title="逐笔报告预览（自包含 HTML）"></iframe>`;
   }
   refreshLedger();                       // 只刷台账/历史，**不**重渲目录（否则会吞掉用户输入）

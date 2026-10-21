@@ -34,6 +34,46 @@ from webapp import catalog, jobs, server as srv_mod         # noqa: E402
 
 WIN = ("2024-01-01", "2025-01-01")          # 合成市场的可评估窗
 
+# node 里的最小 DOM 桩（两个 node 测试共用）：够脚本加载并调用纯函数。
+# ⚠️ 没有 node 就跳过（CI 上没有 node）—— 与真数据行为锁在本机没库时跳过是同一种诚实边界。
+NODE_PRELUDE = r"""
+// ---- 最小 DOM 桩：够让脚本加载，并能调用几个纯函数 ----
+const fakeEl = (id) => ({ id,
+  // 日期输入给日期串；族参数下拉（id 形如 p-<族>-<轴>）必须给**合法 JSON**——
+  // currentParams 会对它 JSON.parse（我第一版全给 "2025-01-01" ⇒ JSON.parse 当场抛）
+  value: String(id).startsWith("p-") ? "2" : "2025-01-01", checked: false, innerHTML: "", textContent: "",
+  style: {}, dataset: {}, disabled: false, children: [],
+  classList: { add(){}, remove(){}, contains(){ return false; } },
+  appendChild(){}, remove(){}, insertAdjacentHTML(){}, addEventListener(){},
+  querySelector: () => null, querySelectorAll: () => [], closest: () => null,
+  scrollIntoView(){}, focus(){}, setAttribute(){}, getAttribute: () => null,
+  getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }) });
+globalThis.document = { getElementById: (id) => fakeEl(id), querySelector: () => null,
+  querySelectorAll: () => [], addEventListener(){}, createElement: () => fakeEl("x"),
+  body: fakeEl("body"), documentElement: fakeEl("html"), styleSheets: [] };
+globalThis.window = globalThis;
+globalThis.location = { hash: "", pathname: "/" };
+globalThis.navigator = {}; globalThis.alert = () => {};
+globalThis.setInterval = () => 0; globalThis.clearInterval = () => {}; globalThis.setTimeout = () => 0;
+globalThis.fetch = () => new Promise(() => {});        // 永不 resolve：不触发任何后续流程
+globalThis.sessionStorage = { getItem: () => null, setItem: () => {} };
+// 目录的最小形态：够 card()/cliCmd() 走完。脚本自己会 let CAT，所以要在它的作用域里赋值（见尾部探针）
+globalThis.__CAT = {
+  presets: [{ kind: "preset", id: "us_reversal_dip_v1", name: "n", window: ["2025-01-01", "2025-10-13"],
+    engine_spec: [], strategy: { type: "signal", signal_params: { a: 1 } }, n_comparisons: 1,
+    validated: false, touches_holdout: false, is_cli_default: false, delivered_as: [], verdict: "",
+    grid: {}, grid_size: 0, score_col: "x", score_negated: false, needs_regime: false,
+    control_arm: null, fixed: {}, reference: false, mechanism: "m", default_params: {} }],
+  // 族也要有一条：currentParams(kind="family") 会去 CAT.families 里找它
+  families: [{ kind: "family", id: "xs_flow", name: "xs_flow", mechanism: "m", grid: { a: [1, 2, 3] },
+    grid_size: 3, fixed: {}, reference: false, score_col: "x", score_negated: false, needs_regime: false,
+    control_arm: null, delivered_as: [], validated: false, default_params: { a: 2 }, window: null }],
+  notes: { holdout_presets: 0, multiplicity: "" },
+  holdout: ["2025-10-14", "2026-10-13"], train: ["2024-04-09", "2025-10-13"],
+  data_through: null, stale_defs: [],
+};
+"""
+
 
 # ---------------------------------------------------------------- 目录页
 
@@ -805,43 +845,7 @@ def test_the_inline_script_actually_runs_its_golden_path_functions(tmp_path):
     if not node:
         pytest.skip("这台机器没有 node —— 执行级护栏跑不了（CI 也没有 node）")
 
-    prelude = r"""
-// ---- 最小 DOM 桩：够让脚本加载，并能调用几个纯函数 ----
-const fakeEl = (id) => ({ id,
-  // 日期输入给日期串；族参数下拉（id 形如 p-<族>-<轴>）必须给**合法 JSON**——
-  // currentParams 会对它 JSON.parse（我第一版全给 "2025-01-01" ⇒ JSON.parse 当场抛）
-  value: String(id).startsWith("p-") ? "2" : "2025-01-01", checked: false, innerHTML: "", textContent: "",
-  style: {}, dataset: {}, disabled: false, children: [],
-  classList: { add(){}, remove(){}, contains(){ return false; } },
-  appendChild(){}, remove(){}, insertAdjacentHTML(){}, addEventListener(){},
-  querySelector: () => null, querySelectorAll: () => [], closest: () => null,
-  scrollIntoView(){}, focus(){}, setAttribute(){}, getAttribute: () => null,
-  getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }) });
-globalThis.document = { getElementById: (id) => fakeEl(id), querySelector: () => null,
-  querySelectorAll: () => [], addEventListener(){}, createElement: () => fakeEl("x"),
-  body: fakeEl("body"), documentElement: fakeEl("html"), styleSheets: [] };
-globalThis.window = globalThis;
-globalThis.location = { hash: "", pathname: "/" };
-globalThis.navigator = {}; globalThis.alert = () => {};
-globalThis.setInterval = () => 0; globalThis.clearInterval = () => {}; globalThis.setTimeout = () => 0;
-globalThis.fetch = () => new Promise(() => {});        // 永不 resolve：不触发任何后续流程
-globalThis.sessionStorage = { getItem: () => null, setItem: () => {} };
-// 目录的最小形态：够 card()/cliCmd() 走完。脚本自己会 let CAT，所以要在它的作用域里赋值（见尾部探针）
-globalThis.__CAT = {
-  presets: [{ kind: "preset", id: "us_reversal_dip_v1", name: "n", window: ["2025-01-01", "2025-10-13"],
-    engine_spec: [], strategy: { type: "signal", signal_params: { a: 1 } }, n_comparisons: 1,
-    validated: false, touches_holdout: false, is_cli_default: false, delivered_as: [], verdict: "",
-    grid: {}, grid_size: 0, score_col: "x", score_negated: false, needs_regime: false,
-    control_arm: null, fixed: {}, reference: false, mechanism: "m", default_params: {} }],
-  // 族也要有一条：currentParams(kind="family") 会去 CAT.families 里找它
-  families: [{ kind: "family", id: "xs_flow", name: "xs_flow", mechanism: "m", grid: { a: [1, 2, 3] },
-    grid_size: 3, fixed: {}, reference: false, score_col: "x", score_negated: false, needs_regime: false,
-    control_arm: null, delivered_as: [], validated: false, default_params: { a: 2 }, window: null }],
-  notes: { holdout_presets: 0, multiplicity: "" },
-  holdout: ["2025-10-14", "2026-10-13"], train: ["2024-04-09", "2025-10-13"],
-  data_through: null, stale_defs: [],
-};
-"""
+    prelude = NODE_PRELUDE
     # 尾部探针**在脚本自己的作用域里**跑（所以能拿到它的 let 绑定），调用黄金路径上的纯函数
     probe = r"""
 // ---- 探针：黄金路径上那几个"建面板/建卡片/给命令"的纯函数 ----
@@ -946,6 +950,44 @@ def test_a_deleted_report_gives_a_human_page_not_json(http, tmp_path, monkeypatc
     # 程序读的那条路仍然是 JSON（不要把两种读者混在一起）
     code3, body3 = _get(http + "/api/job/deadbeef0001")
     assert code3 == 404 and body3.decode().lstrip().startswith("{"), body3[:80]
+
+
+def test_the_verdict_draft_cites_this_runs_own_numbers(tmp_path):
+    """VERDICT 草稿必须引用**这次运行**的数字，并写明「尚未判定 ⇒ 不得用于实盘」。
+
+    为什么要有这个功能（2026-10-20 亲自踩的坑）：VERDICT 里的数字是**手抄**的 —— 抄成别的
+    候选的、或抄成上一轮的，报告与判词就互相矛盾，而报告本身不会报错（我把基线的 VERDICT 一字
+    不差复制给兄弟候选，于是两条报告的「结论行」必然一样 ⇒ 看起来像"结论没变"，其实是没比过）。
+    草稿只给数字与口径，结论仍由人写。这里在 node 里**真执行**那段 JS，不用字符串断言糊弄。
+    """
+    import shutil
+    import subprocess
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    js = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器没有 node —— 草稿内容的执行级测试跑不了")
+
+    probe = r"""
+CAT = globalThis.__CAT;
+const st = { id: "abc123abc123", request: { kind: "preset", id: "us_reversal_dip_v1",
+           lo: "2025-01-01", hi: "2025-10-13" },
+  metrics: { n_trades: 35, exposure: 0.222, excess: -0.0597, cagr: 0.1078, bench_cagr: 0.3294,
+             dsr: 0.019, dsr_k: 1614, win_pct: 0.316, e_r: -0.12, profit_factor: 1.35,
+             maxdd: -0.145, folds_positive: 3,
+             k_breakdown: { declared_or_grid: 1614, inherited_from_parent: 0,
+                            inherited_parent: null, platform_runs_before: 0 } } };
+console.log(JSON.stringify({ draft: verdictDraft(st) }));
+"""
+    f = tmp_path / "draft.js"
+    f.write_text(NODE_PRELUDE + js + probe, encoding="utf-8")
+    r = subprocess.run([node, str(f)], capture_output=True, text=True)
+    assert r.returncode == 0, f"node 执行失败：{r.stderr[-500:]}"
+    draft = json.loads([l for l in r.stdout.splitlines() if l.startswith("{")][-1])["draft"]
+    assert "35 笔" in draft and "-5.97pp" in draft and "10.78%" in draft, draft[:300]
+    assert "k=1614" in draft and "声明 1614" in draft, draft[:300]
+    assert "尚未判定" in draft and "不得用于实盘" in draft, draft[:300]
+    assert "不要复制别的候选" in draft, draft[:300]
 
 
 def test_server_binds_localhost_only():
@@ -1058,6 +1100,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "跑完两条怎么比：对比条（选甲/选乙）": 'id="cmpbar"',
         "对比表：逐项差值": "function fmtCell(",
         "对比时提醒 k 不可比（上一轮的教训）": "DSR 不可直接比",
+        "按这次运行生成 VERDICT 草稿（避免抄错别的候选的数字）": "copyVerdictDraft(",
         "台账可视「载入全部」（此前第 31 条只能在 CSV 里看）": "载入全部（共 ${TOTAL} 条）",
         "平台越界运行里登记进权威账本的条数要说出来": "条登记进了这本账",
         "数据覆盖到哪天（拿多新的数据跑的结论）": "数据覆盖到",
