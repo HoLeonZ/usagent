@@ -68,7 +68,11 @@ globalThis.location = { hash: "", pathname: "/" };
 globalThis.navigator = {}; globalThis.alert = () => {};
 globalThis.setInterval = () => 0; globalThis.clearInterval = () => {}; globalThis.setTimeout = () => 0;
 globalThis.fetch = () => new Promise(() => {});        // 永不 resolve：不触发任何后续流程
-globalThis.sessionStorage = { getItem: () => null, setItem: () => {} };
+globalThis.sessionStorage = (() => {      // 按 id 缓存**要有地方放**：存起来才能断言写进去了
+  const m = new Map();
+  return {getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)),
+          removeItem: (k) => m.delete(k), clear: () => m.clear()};
+})();
 // 目录的最小形态：够 card()/cliCmd() 走完。脚本自己会 let CAT，所以要在它的作用域里赋值（见尾部探针）
 globalThis.__CAT = {
   presets: [{ kind: "preset", id: "us_reversal_dip_v1", name: "n", window: ["2025-01-01", "2025-10-13"],
@@ -426,6 +430,10 @@ def test_a_window_with_no_signal_records_zero_trades_and_a_zero_excess(offline):
         assert bad not in raw, f"0 笔运行的接口 JSON 里有裸 {bad} —— 面板会整块渲染不出来"
     led = [json.loads(x) for x in (offline / "web_runs.jsonl").read_text().splitlines()]
     assert led[-1]["n_trades"] == 0 and led[-1]["excess"] is not None
+    # 池子范围也要落台账：页面存的是 sessionStorage（本次会话），**新标签页**会丢掉它 ——
+    # 而页面上那句「（池子可评估范围：跑过任意一条后显示）」这时是假话（其实跑过很多次）。
+    pr_ = led[-1]["pool_range"]
+    assert isinstance(pr_, list) and len(pr_) == 2 and all(pr_), pr_
 
 
 def test_runs_route_publishes_the_current_code_version(http, tmp_path, monkeypatch):
@@ -1045,7 +1053,14 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
   zeroDraftWarns: zeroDraft.includes("一笔都没成交") && zeroDraft.includes("别把它们写进结论当证据"),
   // 「−0.00」不是数字（实测：0 笔成交的窗口里超额算出 −5.1e-15，印成 −0.00pp）
   negZero: [pp(-5.10702591327572e-15), pct(-1e-16), num(-1e-9), pp(-0.000123)],
-  keepSmall: [pp(-0.0123), pct(-0.021)] }));
+  keepSmall: [pp(-0.0123), pct(-0.021)],
+  // 池子可评估范围：新标签页（sessionStorage 空的）也要能从台账里取回来
+  poolSeeded: seedPoolFromRuns([{ pool_range: null },
+                                { pool_range: ["2024-01-11", "2026-10-16"] }]),
+  poolValue: (POOL || []).join(".."),
+  poolNotOverwritten: seedPoolFromRuns([{ pool_range: ["1999-01-01", "1999-12-31"] }]),
+  poolValueKept: (POOL || []).join(".."),
+  poolStored: sessionStorage.getItem("pool") }));
 """
     f = tmp_path / "run_inline.js"
     f.write_text(prelude + js + probe, encoding="utf-8")
@@ -1080,6 +1095,10 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
     # 显示上的 0 不带负号；但真的不为 0 的小数不能被抹掉
     assert got["negZero"] == ["0.00pp", "0.00%", "0.000", "-0.01pp"], f"负零没清掉：{got['negZero']}"
     assert got["keepSmall"] == ["-1.23pp", "-2.10%"], f"把不该抹的抹了：{got['keepSmall']}"
+    # 池子范围能从台账里取回来（否则新标签页上「跑过任意一条后显示」是假话：其实跑过很多次）
+    assert got["poolSeeded"] is True and got["poolValue"] == "2024-01-11..2026-10-16", got["poolValue"]
+    assert got["poolNotOverwritten"] is False and got["poolValueKept"] == "2024-01-11..2026-10-16"
+    assert got["poolStored"] == '["2024-01-11","2026-10-16"]', got["poolStored"]
 
 
 def test_api_json_never_contains_bare_nan_or_infinity(http, monkeypatch):
@@ -1346,6 +1365,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         # 2026-10-21 实测：一段 0 笔成交的真数据窗口，面板给出一排 0 且按符号涂色
         "0 笔成交要单独说清（0 是「没参与」不是「不赚不亏」）": "function zeroTradesNote(",
         "显示上的 0 不带负号（−0.00pp 是浮点残差不是数字）": "const _z0 = (x, d) =>",
+        "池子可评估范围在新标签页也能显示（从台账取回，否则那句话是假话）": "seedPoolFromRuns(",
     }
     missing = [k for k, v in need.items() if v not in html]
     assert not missing, f"页面缺这些按钮/导航：{missing}"

@@ -555,6 +555,24 @@ function applyPoolHint() {
                           : "（池子可评估范围：跑过任意一条后显示）";
   });
 }
+// 范围**只**由"跑过一次"得到（服务端在窗口体检里算的）。它存在 sessionStorage 里，
+// 所以**新开一个标签页**就没了 —— 而页面上那句「跑过任意一条后显示」这时是假话
+// （台账里明明跑过很多次）。范围是**池子**的属性（所有 preset/族共用同一套 DEFAULT_SPEC），
+// 所以从台账里任意一条带这个字段的旧运行取回来都成立。取不到才留占位文案。
+function seedPoolFromRuns(runs) {
+  if (POOL) return false;
+  const rows = runs || [];
+  for (let i = 0; i < rows.length; i++) {
+    const w = rows[i].pool_range;
+    if (Array.isArray(w) && w.length === 2 && w[0] && w[1]) {
+      POOL = [w[0], w[1]];
+      applyPoolHint();
+      try { sessionStorage.setItem("pool", JSON.stringify(POOL)); } catch (e) { /* 隐私模式等 */ }
+      return true;
+    }
+  }
+  return false;
+}
 function currentParams(kind, id) {
   if (kind !== "family") return null;
   const e = CAT.families.find(x => x.id === id); const out = {};
@@ -841,6 +859,7 @@ async function refreshReadouts() {
   BYSTRAT = rr.by_strategy || {}; HOULDOUT_TOUCHES = rr.holdout_touches || 0;
   CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
   LAST = rr.last_by_strategy || {};
+  seedPoolFromRuns(RUNS);                      // 新标签页也能显示池子范围（见该函数的说明）
   const rp = await (await fetch("/api/reports")).json();
   REPORTS = rp.reports || []; REPORTS_TOTAL = rp.total;
   document.querySelectorAll("#content .card").forEach(c => {
@@ -864,6 +883,7 @@ async function loadAllRuns() {
     CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
     LAST = rr.last_by_strategy || {}; SKIPPED_LINES = rr.skipped_lines || 0;
     HLEDGER = rr.holdout_ledger || null;
+    seedPoolFromRuns(RUNS);
     renderLedger();
   } catch (exc) {
     document.getElementById("lbar").insertAdjacentHTML("beforeend",
