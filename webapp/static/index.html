@@ -310,11 +310,17 @@ table.ledger td{white-space:nowrap}
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const pct = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v*100).toFixed(d) + "%";
-const num = (v, d=3) => (v === null || v === undefined || !isFinite(v)) ? "—" : v.toFixed(d);
+const pct = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v*100, d).toFixed(d) + "%";
+const num = (v, d=3) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v, d).toFixed(d);
+// ⚠️ 「−0.00」不是数字，是显示 bug：浮点残差经 toFixed 之后带上负号，读起来像"略微为负"。
+// 实测（2026-10-21）：一段 0 笔成交的真数据窗口，曝光匹配超额算出来是 −5.1e-15 ——
+// 而"零敞口 ⇒ 超额精确为 0"是本仓库的不变量，面板上却印成 **−0.00pp**。
+// 所以凡是在显示精度上就是 0 的，一律不带负号：|x| 小于半个显示单位，本来也印不出非零。
+// 这不改任何计算口径，只改"-0"这个符号。
+const _z0 = (x, d) => (Math.abs(x) < 0.5 * Math.pow(10, -d) ? 0 : x);
 // 超额类数字的单位是**百分点**（两条年化收益率之差），不是百分比。报告与 CLI 一直印 "pp"，
 // 平台此前把它印成 "%" —— 同一个量两处两种单位（审计实测：台账 −19.59% 与报告 −43.93pp 并排）。
-const pp = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v*100).toFixed(d) + "pp";
+const pp = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v*100, d).toFixed(d) + "pp";
 // 三个窗口预设。HOLDOUT 与 TRAIN **必须**从目录接口取（那边才是出处：holdout 台账的常量、
 // WFV 的搜索期）—— 在本文件里再抄一份就会各自漂移，而 HOLDOUT 还担着"与 holdout 重叠"的
 // 警示判据（抄错就会错报）。FULL 是**视图默认值**（训练窗起点 .. 数据末端），不是台账事实。
@@ -1136,9 +1142,9 @@ function verdictDraft(st) {
   const req = st.request || {};
   const w = st.window || [req.lo, req.hi];
   const num = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—"
-    : (typeof v === "number" ? v.toFixed(d) : String(v));
-  const pct = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v * 100).toFixed(d) + "%";
-  const pp = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v * 100).toFixed(d) + "pp";
+    : (typeof v === "number" ? _z0(v, d).toFixed(d) : String(v));
+  const pct = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v * 100, d).toFixed(d) + "%";
+  const pp = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v * 100, d).toFixed(d) + "pp";
   const kPart = `k=${m.dsr_k}（= 声明 ${k.declared_or_grid || 0}`
     + (k.inherited_from_parent ? ` + 继承自 ${k.inherited_parent} 的 ${k.inherited_from_parent} 次` : "")
     + ` + 本条已跑 ${k.platform_runs_before || 0}）`;
@@ -1157,6 +1163,11 @@ function verdictDraft(st) {
       + `那要读 family_search / wfv_search 的逐折输出。`] : []),
     `⛔ 尚未判定 ⇒ 「不得用于实盘、不得当作选股能力的证据」。`
       + `把上面这些「本窗口」的数字写进结论，并说明它与哪些窗口/参数比过。`,
+    // 一笔都没成交时，上面的 0 全部是"零敞口"的算术结果，不构成任何策略证据 ——
+    // 草稿是直接粘进 VERDICT 的，所以这句话必须写在草稿里（写在页面上没用）。
+    ...(Number(m.n_trades) === 0 ? [`⚠️ 这次一笔都没成交：敞口 0 ⇒ 曝光匹配超额按定义精确为 0，`
+      + `「0 笔 / 0 超额 / 0 回撤」都不是策略表现，别把它们写进结论当证据。`
+      + `要判这条策略，得换一段它真的会开火的窗口。`] : []),
   ].join("\n");
 }
 
@@ -1185,6 +1196,17 @@ function copyVerdictDraft(st) {
   } else mark(false);
 }
 
+function zeroTradesNote(m) {
+  // 「一笔都没成交」是一个**必须单独说**的结果（2026-10-21 在合成市场上实测的一段窗口：
+  // 信号 0 个 ⇒ 成交 0 笔）：此时敞口 0、收益 0、超额按定义**精确为 0**，于是面板会给出
+  // 「+0.00pp」并配**绿色**（着色只看符号）—— 读起来像"与池子打平"，实际是"根本没参与"。
+  // 所以这一档：① 0 不涂色（见上面 cells 里的 zc()），② 在数字上面加这一句。
+  if (Number(m.n_trades) !== 0) return "";
+  return `<div class="verdict none">这段窗口里<b>一笔都没成交</b> —— 下面的 0 不是
+    「不赚不亏」而是「没参与」：平均敞口 0 ⇒ 曝光匹配超额按定义<b>精确为 0</b>（两条腿完全相同），
+    所以它<b>不能</b>当作「与池子打平」的证据；同窗等权池那个 CAGR 也可能是小窗口上的年化放大。
+    换一段窗口，或换一个这条策略真的会开火的窗口再看。</div>`;
+}
 function fmtCell(v, unit) {
   if (v === null || v === undefined || (typeof v === "number" && !isFinite(v))) return "—";
   if (unit === "pct") return (v * 100).toFixed(2) + "%";
@@ -1529,22 +1551,28 @@ async function poll(jobId, kind, id) {
     return;
   }
   const m = st.metrics, k = m.k_breakdown, cls = (v) => v >= 0 ? "pos" : "neg";
-  const cells = [["成交笔数", m.n_trades, ""], ["自身收益", pct(m.own_ret), cls(m.own_ret)],
-    ["CAGR", pct(m.cagr), cls(m.cagr)], ["平均敞口", pct(m.exposure, 1), ""],
+  // 「一笔都没成交」是一个**必须单独说**的结果（2026-10-21 实测 fixture 上的一段窗口：
+  // 信号 0 个 ⇒ 0 笔）：此时敞口 0、收益 0、超额按定义**精确为 0**，于是面板会给出
+  // 「+0.00pp」并配**绿色**（cls 只看符号）—— 读起来像"与池子打平"，实际是"根本没参与"。
+  // 所以这一档里：① 0 不涂色（中性），② 在数字上面加一句说清它是什么。
+  const noTrades = Number(m.n_trades) === 0;
+  const zc = (c) => (noTrades ? "" : c);
+  const cells = [["成交笔数", m.n_trades, ""], ["自身收益", pct(m.own_ret), zc(cls(m.own_ret))],
+    ["CAGR", pct(m.cagr), zc(cls(m.cagr))], ["平均敞口", pct(m.exposure, 1), ""],
     ["同窗等权池 CAGR", pct(m.bench_cagr), cls(m.bench_cagr)],
     ["曝光匹配超额", pp(m.excess) + (m.excess_clamped
         ? ` <span class="sub" title="这个窗口有一部分早于池子指数的覆盖范围（池子要预热）——
 口径只比较了两者共同覆盖的那些交易日；被裁掉的区间不参与超额">（只比了一部分）</span>` : ""),
-      cls(m.excess)],
-    ["超额/敞口", pp(m.excess_per_exposure, 1), cls(m.excess_per_exposure)],
-    ["beta", num(m.beta, 2), ""], ["alpha 年化", pct(m.alpha_annual), cls(m.alpha_annual)],
+      zc(cls(m.excess))],
+    ["超额/敞口", pp(m.excess_per_exposure, 1), zc(cls(m.excess_per_exposure))],
+    ["beta", num(m.beta, 2), ""], ["alpha 年化", pct(m.alpha_annual), zc(cls(m.alpha_annual))],
     ["t(alpha)", num(m.t_alpha, 2), ""], ["判据折为正", m.folds_positive + "/4", ""],
     // 判据④的数字（此前只有"跑过 200 次"这句计数在标题里，读数只能打开报告才看得到）
     ...(m.ctl_runs ? [["随机入场百分位",
         (m.ctl_pct == null ? "未出数" : "第 " + num(m.ctl_pct, 1) + " 百分位")
         + ` <span class="sub">（${m.ctl_runs} 次随机入场`
         + (m.ctl_failed ? `，${m.ctl_failed} 次没成交` : "") + `；整窗一个数）</span>`, ""]] : []),
-    ["最大回撤", pct(m.maxdd, 1), "neg"], ["E[R]", num(m.E_R), cls(m.E_R)],
+    ["最大回撤", pct(m.maxdd, 1), zc("neg")], ["E[R]", num(m.E_R), zc(cls(m.E_R))],
     ["胜率", pct(m.win_pct, 1), ""], ["盈亏比 PF", num(m.profit_factor, 2), ""],
     ["最好 10% 占总 R", pct(m.top_decile_share, 1), ""], ["DSR", num(m.dsr), ""],
     ["DSR 的 k", `${m.dsr_k} <span class="sub">(声明 ${k.declared_or_grid || 0}`
@@ -1587,6 +1615,7 @@ async function poll(jobId, kind, id) {
         报告自检 ${st.selfcheck && st.selfcheck.length
           ? "<b class='neg'>失败：" + esc(st.selfcheck.join("；")) + "</b>" : "通过"}
         ${st.hint ? " · " + esc(st.hint) : ""}</div>
+      ${zeroTradesNote(m)}
       <div class="metrics">${cells.map(([lab, val, c]) =>
         `<div title="${esc(METRIC_HELP[lab] || "")}"><span>${lab}</span><b class="${c}">${val}</b></div>`).join("")}</div>
       <div class="bar"><a class="btnlink" href="${st.report}" target="_blank">在新窗口打开逐笔报告</a>

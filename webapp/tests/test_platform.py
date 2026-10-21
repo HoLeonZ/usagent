@@ -389,6 +389,45 @@ def test_inflight_route_lists_a_queued_job_and_the_page_can_recover_it(offline, 
     assert jid not in {j["id"] for j in d2["jobs"]}, "已结束的任务仍被列为在途"
 
 
+def test_a_window_with_no_signal_records_zero_trades_and_a_zero_excess(offline):
+    """一段窗口里**一笔都没成交**时，跑得完、记得下，而且各方说的 0 是同一个 0。
+
+    为什么值得钉住（2026-10-21 实测）：这种运行会给出一整排 0 —— 收益 0、回撤 0、
+    **曝光匹配超额精确为 0**（零敞口时两条腿完全相同，这是仓库的不变量）。在面板上
+    「+0.00pp」配上按符号着色的绿色，读起来像"与池子打平"。所以：数字照算（不许为了好看
+    去改口径），但要能一眼看出这是"没参与"。这条测试钉的是**数字本身**（页面那半句由
+    node 护栏钉：zeroTradesNote / verdictDraft）。
+    """
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": "2024-01-01", "hi": "2024-02-01"})["id"])
+    assert st["status"] == "done", st.get("error")
+    m = st["metrics"]
+    assert m["n_trades"] == 0
+    assert m["exposure"] == 0.0
+    assert abs(m["excess"]) < 1e-9, f"零敞口 ⇒ 超额必须精确为 0，实际 {m['excess']}"
+    assert m["excess_per_exposure"] is None, "0/0 必须是 None，不能是 NaN 或 0"
+    # 步骤里要看得见"信号 0 个 / 成交 0 笔"（这是唯一能区分"跑完了"与"什么都没发生"的线索）
+    names = " ".join(s["name"] for s in st["steps"])
+    assert "0 个候选" in names and "0 笔" in names, names
+    # 接口 JSON 不许有裸 NaN（JS 的 JSON.parse 会拒 —— 那会让整个面板渲染不出来）。
+    # 这条专门用"一堆指标是 NaN 的 0 笔运行"再打一次：normal 运行测不出这个边界。
+    import urllib.request
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), srv_mod.Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/api/job/{st['id']}",
+                                    timeout=10) as r:
+            raw = r.read().decode("utf-8")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    for bad in ("NaN", "Infinity", "-Infinity"):
+        assert bad not in raw, f"0 笔运行的接口 JSON 里有裸 {bad} —— 面板会整块渲染不出来"
+    led = [json.loads(x) for x in (offline / "web_runs.jsonl").read_text().splitlines()]
+    assert led[-1]["n_trades"] == 0 and led[-1]["excess"] is not None
+
+
 def test_runs_route_publishes_the_current_code_version(http, tmp_path, monkeypatch):
     monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
     monkeypatch.setattr(jobs, "RUNS_LEDGER", tmp_path / "web_runs.jsonl")
@@ -932,6 +971,13 @@ const presetWindow = document.getElementById("lo-preset-us_reversal_dip_v1").val
 const cmdExplicit = cliCmdFor("family", "xs_flow", "2024-05-05", "2024-11-11", { a: 3 }, 200, "");
 const cmdLive = cliCmd("family", "xs_flow");      // 按卡片当前输入拼（桩里 ctl 未勾、a=2）
 const pnl = panel("job9", "family", "xs_flow", "2024-05-05", "2024-11-11", { a: 3 }, 200, cmdExplicit);
+// ---- 0 笔成交：面板要单独说清"0 不是不赚不亏而是没参与"，草稿也要带上这句 ----
+const zeroNote = zeroTradesNote({ n_trades: 0, excess: 2.2e-14, exposure: 0 });
+const someNote = zeroTradesNote({ n_trades: 9, excess: 0.01 });
+const zeroDraft = verdictDraft({ metrics: { n_trades: 0, cagr: 0, own_ret: 0, exposure: 0,
+  excess: 2.2e-14, excess_clamped: false, dsr_k: 1614, k_breakdown: {}, bench_cagr: 2.0,
+  folds_positive: 0, win_pct: null, profit_factor: null, maxdd: 0, dsr: null, own_ret_: 0 },
+  window: ["2024-01-01", "2024-02-01"], request: {} });
 const out = {
   cli_preset: cliCmd("preset", "us_reversal_dip_v1"),
   cli_family: cliCmd("family", "xs_flow"),
@@ -963,7 +1009,13 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
   // 面板要印**传进去的**那条命令（刷新后找回的任务走这条），而不是现拼一条
   panelCmd: pnl.innerHTML.includes("web_report_cli_xs_flow_2024-05-05_2024-11-11_p"),
   panelParams: pnl.innerHTML.includes("&quot;a&quot;:3"),
-  panelCtl: pnl.innerHTML.includes("运气对照 200 次") }));
+  panelCtl: pnl.innerHTML.includes("运气对照 200 次"),
+  zeroNoteShown: zeroNote.includes("一笔都没成交") && zeroNote.includes("没参与"),
+  zeroNoteSilentForReal: someNote === "",
+  zeroDraftWarns: zeroDraft.includes("一笔都没成交") && zeroDraft.includes("别把它们写进结论当证据"),
+  // 「−0.00」不是数字（实测：0 笔成交的窗口里超额算出 −5.1e-15，印成 −0.00pp）
+  negZero: [pp(-5.10702591327572e-15), pct(-1e-16), num(-1e-9), pp(-0.000123)],
+  keepSmall: [pp(-0.0123), pct(-0.021)] }));
 """
     f = tmp_path / "run_inline.js"
     f.write_text(prelude + js + probe, encoding="utf-8")
@@ -991,6 +1043,13 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
     assert got["cliOutFromArgs"], "产物名没跟着显式窗口/参数走"
     assert got["panelCmd"], "面板没印传进去的那条命令（刷新后会印成另一套配置）"
     assert got["panelParams"] and got["panelCtl"], f"面板标题缺参数/运气对照：{got}"
+    # 0 笔成交：0 与"没参与"必须被说成两件事（面板 + 判词草稿两处）
+    assert got["zeroNoteShown"], "0 笔时没在面板上说清「0 是没参与，不是不赚不亏」"
+    assert got["zeroNoteSilentForReal"], "有成交时不该出现那条说明"
+    assert got["zeroDraftWarns"], "0 笔时判词草稿没带警告（草稿是要直接粘进 VERDICT 的）"
+    # 显示上的 0 不带负号；但真的不为 0 的小数不能被抹掉
+    assert got["negZero"] == ["0.00pp", "0.00%", "0.000", "-0.01pp"], f"负零没清掉：{got['negZero']}"
+    assert got["keepSmall"] == ["-1.23pp", "-2.10%"], f"把不该抹的抹了：{got['keepSmall']}"
 
 
 def test_api_json_never_contains_bare_nan_or_infinity(http, monkeypatch):
@@ -1252,6 +1311,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         # 但没有任何一处说**四条判据是什么**、以及这一页能答到哪一条
         "交付前置条件（四条判据是什么、这一页能答到哪）": "交付一条候选前（四条判据）",
         "明说哪两条口径本页不出（别拿面板的数去声称过了）": "与 ④ 的逐折口径本页不出",
+        # 2026-10-21 实测：一段 0 笔成交的真数据窗口，面板给出一排 0 且按符号涂色
+        "0 笔成交要单独说清（0 是「没参与」不是「不赚不亏」）": "function zeroTradesNote(",
+        "显示上的 0 不带负号（−0.00pp 是浮点残差不是数字）": "const _z0 = (x, d) =>",
     }
     missing = [k for k, v in need.items() if v not in html]
     assert not missing, f"页面缺这些按钮/导航：{missing}"
