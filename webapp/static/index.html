@@ -232,14 +232,22 @@ table.ledger td{white-space:nowrap}
         <b>动手的那一步不用手抄</b>：preset 卡上的「复制成新候选」会把骨架生成好（NAME 与文件名
         改成 <code>&lt;id&gt;_cand</code>、<code>n_comparisons</code> 已 +1、已声明 <code>derived_from</code>、
         VERDICT 已换成「尚未判定」），并给出建议落盘路径。它<b>只生成、不写盘</b> —— 存与改由你决定。</dd>
-      <dt>交付一条候选前（四条判据）</dt><dd>四条<b>同时</b>满足才算战胜（定义与现状出处：
-        <code>research/preset_defs/</code> 里那条 preset 的 docstring 顶部、<code>research/family_search.py</code> 的裁决输出）：
-        ① 池化测试窗平均 CAGR &gt; 基准线　② 连续净值 CAGR &gt; 基准线
-        ③ 4 折里 ≥3 折为正　④ 4 折里 ≥3 折打赢「同止损止盈、同笔数、同机会集」的随机入场对照（中位以上）。<br>
+      <dt>交付一条候选前（四条判据）</dt><dd>四条<b>同时</b>满足才算战胜。预注册出处是
+        <code>research/family_search.py</code> 的<b>模块 docstring</b>（它写着"写在这里意味着跑之前就定死"）；
+        协议与 <code>research/wfv_search.py</code> 完全一致，网格 / 折窗 / holdout 的预注册声明在后者。
+        <code>preset_defs/</code> 里那条 preset 的 docstring 是<b>复述</b>，别把它当出处。
+        四条：① 池化测试窗平均 CAGR &gt; 基准线　② 连续净值 CAGR &gt; 基准线
+        ③ 4 折里 ≥3 折为正　④ 4 折里 ≥3 折打赢「同止损止盈、同笔数、同机会集」的随机入场对照（中位以上）。
+        这里的<b>基准线</b>不是池子，是 <code>us_uptrend_pullback_v1</code> 的 <b>WFV 配置</b>
+        （由 <code>research/family_search.py</code> 用同一条代码路径重算；判据① 用的是与族<b>同一机会集</b>的那条线，
+        不是带 v21 流动性上界的历史口径）。<br>
+        <b>判给谁看</b>：族（候选机制）走 <code>python3 -m research.family_search --run</code>；
+        WFV 网格选出来的、以及它的<b>参数兄弟</b>走 <code>python3 -m research.wfv_search --run</code>
+        （<code>wfv_noearn</code> / <code>wfv_postearn</code> 的 docstring 写着"复现：python -m research.wfv_search --run"）。<br>
         <b>这一页能答到哪</b>：② = 结果面板的「CAGR」对「同窗等权池 CAGR」；③ = 「判据折为正」；
         ④ 勾了「运气对照」后有一格，但那是<b>整窗一个数</b>，不是逐折 ——
-        <b>① 的池化口径（4 折 CAGR 的均值）与 ④ 的逐折口径本页不出</b>。判定以
-        <code>research.family_search</code> / <code>research.wfv_search</code> 的裁决为准；别拿面板的数去声称过了 ①/④。<br>
+        <b>① 的池化口径（4 折 CAGR 的均值）与 ④ 的逐折口径本页不出，而且本页跑的是单窗、不是 WFV</b>。
+        所以上面那些数<b>只能当线索</b>：判定以那两条命令的裁决为准，别拿面板的数去声称过了 ①/④。<br>
         另外三件交付前置：<code>NAME</code> 与文件名一致（注册表校验）、<code>n_comparisons</code> 是这一条
         <b>声明的试验次数</b>（派生候选要在父策略那个数上<b>加上本轮新做的试验</b>；
         <code>preset_defs/</code> 里 <code>wfv_noearn</code> / <code>wfv_postearn</code> 的 docstring 就是累加的先例）、
