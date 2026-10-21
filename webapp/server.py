@@ -340,6 +340,19 @@ class Handler(BaseHTTPRequestHandler):
             text = f.read_text(encoding="utf-8")
             return self._json(200, {"path": f"research/{sub}/{ident}.py",
                                     "bytes": len(text), "text": text[:200_000]})
+        m = re.fullmatch(r"/api/candidate_skeleton/([A-Za-z0-9_]{1,64})", p)
+        if m:
+            # "从这里开始做一条候选" 的骨架（catalog.candidate_skeleton 里有为什么）。
+            # 只给 preset：族没有 NAME / n_comparisons / VERDICT 这几样要改的东西。
+            ident = m.group(1)
+            if catalog.find("preset", ident) is None:
+                return self._json(404, {"error": f"未知 preset {ident!r}"})
+            sk = catalog.candidate_skeleton(ident)
+            if sk is None:
+                return self._json(404, {"error": f"{ident} 没有可复制的定义体文件"})
+            return self._json(200, {"path": sk["path"], "text": sk["text"],
+                                    "parent": sk["parent"],
+                                    "renamed_because": sk["renamed_because"]})
         m = re.fullmatch(r"/api/job/([0-9a-f]{6,32})", p)
         if m:
             st = jobs.status(m.group(1))

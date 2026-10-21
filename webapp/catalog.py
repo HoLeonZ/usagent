@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -249,6 +250,67 @@ def holdout_ledger_state(runs: list[dict] | None = None) -> dict:
         out["platform_crossers"] = crossers
         out["platform_registered"] = registered
     return out
+
+
+_DEFS = ROOT / "research" / "preset_defs"
+
+
+def candidate_skeleton(preset_id: str) -> dict | None:
+    """给"从这里开始做一条候选"生成一份**可直接落盘**的骨架（复制自哪条 preset）。
+
+    为什么需要它：候选生命周期的**第一步最手工** —— 拷一份定义体、改 NAME（注册表会校验
+    "NAME 必须与文件名一致"，我 2026-10-20 就踩过）、把 n_comparisons +1、声明 derived_from、
+    把 VERDICT 换成"尚未判定"。这四件事都能忘，而忘了任何一件的后果都不是当场报错
+    （VERDICT 抄错 → 报告与判词互相矛盾且不报错；derived_from 忘写 → DSR 分母偏小）。
+    规则写在指引里只是"知道有坑"；给出一份改好的骨架才是"填了坑"。
+
+    返回 {path, text, parent}：text 是**可直接保存**的定义体，path 是建议落盘位置。平台不写文件
+    （那是开发者的活），只把它准备好。
+
+    文件名**避让已存在的**（`_cand` → `_cand2` → …）：第二次点同一张卡时若还建议同一个名字，
+    照做就会**覆盖掉第一条候选** —— 那是在帮人犯错。避让了就在 `renamed_because` 里说明。
+    """
+    src = _DEFS / f"{preset_id}.py"
+    if not src.is_file():
+        return None
+    text = src.read_text(encoding="utf-8")
+    m = re.search(r'^NAME = "[^"]+"', text, re.M)
+    if not m:
+        return None
+    new_name, bumped_for = f"{preset_id}_cand", None
+    n = 1
+    while (_DEFS / f"{new_name}.py").exists():
+        n += 1
+        bumped_for = bumped_for or new_name
+        new_name = f"{preset_id}_cand{n}"
+    text = text[:m.start()] + f'NAME = "{new_name}"' + text[m.end():]
+    # n_comparisons + 1：这一次也是那片搜索空间里的一次试验
+    def _bump(mm):
+        return f'"n_comparisons": {int(mm.group(1)) + 1},'
+    text, n_bumped = re.subn(r'"n_comparisons": (\d+),', _bump, text, count=1)
+    # 声明父策略（并进父策略在本平台的运行次数）—— 紧跟在 n_comparisons 之后
+    if n_bumped:
+        text = text.replace('"n_comparisons":', f'"derived_from": "{preset_id}",\n    "n_comparisons":', 1)
+    # VERDICT 换成"尚未判定"（**不要**留着基线那段结论 —— 那是针对另一套参数的判断）
+    vm = re.search(r"^VERDICT = \(.*?^\)\n", text, re.S | re.M)
+    if vm:
+        verdict_block = (
+            "VERDICT = (\n"
+            '    "**尚未判定**：本条是 ' + preset_id + ' 的单参数候选，'
+            '**还没有跑过预注册四条判据的判定**，"\n'
+            '    "因此**不得用于实盘、不得当作选股能力的证据**。判定之后把这段改写成"\n'
+            '    "**本次运行的数据**（平台结果面板里有「复制 VERDICT 草稿」，按这次运行生成，避免手抄错）。"\n'
+            ")\n"
+        )
+        text = text[:vm.start()] + verdict_block + text[vm.end():]
+    head_note = (
+        '"""preset 定义体：' + new_name + '（复制自 ' + preset_id + ' —— 骨架由平台生成；\n'
+        '把 NAME 与文件名改成你要的（必须**一致**，注册表会校验），并改注释与判定。）\n"""\n\n'
+    )
+    if text.startswith('"""'):
+        text = head_note + text.split('"""', 2)[-1].lstrip("\n")
+    return {"path": f"research/preset_defs/{new_name}.py", "text": text,
+            "parent": preset_id, "renamed_because": bumped_for}
 
 
 def stale_definitions(started_at: float | None = None) -> list[str]:

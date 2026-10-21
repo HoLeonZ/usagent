@@ -1127,6 +1127,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "台账顶栏写当前代码版本": "当前代码 <b>",
         "旧版本运行与脏树都要标出来": "function codeCell(", 
         "运气对照真跑（共用 control_arm，不是第二份）": "control_runs: controlRuns",
+        # 候选生命周期的**第一步**（此前最手工：改名 / n_comparisons+1 / derived_from / 换 VERDICT）
+        "复制成新候选（四件易忘的事由平台填好）": "newCandidate(",
+        "新候选按钮只出现在 preset 卡上（族没有这几样要改的）": 'e.kind === "preset" ? `<button class="mini" title="拷一份改好的骨架',
     }
     missing = [k for k, v in need.items() if v not in html]
     assert not missing, f"页面缺这些按钮/导航：{missing}"
@@ -1144,6 +1147,75 @@ def test_source_route_serves_the_strategy_file_and_refuses_traversal(http):
     assert _get(http + "/api/source/family/nope")[0] == 404
     assert _get(http + "/api/source/preset/..%2F..%2Fetc%2Fpasswd")[0] == 404
     assert _get(http + "/api/source/preset/" + "a" * 80)[0] == 404      # 超长名字也拒
+
+
+def test_candidate_skeleton_is_a_ready_to_register_definition():
+    """「复制成新候选」给的骨架必须**当场能注册** —— 四件事都替人填好，缺一件就红。
+
+    为什么这条比"字符串里有 derived_from"强：候选生命周期第一步是手工的，而四种错法
+    （NAME 与文件名不一致 → 注册表拒绝；n_comparisons 没 +1 → DSR 分母偏小；derived_from
+    漏写 → 少继承父策略的运行次数；VERDICT 抄着父策略那段 → 报告与判词互相矛盾）
+    **没有一种会当场报错**。所以这里真的 `exec` 它、走注册表自己的 `TC.validate`，
+    把"能装进注册表"这件事验到与真落盘同一层。
+    """
+    from core import preset_contract as TC
+    n_checked = 0
+    for name in sorted(presets.REGISTRY):
+        sk = catalog.candidate_skeleton(name)
+        assert sk is not None, f"{name} 没有可复制的定义体"
+        path, text = sk["path"], sk["text"]
+        # ① 能编译、能过注册表契约（REQUIRED_KEYS / 未知键白名单都在里面）
+        ns: dict = {}
+        exec(compile(text, path, "exec"), ns)
+        TC.validate(ns["PRESET"])
+        # ② NAME 必须等于文件名（注册表会校验这条；我 2026-10-20 就踩过）
+        assert ns["NAME"] == Path(path).stem == f"{name}_cand"
+        # ③ derived_from 指回父策略，且 n_comparisons 恰好 +1（父那条的声明值）
+        assert ns["PRESET"]["derived_from"] == name
+        assert int(ns["PRESET"]["n_comparisons"]) == int(
+            presets.get_preset(name)["n_comparisons"]) + 1
+        # ④ VERDICT 不得留着父策略那段结论（那是针对另一套参数的判断）
+        assert "尚未判定" in ns["VERDICT"]
+        assert ns["VERDICT"] != presets.REGISTRY[name]["verdict"]
+        n_checked += 1
+    assert n_checked == len(presets.REGISTRY) and n_checked >= 6
+
+
+def test_candidate_skeleton_never_proposes_a_name_that_is_taken(tmp_path, monkeypatch):
+    """同一条 preset 连点两次，第二次**不许**再建议同一个文件名 —— 那是在帮人覆盖自己的候选。"""
+    src = ROOT / "research" / "preset_defs" / "us_reversal_dip_v1.py"
+    if not src.is_file():
+        pytest.skip("定义体不在（不应发生）")
+    d = tmp_path / "preset_defs"
+    d.mkdir()
+    (d / "us_reversal_dip_v1.py").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(catalog, "_DEFS", d)          # 函数读的是模块级常量
+    first = catalog.candidate_skeleton("us_reversal_dip_v1")
+    assert Path(first["path"]).stem == "us_reversal_dip_v1_cand"
+    assert first["renamed_because"] is None
+    (d / f"{Path(first['path']).stem}.py").write_text(first["text"], encoding="utf-8")
+    second = catalog.candidate_skeleton("us_reversal_dip_v1")
+    assert Path(second["path"]).stem == "us_reversal_dip_v1_cand2"
+    assert second["renamed_because"] == "us_reversal_dip_v1_cand"   # 说清为什么换了名字
+    compile(second["text"], second["path"], "exec")
+    assert 'NAME = "us_reversal_dip_v1_cand2"' in second["text"]
+    # 平台**不写文件**（那是开发者的活）：第一条候选应当原封不动
+    assert (d / "us_reversal_dip_v1_cand.py").read_text(encoding="utf-8") == first["text"]
+    assert not (d / "us_reversal_dip_v1_cand2.py").exists()
+
+
+def test_candidate_skeleton_route_serves_the_text_and_refuses_unknown(http):
+    """页面的「复制成新候选」要有服务端一半；且族不该有它（族没有 NAME/VERDICT 这几样要改的）。"""
+    code, body = _get(http + "/api/candidate_skeleton/us_reversal_dip_v1")
+    assert code == 200
+    d = json.loads(body)
+    assert d["path"] == "research/preset_defs/us_reversal_dip_v1_cand.py"
+    assert d["parent"] == "us_reversal_dip_v1"
+    assert 'NAME = "us_reversal_dip_v1_cand"' in d["text"]
+    # 未知 preset / 遍历尝试 / 族一律 404（族那条走的是同一个正则，所以直接判它不匹配）
+    assert _get(http + "/api/candidate_skeleton/nope")[0] == 404
+    assert _get(http + "/api/candidate_skeleton/..%2F..%2Fetc%2Fpasswd")[0] == 404
+    assert _get(http + "/api/candidate_skeleton/" + "a" * 80)[0] == 404
 
 
 def test_reports_route_lists_past_reports_and_parses_their_header(http, tmp_path, monkeypatch):

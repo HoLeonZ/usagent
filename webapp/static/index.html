@@ -228,7 +228,10 @@ table.ledger td{white-space:nowrap}
         <b>父策略在这台机器上被跑过几次</b>并进 k（父策略的<b>声明值</b>不并 —— 那要作者自己写进
         本条的 <code>n_comparisons</code>）。实测：基线 k=20（17+3），兄弟不声明时记成 17（17+0），
         声明后是 21（17+3+1）—— 与手算一致。<br>
-        另外：<b>别拿两次 k 不同的 DSR 互相比较</b>；面板的「DSR 的 k」格里会写清它由哪几项构成。</dd>
+        另外：<b>别拿两次 k 不同的 DSR 互相比较</b>；面板的「DSR 的 k」格里会写清它由哪几项构成。<br>
+        <b>动手的那一步不用手抄</b>：preset 卡上的「复制成新候选」会把骨架生成好（NAME 与文件名
+        改成 <code>&lt;id&gt;_cand</code>、<code>n_comparisons</code> 已 +1、已声明 <code>derived_from</code>、
+        VERDICT 已换成「尚未判定」），并给出建议落盘路径。它<b>只生成、不写盘</b> —— 存与改由你决定。</dd>
       <dt>research.run_baseline</dt><dd>成本敏感性 / 逐窗口分解 / 带 HAC 的归因</dd>
       <dt>research.wfv_search</dt><dd>WFV 搜索 —— holdout claim 的唯一入口</dd>
       <dt>src/validate.py</dt><dd>数据覆盖体检（「从没尝试过的名字」）</dd>
@@ -470,6 +473,7 @@ function card(e, runCount) {
 ⚠️ 这个工具固定用 WFV 搜索窗 —— 它与上面那排窗口按钮无关，窗口在这个工具里是写死的（改它会推翻它自己的基线对照）。"
         onclick="copyGridCmd('${e.id}', ${runCount || 0})">复制网格命令</button>` : ""}
       <button class="mini" onclick="showSrc('${e.kind}','${e.id}')">查看定义体</button>
+      ${e.kind === "preset" ? `<button class="mini" title="拷一份改好的骨架：NAME 与文件名已是 <id>_cand、n_comparisons 已 +1、已声明 derived_from、VERDICT 已换成「尚未判定」—— 四件最容易忘的事都替你填了。" onclick="newCandidate('${e.id}')">复制成新候选</button>` : ""}
       <span class="sub" id="cnt-${a}">已跑 <b>${runCount || 0}</b> 次</span>
       <span class="sub poolhint">（池子可评估范围：跑过任意一条后显示）</span>
     </div>
@@ -572,9 +576,39 @@ function copyGridCmd(id, priorRuns) {
 function copyCmd(kind, id) {
   const cmd = cliCmd(kind, id), box = $("clip-" + kind + "-" + id);
   box.style.display = "block";
+  box.style.wordBreak = "break-all";    // 回到长命令的换行方式（newCandidate 改成过 break-word）
   navigator.clipboard?.writeText(cmd).then(
     () => { box.textContent = "已复制到剪贴板：\n" + cmd; },
     () => { box.textContent = "（复制失败，请手动选中）\n" + cmd; });
+}
+// 候选生命周期的**第一步**：拷一份定义体、改 NAME、n_comparisons +1、声明 derived_from、
+// 换掉继承来的 VERDICT。四件事里任何一件忘了都不会当场报错（VERDICT 抄错 → 报告与判词
+// 互相矛盾；derived_from 漏写 → DSR 的分母 k 偏小），所以不靠"记得"，靠**替人填好**。
+async function newCandidate(id) {
+  const box = $("clip-preset-" + id);
+  box.style.display = "block";
+  box.style.wordBreak = "break-word";   // 源码按词换行（.clip 默认 break-all 是给长命令用的）
+  box.textContent = "正在生成骨架…";
+  let j;
+  try { j = await (await fetch(`/api/candidate_skeleton/${id}`)).json(); }
+  catch (exc) { box.textContent = `生成失败：${exc.message}`; return; }
+  if (j.error) { box.textContent = `生成失败：${j.error}`; return; }
+  const head = `建议保存到：${j.path}\n`
+    + (j.renamed_because
+        ? `（${j.renamed_because}.py 已经在盘上，所以换了个没用过的名字 —— 免得盖掉你那条候选）\n`
+        : "")
+    + "下一步：把它存成上面那个文件（内容见下），重启平台服务后刷新页面。\n"
+    + "─".repeat(60) + "\n";
+  const body = j.text;
+  box.textContent = head + body;                      // 先落字：剪贴板可能不给权限
+  const mark = (ok) => { box.textContent = (ok ? "已复制到剪贴板（正文如下）\n" : "（剪贴板不可用，请手动选中下面这段）\n") + head + body; };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      const pr = navigator.clipboard.writeText(body);
+      if (pr && pr.then) pr.then(() => mark(true), () => mark(false));
+      else mark(true);
+    } catch (exc) { mark(false); }
+  } else mark(false);
 }
 async function showSrc(kind, id) {
   const d = $("src-" + kind + "-" + id); d.open = true;
