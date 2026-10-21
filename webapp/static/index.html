@@ -525,11 +525,18 @@ function setWindow(kind, id, lo, hi) {
 function revalidate(kind, id) {
   const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
   const f = $("flag-" + kind + "-" + id);
-  const bad = !(lo < hi), held = overlaps([lo, hi], HOLDOUT);
+  // ⚠️ **没填全**要单独判（2026-10-21 实测）：日期选择器里可以清空某一格，清空之后
+  // ① 旧判据 `!(lo < hi)` 把 "" 当成"最早"⇒ 不报非法；② 而 `overlaps(["", hi], …)`
+  // 会因为 `"" <= holdout_end` 成立 ⇒ 卡片**谎称**"与 holdout 重叠（只准读一次）"。
+  // 空窗口既不合法、也不碰 holdout —— 两件事都得说清楚。
+  const empty = !lo || !hi;
+  const bad = empty || !(lo < hi);
+  const held = !empty && overlaps([lo, hi], HOLDOUT);
   // 与池子范围完全不重叠 ⇒ 这一跑必然空手（审计：此前要先等信号跑完才由 broker 报错，
   // 而且报错不告诉你合法范围）。范围跑过一次就有（POOL），有就当场说。
   const miss = POOL && !bad && !(lo < POOL[1] && hi > POOL[0]);
-  f.textContent = bad ? "✗ 窗口非法（起点必须早于终点）"
+  f.textContent = empty ? "✗ 窗口没填全（起点与终点都要 —— 日期选择器里可以清空）"
+    : bad ? "✗ 窗口非法（起点必须早于终点）"
     : miss ? `✗ 这段窗口与池子范围（${POOL[0]} .. ${POOL[1]}）完全不重叠 —— 跑下去只会空手`
     : (held ? "⚠ 与 holdout 重叠（只准读一次）" : "");
   f.className = "sub " + (bad || held || miss ? "warn" : "");
@@ -633,9 +640,14 @@ function copyGridCmd(id, priorRuns) {
     () => { box.textContent = `（复制失败，请手动选中）\n${cmd}`; });
 }
 function copyCmd(kind, id) {
-  const cmd = cliCmd(kind, id), box = $("clip-" + kind + "-" + id);
+  const box = $("clip-" + kind + "-" + id);
   box.style.display = "block";
   box.style.wordBreak = "break-all";    // 回到长命令的换行方式（newCandidate 改成过 break-word）
+  // 窗口没填全时**不给命令**：给了也是一条坏命令（`--lo  --hi …` 少一个值），
+  // 而复制出去的人不会知道它缺了什么。
+  const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
+  if (!lo || !hi) { box.textContent = "窗口没填全（起点与终点都要）—— 先填好再复制命令。"; return; }
+  const cmd = cliCmd(kind, id);
   navigator.clipboard?.writeText(cmd).then(
     () => { box.textContent = "已复制到剪贴板：\n" + cmd; },
     () => { box.textContent = "（复制失败，请手动选中）\n" + cmd; });
@@ -1353,6 +1365,9 @@ function panel(jobId, kind, id, lo, hi, params, controlRuns, cmd) {
 
 async function run(kind, id) {
   const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
+  // ⚠️ 没填全要**当场**拦：旧判据把 "" 当成"最早"⇒ 空窗口能提交上去，服务端回
+  // "缺字段 lo"（一句服务端的话，而不是"你少填了一格"）。这里说清是哪个格子没填。
+  if (!lo || !hi) { alert("窗口没填全：起点与终点都要"); return; }
   if (!(lo < hi)) { alert("窗口非法：起点必须早于终点"); return; }
   const btn = $("btn-" + kind + "-" + id);
   if (btn.disabled) return;                       // 双击守卫：一次点击 = 一次提交 = k+1

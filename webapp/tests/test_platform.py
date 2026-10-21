@@ -1060,7 +1060,20 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
   poolValue: (POOL || []).join(".."),
   poolNotOverwritten: seedPoolFromRuns([{ pool_range: ["1999-01-01", "1999-12-31"] }]),
   poolValueKept: (POOL || []).join(".."),
-  poolStored: sessionStorage.getItem("pool") }));
+  poolStored: sessionStorage.getItem("pool"),
+  // 窗口没填全：既不能说"起点必须早于终点"，更不能谎称"与 holdout 重叠"
+  emptyWindowFlag: (function () {
+    const flag = document.getElementById("flag-preset-us_reversal_dip_v1");
+    const lo = document.getElementById("lo-preset-us_reversal_dip_v1");
+    const hi = document.getElementById("hi-preset-us_reversal_dip_v1");
+    const keepLo = lo.value, keepHi = hi.value;
+    lo.value = "";
+    revalidate("preset", "us_reversal_dip_v1");
+    const cleared = flag.textContent;
+    lo.value = keepLo; hi.value = keepHi;
+    revalidate("preset", "us_reversal_dip_v1");
+    return [cleared, flag.textContent];
+  })() }));
 """
     f = tmp_path / "run_inline.js"
     f.write_text(prelude + js + probe, encoding="utf-8")
@@ -1099,6 +1112,10 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
     assert got["poolSeeded"] is True and got["poolValue"] == "2024-01-11..2026-10-16", got["poolValue"]
     assert got["poolNotOverwritten"] is False and got["poolValueKept"] == "2024-01-11..2026-10-16"
     assert got["poolStored"] == '["2024-01-11","2026-10-16"]', got["poolStored"]
+    # 窗口没填全：说清是"没填全"，且**不许**说成"与 holdout 重叠"（空窗口什么都不碰）
+    assert "没填全" in got["emptyWindowFlag"][0], got["emptyWindowFlag"]
+    assert "holdout" not in got["emptyWindowFlag"][0], f"空窗口谎称碰 holdout：{got['emptyWindowFlag']}"
+    assert got["emptyWindowFlag"][1] == "", f"填回去之后不该还挂着警告：{got['emptyWindowFlag']}"
 
 
 def test_api_json_never_contains_bare_nan_or_infinity(http, monkeypatch):
@@ -1366,6 +1383,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "0 笔成交要单独说清（0 是「没参与」不是「不赚不亏」）": "function zeroTradesNote(",
         "显示上的 0 不带负号（−0.00pp 是浮点残差不是数字）": "const _z0 = (x, d) =>",
         "池子可评估范围在新标签页也能显示（从台账取回，否则那句话是假话）": "seedPoolFromRuns(",
+        "窗口没填全要当场说（空窗口不许谎称碰 holdout）": "✗ 窗口没填全（起点与终点都要",
     }
     missing = [k for k, v in need.items() if v not in html]
     assert not missing, f"页面缺这些按钮/导航：{missing}"
