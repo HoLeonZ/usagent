@@ -362,6 +362,12 @@ function paramTable(e) {
       ? `<tr><td class="k">入场族</td><td>${esc(st.family)} ${esc(JSON.stringify(st.family_params))}</td></tr>`
       : `<tr><td class="k">信号参数</td><td>${esc(JSON.stringify(st.signal_params))}</td></tr>`;
     return `<table>${rows}${extra}
+      <tr><td class="k" title="§6 行为锁：这条 preset 的交易列表与权益曲线有 sha256 基线；
+没有基线 = 它不受保护，而且 test_golden_trades 会对它红。交付一条新候选时必须先生成基线
+（python3 -m research.golden_baseline --regen）—— 但只在「有意」改口径时用，别用它掩盖变化。">行为锁基线</td>
+        <td>${e.golden_baseline && e.golden_baseline.exists
+          ? `<span class="pos">✔ 已锁</span> <span class="sub">${esc(e.golden_baseline.mtime || "")}</span>`
+          : `<span class="warn">⚠️ 无基线</span> <span class="sub">交付前须生成（research.golden_baseline --regen），否则行为锁测试会对它红</span>`}</td></tr>
       <tr><td class="k">试验次数 n_comparisons</td><td>${e.n_comparisons}</td></tr>
       <tr><td class="k" title="validated 说的是：这条 preset 有没有被当作「可交易的策略」验证过。
 false 不是「没做完」，而是「如实交付的产物」—— 它带着自己的负面证据（VERDICT），

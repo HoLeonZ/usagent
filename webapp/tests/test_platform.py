@@ -952,6 +952,18 @@ def test_a_deleted_report_gives_a_human_page_not_json(http, tmp_path, monkeypatc
     assert code3 == 404 and body3.decode().lstrip().startswith("{"), body3[:80]
 
 
+def test_every_registered_preset_has_a_behavior_lock_baseline():
+    """**每条**已注册的 preset 都必须有行为锁基线（§6）。
+
+    这条不只是"记一下"：新候选没有基线时 `test_golden_trades` 会对它红 —— 而那件事此前只有
+    跑一次测试才知道（2026-10-20 实测：我建了兄弟候选，测试直接红，得自己反推是 `--regen` 的事）。
+    平台现在会在卡片上直接说「无基线」，但**基线缺失本身仍要被抓住**。
+    """
+    from webapp import catalog as cat
+    missing = [e["id"] for e in cat.build()["presets"] if not e["golden_baseline"]["exists"]]
+    assert not missing, f"这些 preset 没有行为锁基线：{missing}"
+
+
 def test_the_verdict_draft_cites_this_runs_own_numbers(tmp_path):
     """VERDICT 草稿必须引用**这次运行**的数字，并写明「尚未判定 ⇒ 不得用于实盘」。
 
@@ -1101,6 +1113,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "对比表：逐项差值": "function fmtCell(",
         "对比时提醒 k 不可比（上一轮的教训）": "DSR 不可直接比",
         "按这次运行生成 VERDICT 草稿（避免抄错别的候选的数字）": "copyVerdictDraft(",
+        "卡片上标出行为锁基线在不在（交付候选的前置条件）": "行为锁基线",
         "台账可视「载入全部」（此前第 31 条只能在 CSV 里看）": "载入全部（共 ${TOTAL} 条）",
         "平台越界运行里登记进权威账本的条数要说出来": "条登记进了这本账",
         "数据覆盖到哪天（拿多新的数据跑的结论）": "数据覆盖到",

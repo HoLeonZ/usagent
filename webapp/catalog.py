@@ -50,6 +50,19 @@ def touches_holdout(window: tuple[str, str], holdout: tuple[str, str] = HOLDOUT)
     return window[1] > holdout[0] and window[0] <= holdout[1]
 
 
+_BASELINE_DIR = ROOT / "research" / "tests" / "baselines"
+
+
+def _golden_state(name: str) -> dict:
+    """这条 preset 的行为锁基线在不在、什么时候生成的。"""
+    f = _BASELINE_DIR / f"{name}.golden"
+    if not f.is_file():
+        return {"exists": False, "mtime": None}
+    import datetime as _dt
+    return {"exists": True,
+            "mtime": _dt.datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")}
+
+
 def preset_entry(name: str) -> dict:
     """一条 preset 的可展示形态。"""
     rec = presets.REGISTRY[name]
@@ -75,6 +88,10 @@ def preset_entry(name: str) -> dict:
         "n_comparisons": int(P.get("n_comparisons") or 1),
         "validated": bool(P.get("validated", False)),
         "verdict": verdict,          # ← 负面证据必须与参数同屏
+        # 这条 preset 的**行为锁基线**在不在（§6）。交付一条新候选时必须生成它，否则
+        # test_golden_trades 会对它红 —— 而那件事此前只有跑一次测试才知道（2026-10-20 实测：
+        # 建了兄弟候选，测试直接红，我得自己反推是 --regen 的事）。平台该一眼说出来。
+        "golden_baseline": _golden_state(name),
     }
 
 
