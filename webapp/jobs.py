@@ -373,7 +373,8 @@ def _run(job_id: str) -> None:
             doc = H.render_html(res["trades"], eq, ind,
                                 P.get("signal") or P.get("family_params") or {},
                                 _bench_series(reg, eq),
-                                _summary(P, res, sig, eq, name, lo, hi, ctl),
+                                _summary(P, res, sig, eq, name, lo, hi, ctl,
+                                         n_trials_effective=k),
                                 explain=_explain_for(P))
             problems = H.selfcheck(doc, len(res["trades"]))
             report = RESULTS / f"web_report_{job_id}.html"
@@ -560,7 +561,8 @@ def _bench_series(reg: pd.DataFrame, eq: pd.DataFrame) -> pd.Series:
 
 
 def _summary(P: dict, res: dict, sig: pd.DataFrame, eq: pd.DataFrame,
-             name: str, lo: str, hi: str, ctl: dict | None = None) -> dict:
+             name: str, lo: str, hi: str, ctl: dict | None = None,
+             n_trials_effective: int | None = None) -> dict:
     ts = metrics.tail_stats(res["trades"]) if len(res["trades"]) else {"expectancy_r": float("nan")}
     return {
         "preset_name": name, "preset": resolve(P),
@@ -573,6 +575,13 @@ def _summary(P: dict, res: dict, sig: pd.DataFrame, eq: pd.DataFrame,
         "exposure": float(res["metrics"]["avg_exposure"]),
         "sig_dates": _signal_dates(res, sig),
         "n_trials": int(P.get("n_comparisons") or 1),
+        # **实际用于 DSR 的 k**（声明值 + 继承父策略的 + 本条在这台机器上已跑的）。
+        # 为什么单列一个字段：报告里那句"按 §5，N 次试验的选择偏差折算后门槛还要更高"里的 N
+        # 必须是**实际用的那个 k** —— 而面板的「DSR 的 k」格与逐笔 CSV 的表头都写着它。
+        # 此前报告只写声明值（1614），而面板写着 1616 ⇒ 同一件事两个数，且报告那句是假的。
+        # CLI 跑的报告没有这个概念（那里只有声明值），所以字段可以为 None。
+        "n_trials_effective": (int(n_trials_effective) if n_trials_effective is not None
+                               else None),
         "verdict": (P.get("verdict") or "").strip() or None,
         "note": None,
         **{k: v for k, v in (ctl or {}).items()},

@@ -514,8 +514,18 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
             + (f'⚠️ 其中 {summary["ctl_failed"]} 次重抽因量能上限未能成交被丢弃。'
                if summary.get("ctl_failed") else ''))
     else:
-        _ctl_line = ("运气对照本次未跑(control_runs=0)—— 这份报告因此**不含**"
+        _ctl_line = ("运气对照本次未跑(control_runs=0)—— 这份报告因此<b>不含</b>"
                      "「位于随机分布第几百分位」那条判词。")
+    # 试验次数有两个：声明值（这条策略是从多大的搜索空间里选出来的）与**实际用于 DSR 的 k**
+    # （声明值 + 继承父策略的 + 这台机器上点过它的次数）。面板的「DSR 的 k」格与逐笔 CSV
+    # 的表头写的都是后者 —— 报告里那句"按 §5，N 次试验的选择偏差折算后门槛还要更高"里的 N
+    # 必须也是它，否则同一件事在报告与面板上是两个数（实测：报告写 1614、面板写 1616）。
+    _k_decl = int(summary["n_trials"])
+    _k_eff = summary.get("n_trials_effective")
+    _k_eff = int(_k_eff) if _k_eff else _k_decl
+    _k_note = ("" if _k_eff == _k_decl else
+               f"（本机上的 k 比声明值大 {abs(_k_eff - _k_decl)}：含继承父策略的运行次数"
+               f"与本机点过它的次数 —— 面板的「DSR 的 k」格写着它的构成）")
     parts.append('<div class="warn"><h3>读这份报告之前必须知道的五件事</h3><ul>'
                  f'<li>本策略在<b>本窗口</b> <b>CAGR {summary["cagr"]*100:+.2f}%</b>,'
                  f'同期无脑等权持有 CAGR {bench_cagr*100:+.2f}% —— '
@@ -524,7 +534,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                  f'<li><b>{inline_md(summary.get("verdict") or summary.get("note") or "（本策略没有声明负面证据—— §5 要求负面证据与参数同时记录）")}</b></li>'
                  f'<li><b>样本只有 {len(trades)} 笔</b>,敞口 {summary["exposure"]*100:.0f}%。'
                  f'{_ctl_line}'
-                 f'按 §5,{summary["n_trials"]} 次试验的选择偏差折算后门槛还要更高。</li>'
+                 f'按 §5,{_k_eff} 次试验的选择偏差折算后门槛还要更高{_k_note}。</li>'
                  '<li><b>卡片右侧显示出场之后的价格</b>(供复盘),那是展示,不参与信号。'
                  '信号日清单只用当日及之前的数据 —— 已由截断重算独立验证。</li>'
                  '</ul></div>')
@@ -719,6 +729,14 @@ def selfcheck(doc: str, n_trades: int) -> list[str]:
         problems.append(f"{len(bad)} 个坐标含 NaN/inf")
     if re.search(r'(?:src|href)="https?://', doc, re.I) or "<script" in doc.lower():
         problems.append("含外部引用或 <script> —— 报告不再自包含")
+    # 字面的 markdown 标记：`**粗体**` 与 `` `代码` `` 走 inline_md 转换过了，剩下的
+    # `**` 就是**漏转**的 —— 读者会看到星号本身（实测：运气对照那句"**不含**"就这么印出来）。
+    # 报告里凡是给人看的散文，标记都该是 HTML 标签。
+    # ⚠️ 要**排除 <style> 里的 CSS 注释** —— 那些 `**` 是注释里的强调，人看不见
+    # （我第一版没排除，selfcheck 立刻在真报告上抓出 6 个"漏转"的假警报）。
+    _visible = re.sub(r"<style>.*?</style>", "", doc, flags=re.S)
+    if "**" in _visible:
+        problems.append(f"报告里还有 {_visible.count('**')} 个字面的 **（markdown 没转成标签）")
     return problems
 
 

@@ -918,6 +918,32 @@ def test_the_csv_export_covers_every_field_the_ledger_records(offline, http):
     assert "cagr" in header and "ctl_pct" in header and "pool_range" in header, header
 
 
+def test_the_report_and_the_panel_agree_on_the_trial_count(offline):
+    """报告里那句"按 §5，N 次试验的选择偏差折算后门槛还要更高"的 N，必须是**实际用的那个 k**。
+
+    为什么：此前报告只写**声明值**（1614），而面板的「DSR 的 k」格写着 1616 ——
+    同一件事两个数，而且报告那句是假的（门槛是按 1616 折算的）。这正是本仓库最忌讳的
+    "一份事实两处"。现在平台把**实际用的 k** 传进报告，两处一致，差额也给出来源。
+    """
+    import re as _re
+    first = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                               "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert first["status"] == "done", first.get("error")
+    second = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                                "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert second["status"] == "done", second.get("error")
+    k_panel = second["metrics"]["dsr_k"]
+    doc = (offline / f"web_report_{second['id']}.html").read_text(encoding="utf-8")
+    m = _re.search(r"按 §5,(\d+) 次试验的选择偏差折算后门槛还要更高", doc)
+    assert m, "报告里找不到那句试验次数"
+    assert int(m.group(1)) == k_panel, \
+        f"报告写 {m.group(1)}、面板写 {k_panel} —— 同一件事两个数"
+    # 第二次跑 ⇒ k 比声明值大 ⇒ 报告要把差额说清楚（而不是只报一个孤零零的数）
+    assert "本机上的 k 比声明值大" in doc, "k 与声明值不同时，报告要说明差在哪"
+    # 报告里不该有字面的 markdown 星号（selfcheck 会拦；这里再钉一次，因为它进的是给人读的文档）
+    assert "**" not in _re.sub(r"<style>.*?</style>", "", doc, flags=_re.S), "报告里有字面的 **"
+
+
 def test_k_accounting_inherits_the_parents_platform_runs(tmp_path, monkeypatch):
     """派生候选的 k 必须继承**父策略**在本平台的运行次数（§5 记账）。
 
