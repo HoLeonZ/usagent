@@ -38,18 +38,30 @@ WIN = ("2024-01-01", "2025-01-01")          # 合成市场的可评估窗
 # ⚠️ 没有 node 就跳过（CI 上没有 node）—— 与真数据行为锁在本机没库时跳过是同一种诚实边界。
 NODE_PRELUDE = r"""
 // ---- 最小 DOM 桩：够让脚本加载，并能调用几个纯函数 ----
-const fakeEl = (id) => ({ id,
+// ⚠️ 元素**按 id 缓存**（2026-10-21 改）：浏览器里 `$(id)` 每次拿回的是同一个对象，
+// 桩若不缓存，"填进去的值"就无从断言（`fillConfig` 把值写进 select，之后要能读回来）。
+// 缓存之后这层桩与真实语义更接近 —— 之前每个 id 都返回新对象，等于假设"写入即丢弃"。
+const _els = {};
+let _made = 0;
+const optsFor = (id) => {                    // 族的参数下拉：选项就是预注册网格上的取值
+  const fam = ((globalThis.__CAT || {}).families || []).find(f => String(id).startsWith("p-" + f.id + "-"));
+  if (!fam) return [];
+  const axis = String(id).slice(("p-" + fam.id + "-").length);
+  return (fam.grid[axis] || []).map(v => ({ value: JSON.stringify(v) }));
+};
+const fakeEl = (id) => _els[id] || (_els[id] = { id,
   // 日期输入给日期串；族参数下拉（id 形如 p-<族>-<轴>）必须给**合法 JSON**——
   // currentParams 会对它 JSON.parse（我第一版全给 "2025-01-01" ⇒ JSON.parse 当场抛）
   value: String(id).startsWith("p-") ? "2" : "2025-01-01", checked: false, innerHTML: "", textContent: "",
-  style: {}, dataset: {}, disabled: false, children: [],
+  style: {}, dataset: {}, disabled: false, children: [], options: optsFor(id),
   classList: { add(){}, remove(){}, contains(){ return false; } },
   appendChild(){}, remove(){}, insertAdjacentHTML(){}, addEventListener(){},
   querySelector: () => null, querySelectorAll: () => [], closest: () => null,
   scrollIntoView(){}, focus(){}, setAttribute(){}, getAttribute: () => null,
   getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }) });
 globalThis.document = { getElementById: (id) => fakeEl(id), querySelector: () => null,
-  querySelectorAll: () => [], addEventListener(){}, createElement: () => fakeEl("x"),
+  querySelectorAll: () => [], addEventListener(){},
+  createElement: (tag) => fakeEl("__made" + (++_made) + "_" + tag),
   body: fakeEl("body"), documentElement: fakeEl("html"), styleSheets: [] };
 globalThis.window = globalThis;
 globalThis.location = { hash: "", pathname: "/" };
@@ -896,6 +908,19 @@ def test_the_inline_script_actually_runs_its_golden_path_functions(tmp_path):
 // ---- 探针：黄金路径上那几个"建面板/建卡片/给命令"的纯函数 ----
 CAT = globalThis.__CAT;
 LAST = {}; BYSTRAT = {}; REPORTS = []; RUNS = []; CUR_SHA = "deadbee";
+// ---- 台账「回填这一行」：窗口 + **族参数**（2026-10-21 的缺陷：只填窗口时，
+// 点「回测」跑的是网格中点那一组 —— 另一个配置，而且新跑那次还会进台账推高 k）
+const onGrid = applyRunConfig({ strategy_id: "family:xs_flow",
+  window: ["2024-02-02", "2024-08-08"], params: { a: 3 } });
+// ⚠️ 值要**当场**读：下面那次调用会把同一个下拉/输入框再写一遍
+const onGridValue = document.getElementById("p-xs_flow-a").value;
+const onGridWindow = document.getElementById("lo-family-xs_flow").value;
+const offGrid = applyRunConfig({ strategy_id: "family:xs_flow",
+  window: ["2024-03-03", "2024-09-09"], params: { a: 99, ghost: 1 } });
+const offGridKept = document.getElementById("p-xs_flow-a").value;   // 99 不该被写进去
+const presetRow = applyRunConfig({ strategy_id: "preset:us_reversal_dip_v1",
+  window: ["2024-04-04", "2024-10-10"], params: { drop5: 0.12 } });
+const presetWindow = document.getElementById("lo-preset-us_reversal_dip_v1").value;
 const out = {
   cli_preset: cliCmd("preset", "us_reversal_dip_v1"),
   cli_family: cliCmd("family", "xs_flow"),
@@ -909,7 +934,16 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
   cliHasFamily: out.cli_family.includes("--family xs_flow"),
   cliHasFingerprint: out.cli_family.includes("_p"),
   cardLooksReal: out.card.length > 200,
-  stepsHaveCancel: out.steps.includes("取消"), queuedSaysQueued: out.stepsQueued.includes("排队中") }));
+  stepsHaveCancel: out.steps.includes("取消"), queuedSaysQueued: out.stepsQueued.includes("排队中"),
+  // 回填：网格上的取值要真的写进下拉；不在网格上的要**留下并报出来**（不是静默取近似）
+  fillOk: onGrid.ok && onGrid.applied.join() === "a" && onGrid.skipped.length === 0,
+  fillAppliedValue: onGridValue,
+  fillWindowSet: onGridWindow === "2024-02-02",
+  fillOffGrid: offGrid.skipped.slice().sort().join(),
+  fillOffGridKept: offGridKept,
+  fillPresetSkipsNothing: presetRow.ok && presetRow.applied.length === 0
+    && presetRow.skipped.length === 0,
+  fillPresetWindow: presetWindow }));
 """
     f = tmp_path / "run_inline.js"
     f.write_text(prelude + js + probe, encoding="utf-8")
@@ -922,6 +956,15 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
     assert got["cardLooksReal"], "card() 渲出来的卡片太短，八成中途抛了"
     assert got["stepsHaveCancel"], "运行中的步骤区没有取消按钮"
     assert got["queuedSaysQueued"], "排队中没如实说「排队中」"
+    # 台账回填：窗口与**参数**要一起填，不在网格上的取值要报出来而不是静默取近似
+    assert got["fillOk"], f"回填没把网格上的参数写进下拉：{got}"
+    assert got["fillAppliedValue"] == "3", f"下拉里不是那一行的取值：{got['fillAppliedValue']!r}"
+    assert got["fillWindowSet"], "回填没设窗口"
+    assert got["fillOffGrid"] == "a,ghost", f"不在网格上的参数没被报出来：{got['fillOffGrid']!r}"
+    assert got["fillOffGridKept"] == "3", "不在网格上的取值不该被写进下拉（那会静默换成别的配置）"
+    # preset 行的参数在页面上改不了 ⇒ 既不算"填了"也不算"没填进去"
+    assert got["fillPresetSkipsNothing"], f"preset 行不该报 skipped：{got}"
+    assert got["fillPresetWindow"] == "2024-04-04", "preset 行的窗口没填上"
 
 
 def test_api_json_never_contains_bare_nan_or_infinity(http, monkeypatch):
@@ -1116,7 +1159,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         # 表头照样画、aria-sort 照样发，但点下去一行都不动（审计实测）。
         "台账 Δ 列（同一配置重跑的对比，排序键必须是 _d）": '["_d","Δ超额（同配置）"]',
         "台账完整 CSV 导出（表只有 30 条上限）": '/api/runs.csv',
-        "台账窗口可点回填到卡片（但不自动跑）": "fillWindow(",
+        "台账窗口可点回填到卡片（窗口 + 参数一起，但不自动跑）": "fillConfig(",
         "台账明说只显示最近 N 条": "表只取最近",
         "卡片区排序（靠移动 DOM，不重渲 ⇒ 不吞用户输入）": 'id="csort"',
         "卡片区结构化过滤（只看跑过的 / 只看含 holdout）": 'id="cf-run"',

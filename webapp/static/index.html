@@ -990,6 +990,11 @@ function renderLedger() {
       : `这条策略还没有运行记录 —— 在它的卡片上点「回测」。</div>`}</div>`;
     return;
   }
+  // 「回填这一行」要用的完整配置（含参数）——**每次重渲都重建**，否则"载入全部"之后
+  // 旧行的 job_id 还指着上一版对象（行还在表里、点开却填了个不存在的东西）。
+  ROWCFG = {};
+  rows.forEach(r => { if (r.job_id) ROWCFG[r.job_id] = {
+    strategy_id: r.strategy_id, window: r.window, params: r.params }; });
   $("ledger").innerHTML = `<table class="ledger"><thead><tr>${cols.map(([k, lab]) =>
     `<th class="sortable" aria-sort="${SORT.key === k ? (SORT.dir > 0 ? "ascending" : "descending") : "none"}">`
     + `<button class="thbtn" onclick="sortLedger('${k}')">${lab}${
@@ -998,8 +1003,12 @@ function renderLedger() {
       <td>${esc((r.ts || "").slice(0, 19))}</td>
       <td><a href="#${esc(r.strategy_id.replace(":", "-"))}" style="color:#cbd5e1">${esc(r.strategy_id)}</a></td>
       <td>${(r.window || []).length
-            ? `<a href="#${esc(r.strategy_id.replace(":", "-"))}" title="把这张卡的窗口填成这一对日期（不自动跑 —— 跑一次就要记一次 k）"
-                 onclick="fillWindow('${esc(r.strategy_id)}','${esc(r.window[0])}','${esc(r.window[1])}')"
+            ? `<a href="#${esc(r.strategy_id.replace(":", "-"))}" title="${r.job_id
+                 ? "把这张卡的窗口与参数填成这一行（不自动跑 —— 跑一次就要记一次 k）"
+                 : "这一行早于 job id 字段 —— 只能回填窗口，参数取不到"}"
+                 onclick="${r.job_id
+                   ? `fillConfig('${esc(r.job_id)}')`
+                   : `fillWindowOnly('${esc(r.strategy_id)}','${esc(r.window[0])}','${esc(r.window[1])}')`}"
                  style="color:#cbd5e1">${esc(r.window.join(".."))}</a>`
             : "—"}</td>
       <td><code class="p">${esc(paramsOf(r.params, "params" in r ? null : "missing"))}</code></td>
@@ -1026,17 +1035,62 @@ function renderLedger() {
 }
 // 把某张卡的窗口填成这一对日期（不自动提交）：台账里看到"上次用这个窗口跑过"，
 // 能一键填回去 —— 但**跑不跑由人决定**，因为跑一次就要记一次 k（§5）。
-function fillWindow(strategyId, lo, hi) {
-  const [kind, id] = strategyId.split(":");
-  const card = $(kind + "-" + id);
-  if (!card || !$("lo-" + kind + "-" + id)) return;
-  $("lo-" + kind + "-" + id).value = lo; $("hi-" + kind + "-" + id).value = hi;
+// 把台账里**这一行**的配置填回它的卡片：窗口 + 族参数，然后停在卡片上（不自动跑：
+// 跑一次就记一次 k，按下去是用户的决定）。
+//
+// ⚠️ 为什么不是"只填窗口"（2026-10-21 实测的缺陷）：族卡片上真正决定跑出来是什么的
+// 是那几个**参数下拉**（默认=网格中点）。只填窗口的话，用户点「回测」跑的是**另一个配置**，
+// 而提示写着"已填入上次的窗口"，看起来像复现。更糟的是它**不报错**：新跑那次进台账、
+// 推高 k —— 付了一次钱，拿到的却不是想复现的那次。所以这里整个配置一起填，填不进去的
+// 要**逐项说出来**（不在当前网格上的取值 = 那次用的是旧网格）。
+let ROWCFG = {};        // job_id → 那一行的 {strategy_id, window, params}（同一策略+窗口可能跑过多次、参数不同）
+function applyRunConfig(cfg) {
+  const [kind, id] = (cfg.strategy_id || "").split(":");
+  const out = {ok: false, applied: [], skipped: []};
+  if (!kind || !id || !$("lo-" + kind + "-" + id)) return out;
+  const lo = $("lo-" + kind + "-" + id), hi = $("hi-" + kind + "-" + id);
+  if (cfg.window && cfg.window.length === 2) { lo.value = cfg.window[0]; hi.value = cfg.window[1]; }
+  const p = cfg.params || {};
+  // 只有**族**有可编辑的参数下拉（preset 的参数由定义体决定）—— 所以只对族做这件事，
+  // 而不是"找不到元素就算没填进去"：后者会让每一行 preset 都报出一串"没应用的参数"。
+  if (kind === "family") Object.keys(p).forEach(k => {
+    const el = $("p-" + id + "-" + k);
+    if (!el) { out.skipped.push(k); return; }
+    const want = JSON.stringify(p[k]);
+    if ([...el.options].some(o => o.value === want)) { el.value = want; out.applied.push(k); }
+    else out.skipped.push(k);        // 不在预注册网格上 ⇒ 不静默取个近似的
+  });
   revalidate(kind, id);
+  out.ok = true;
+  return out;
+}
+function fillConfig(jobId) {
+  const cfg = ROWCFG[jobId];
+  if (!cfg) return;
+  _noteFilled(cfg, applyRunConfig(cfg));
+}
+// 早于 job_id 字段的台账行：取不到那一行的参数，所以**只**回填窗口，并说清是"只"。
+function fillWindowOnly(strategyId, lo, hi) {
+  const cfg = {strategy_id: strategyId, window: [lo, hi], params: null};
+  _noteFilled(cfg, applyRunConfig(cfg), "（这一行早于 job id 字段，参数取不到）");
+}
+function _noteFilled(cfg, r, extra) {
+  if (!r.ok) return;
+  const [kind, id] = cfg.strategy_id.split(":");
+  const card = $(kind + "-" + id);
   card.scrollIntoView({block: "start"});
   const bar = card.querySelector(".bar");
   const old = bar.querySelector(".filled"); if (old) old.remove();
   const sp = document.createElement("span");
-  sp.className = "sub filled"; sp.textContent = `← 已填入上次的窗口 ${lo}..${hi}（点「回测」才真的跑）`;
+  sp.className = "sub filled";
+  const what = r.applied.length ? `窗口 ${cfg.window.join("..")} 与 ${r.applied.length} 个族参数`
+                                : `窗口 ${cfg.window.join("..")}`;
+  sp.textContent = `← 已填入这一行的 ${what}`
+    + (extra || "")
+    + (kind === "preset" ? "（参数由定义体决定，页面上改不了）" : "")
+    + (r.skipped.length ? `；⚠️ ${r.skipped.length} 个参数（${r.skipped.join("、")}）不在当前网格上，`
+        + `没应用 —— 那一行用的是另一个网格` : "")
+    + `。点「回测」才真的跑（跑一次就记一次 k）`;
   bar.appendChild(sp);
 }
 function keyOf(r) {
