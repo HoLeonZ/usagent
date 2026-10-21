@@ -706,6 +706,36 @@ def test_no_literal_markdown_leaks_into_visible_copy():
     assert not offenders, f"可见文案里有 markdown 的 **：{offenders}"
 
 
+def test_no_tooltip_contains_html_tags():
+    """`title="..."` 里不许有 HTML 标签 —— 属性值里的 `<b>` 不是加粗，就是那三个字符本身。
+
+    为什么值得一条锁：HTML **允许**属性值里出现 `<`，所以页面不报错、只是悬停框里多出几个
+    字符（读者看到「按它<b>从大到小</b>」这种字样）。我自己两次差点这么写：一次在
+    `METRIC_HELP`（那条另有专门的锁，因为它走 `${esc(...)}` —— esc 之后还会再解码一次），
+    一次在族卡片的「排序分」。这条扫**全部** title（静态标记与 JS 模板一起），
+    所以它在哪儿写都拦得住。
+    """
+    html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+    starts = [m.end() for m in re.finditer(r'title="', html)]
+    assert len(starts) >= 20, f"只找到 {len(starts)} 个 title —— 扫描是不是失效了？"
+    bad = []
+    for start in starts:
+        i, depth = start, 0
+        while i < len(html):
+            c = html[i]
+            if c == "$" and html[i + 1:i + 2] == "{":
+                depth += 1
+            elif c == "}" and depth:
+                depth -= 1
+            elif c == '"' and not depth:
+                break
+            i += 1
+        val = html[start:i]
+        if re.search(r"</?(b|i|code|span|div|br)\b", val):
+            bad.append((html[:start].count("\n") + 1, val[:90].replace("\n", " ")))
+    assert not bad, f"tooltip 里有 HTML 标签（悬停框会原样印出来）：{bad}"
+
+
 def test_static_markup_has_no_stray_backticks_or_markdown():
     """静态标记里的文案不许出现反引号 —— 页面上的代码是 `<code>`，反引号会原样打出来。
 
@@ -1311,6 +1341,8 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         # 但没有任何一处说**四条判据是什么**、以及这一页能答到哪一条
         "交付前置条件（四条判据是什么、这一页能答到哪）": "交付一条候选前（四条判据）",
         "明说哪两条口径本页不出（别拿面板的数去声称过了）": "与 ④ 的逐折口径本页不出",
+        "排序分那一行要解释「取负」是什么意思（族间口径）": "按它「从大到小」决定谁先做",
+        "需要 regime 那一行要说清与 preset 的同一道门": "否则信号被丢掉",
         # 2026-10-21 实测：一段 0 笔成交的真数据窗口，面板给出一排 0 且按符号涂色
         "0 笔成交要单独说清（0 是「没参与」不是「不赚不亏」）": "function zeroTradesNote(",
         "显示上的 0 不带负号（−0.00pp 是浮点残差不是数字）": "const _z0 = (x, d) =>",

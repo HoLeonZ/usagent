@@ -418,8 +418,12 @@ false 不是「没做完」，而是「如实交付的产物」—— 它带着�
       }</code><br><span class="sub">这些参数<b>不参与搜索</b>（被固定在某个取值上）——
         读网格结果时必须知道这一点：网格里变的是别的轴，它们不是。</span></td></tr>` : ""}
     <tr><td class="k">网格组数</td><td>${e.grid_size}</td></tr>
-    <tr><td class="k">排序分</td><td>${esc(e.score_col)}${e.score_negated ? "（取负）" : ""}</td></tr>
-    <tr><td class="k">需要 regime</td><td>${e.needs_regime ? "是" : "否"}</td></tr>
+    <tr><td class="k" title="族的入场排序分：同一天信号多于容量上限时，按它「从大到小」决定谁先做
+（只影响先后，不影响谁入选 —— 入选由掩码决定）。标注「取负」是因为这一族的量「越小越优先」，
+取负之后才与其它族同一个方向（见 research/families.py 的 SCORE_COL / SCORE_NEGATED）。">排序分</td>
+      <td>${esc(e.score_col)}${e.score_negated ? "（取负）" : ""}</td></tr>
+    <tr><td class="k" title="这一族的入场是否还要求 regime 门为真（与 preset 的 regime 是同一道门）：
+「是」表示除掩码之外还要市场状态允许，否则信号被丢掉。">需要 regime</td><td>${e.needs_regime ? "是" : "否"}</td></tr>
     ${e.control_arm ? `<tr><td class="k">方向对照臂</td><td>${esc(e.control_arm)}</td></tr>` : ""}
     ${e.delivered_as.length ? `<tr><td class="k">已交付为</td><td>${esc(e.delivered_as.join(", "))}</td></tr>` : ""}
     <tr><td class="k">定义体</td><td><code>research/family_defs/${esc(e.id)}.py</code></td></tr>
