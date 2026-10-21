@@ -164,6 +164,13 @@
   `webapp/catalog.py`（注册表 → 页面目录）、`webapp/static/index.html`（全部前端，
   改完**刷新浏览器**即可）、`webapp/tests/test_platform.py`（含把内联脚本装进最小 DOM 桩
   **真的执行**的护栏），并说清改那几个 `.py` 要**重启服务**（模块与注册表都是启动时读的）。
+- **「历史报告」按文件名挑，于是 CLI 用别的名字写的报告一份都不列**（第九轮）：
+  接口 glob 的是 `web_report_*.html` 与 `report_*.html`，而 `research/render_report.py`
+  的**默认** `--out` 是 `trades_12m.html` —— 那份报告**明明在盘上**，页面的空态却写着
+  「盘上还没有报告」。现在扫全部 `*.html`，按**报告自己的标题**（`<title>回测明细 · …`）
+  认是不是报告：不是报告的 HTML 跳过，认出来的都列（CLI 产物没有 job id，如实留空）。
+  验证：真数据目录 34 份报告**一份不少**（解析出的名字/窗口逐条照旧），并加了一条测试：
+  `trades_12m.html` 这种名字要列、`not_a_report.html` 这种不是报告的不能列。
 
 ## 三、补的护栏（每一类都对应一次真踩过的坑）
 

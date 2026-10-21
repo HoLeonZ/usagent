@@ -317,9 +317,14 @@ class Handler(BaseHTTPRequestHandler):
             pj = jobs.params_by_job()          # job_id → 参数（报告里没有参数，台账里有）
             # 平台的产物 **和** CLI `--out` 的产物都要列出来：复制出来的那条命令如果跑完
             # 在页面上看不见，那"界面不是黑箱"就只是句口号（审计实测 --out 的命名对不上）。
-            files = list(RESULTS.glob("web_report_*.html")) + list(RESULTS.glob("report_*.html"))
-            total_reports = len(files)
-            for f in sorted(files, key=lambda x: x.stat().st_mtime, reverse=True)[:50]:
+            #
+            # ⚠️ 认的判据是**文件是不是报告**（`<title>回测明细 · …`），不是文件名长什么样：
+            # 此前只 glob `web_report_*.html` 与 `report_*.html`，于是 CLI 用**别的名字**写出的
+            # 报告（`research/render_report.py` 的默认 OUT_HTML 就是 `trades_12m.html`）
+            # 一份都不列 —— 而页面上的空态写着「盘上还没有报告」，那份报告**明明在盘上**。
+            # 现在扫全部 *.html，按标题认；不是报告的 HTML 跳过（results/ 里也可能有别的产物）。
+            heads = []
+            for f in RESULTS.glob("*.html"):
                 # ⚠️ 读头部不能只取前 N 个字符：CSS 一长，副标题就漂到切片外 —— 实测加了
                 # 打印样式与目录之后，新报告全都解析成 window=None（旧的还能解析，看起来
                 # 像"个别报告有问题"）。这里先把 <style> 整块去掉再取，头部大小与样式无关。
@@ -327,6 +332,12 @@ class Handler(BaseHTTPRequestHandler):
                 txt = re.sub(r"<style>.*?</style>", "", txt, count=1, flags=re.S)
                 head = txt[:4000]
                 name = re.search(r"<title>回测明细 · ([^<]+)</title>", head)
+                if not name:
+                    continue                      # 不是报告（results/ 里也可能有别的 HTML 产物）
+                heads.append((f, name.group(1), head))
+            heads.sort(key=lambda t: t[0].stat().st_mtime, reverse=True)
+            total_reports = len(heads)
+            for f, nm, head in heads[:50]:
                 win = re.search(r"窗口 ([0-9-]+) → ([0-9-]+)", head)
                 st = f.stat()
                 # job_id **只**对平台自己的产物成立（web_report_<12位hex>.html）。CLI `--out`
@@ -336,7 +347,7 @@ class Handler(BaseHTTPRequestHandler):
                 out.append({"job_id": jid, "file": f.name,
                             "has_trades": bool(jid) and
                             (RESULTS / f"web_trades_{jid}.csv").is_file(),
-                            "name": name.group(1) if name else "?",
+                            "name": nm,
                             "window": [win.group(1), win.group(2)] if win else None,
                             # 参数不是从报告里正则抓的，是按 job_id 回读台账（见 params_by_job）
                             "params": pj.get(jid),

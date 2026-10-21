@@ -1525,13 +1525,23 @@ def test_reports_route_lists_past_reports_and_parses_their_header(http, tmp_path
     (tmp_path / "web_report_abc123def456.html").write_text(
         "<!doctype html><title>回测明细 · family:xs_flow</title>"
         "<div class='sub'>窗口 2025-01-01 → 2025-10-13 ｜ 成交 28 笔</div>", encoding="utf-8")
+    # CLI 用**别的名字**写出的报告（research/render_report.py 的默认 OUT_HTML 就是
+    # trades_12m.html）此前**一份都不列** —— 而页面的空态写着「盘上还没有报告」。
+    (tmp_path / "trades_12m.html").write_text(
+        "<!doctype html><title>回测明细 · preset:us_reversal_dip_v1</title>"
+        "<div class='sub'>窗口 2025-01-01 → 2025-10-13 ｜ 成交 3 笔</div>", encoding="utf-8")
     (tmp_path / "not_a_report.html").write_text("<title>别的</title>", encoding="utf-8")
     code, body = _get(http + "/api/reports")
     assert code == 200
     reps = json.loads(body)["reports"]
-    assert [r["job_id"] for r in reps] == ["abc123def456"], "只该列 web_report_*"
-    assert reps[0]["name"] == "family:xs_flow"
-    assert reps[0]["window"] == ["2025-01-01", "2025-10-13"]
+    by_file = {r["file"]: r for r in reps}          # 顺序按 mtime（同一秒内不稳定）⇒ 按文件名比
+    assert set(by_file) == {"web_report_abc123def456.html", "trades_12m.html"}, \
+        f"该列的是**报告**（按标题认，不是按文件名），且 CLI 的别的名字也要列：{reps}"
+    assert by_file["web_report_abc123def456.html"]["job_id"] == "abc123def456"
+    assert by_file["trades_12m.html"]["job_id"] is None, "CLI 产物的文件名不是任务 id"
+    assert by_file["web_report_abc123def456.html"]["name"] == "family:xs_flow"
+    assert by_file["web_report_abc123def456.html"]["window"] == ["2025-01-01", "2025-10-13"]
+    assert by_file["trades_12m.html"]["name"] == "preset:us_reversal_dip_v1"
 
 
 def test_runs_route_counts_holdout_touches_over_the_whole_ledger(http, tmp_path, monkeypatch):
