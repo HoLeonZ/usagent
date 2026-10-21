@@ -526,10 +526,17 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     _k_note = ("" if _k_eff == _k_decl else
                f"（本机上的 k 比声明值大 {abs(_k_eff - _k_decl)}：含继承父策略的运行次数"
                f"与本机点过它的次数 —— 面板的「DSR 的 k」格写着它的构成）")
+    # ⚠️ 这个「跑赢/跑输 X pp」是 **总收益 − 基准**，**没有**把闲置资金按等权池计息 ——
+    # 与平台结果面板里的「曝光匹配超额」**不是同一个量**（平台那一格是曝光匹配口径）。
+    # 两个数可能方向相反（"跑赢基线"与"跑输满仓持有那个池子"是两回事），所以必须指出去，
+    # 否则读者会把这个差当成策略的边缘、拿它去印证别处的数字。
+    _diff_note = ("⚠️ 这个差是「本策略 CAGR − 同窗等权池 CAGR」，<b>没有</b>把闲置资金按等权池计息；"
+                  "平台结果面板里的「曝光匹配超额」是<b>另一个量</b>（曝光匹配口径），两个数不要互相印证。")
     parts.append('<div class="warn"><h3>读这份报告之前必须知道的五件事</h3><ul>'
                  f'<li>本策略在<b>本窗口</b> <b>CAGR {summary["cagr"]*100:+.2f}%</b>,'
                  f'同期无脑等权持有 CAGR {bench_cagr*100:+.2f}% —— '
                  f'<b>{_over} {abs(_diff)*100:.1f}pp</b>(同口径比较)。'
+                 f'{_diff_note}'
                  f'它是 {summary["n_trials"]} 次试验里选出来的。</li>'
                  f'<li><b>{inline_md(summary.get("verdict") or summary.get("note") or "（本策略没有声明负面证据—— §5 要求负面证据与参数同时记录）")}</b></li>'
                  f'<li><b>样本只有 {len(trades)} 笔</b>,敞口 {summary["exposure"]*100:.0f}%。'

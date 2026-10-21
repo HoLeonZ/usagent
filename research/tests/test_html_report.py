@@ -261,6 +261,20 @@ def test_a_hostile_note_cannot_break_the_document(chain):
     assert "&lt;script&gt;" in doc
 
 
+def test_the_report_says_which_excess_it_is_printed(chain):
+    """报告头条那个「跑赢/跑输 X pp」是**总收益 − 基准**，报告必须说清它不是哪个量。
+
+    为什么：平台的结果面板里有一格叫「曝光匹配超额」（把闲置资金按等权池计息），
+    而报告里的这个差**没有**那一步计息 —— 两者**不是同一个量**，甚至可能方向相反。
+    报告此前只写「同口径比较」（说的是同窗），读者会把这个差当成策略的边缘。
+    现在报告明说它是什么，并指出另一个口径的数在平台面板里（别互相印证）。
+    """
+    doc, n, _ = _render(chain)
+    assert H.selfcheck(doc, n) == []
+    assert "曝光匹配超额" in doc, "报告没提另一个口径的数"
+    assert "不要互相印证" in doc, "报告没说清两个数的关系"
+
+
 def test_family_rows_render_the_third_state_not_a_checkmark(chain):
     """族的行在报告里必须是「·」而不是「✓」—— 一个**假 ✓** 比没有这一列更坏。"""
     doc, _, _ = _render(chain, family="str")
