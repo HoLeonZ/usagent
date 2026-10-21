@@ -1100,6 +1100,8 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
   zeroNoteShown: zeroNote.includes("一笔都没成交") && zeroNote.includes("没参与"),
   zeroNoteSilentForReal: someNote === "",
   zeroDraftWarns: zeroDraft.includes("一笔都没成交") && zeroDraft.includes("别把它们写进结论当证据"),
+  // 草稿是**单窗读数**，不是交付判定 —— 不说清就会被当成交付判定粘进 VERDICT
+  draftSaysNotVerdict: zeroDraft.includes("不是交付判定") && zeroDraft.includes("四条判据"),
   // 「−0.00」不是数字（实测：0 笔成交的窗口里超额算出 −5.1e-15，印成 −0.00pp）
   negZero: [pp(-5.10702591327572e-15), pct(-1e-16), num(-1e-9), pp(-0.000123)],
   keepSmall: [pp(-0.0123), pct(-0.021)],
@@ -1154,6 +1156,7 @@ console.log(JSON.stringify({ ok: true, keys: Object.keys(out),
     assert got["zeroNoteShown"], "0 笔时没在面板上说清「0 是没参与，不是不赚不亏」"
     assert got["zeroNoteSilentForReal"], "有成交时不该出现那条说明"
     assert got["zeroDraftWarns"], "0 笔时判词草稿没带警告（草稿是要直接粘进 VERDICT 的）"
+    assert got["draftSaysNotVerdict"], "草稿没说清它是单窗读数、不是交付判定"
     # 显示上的 0 不带负号；但真的不为 0 的小数不能被抹掉
     assert got["negZero"] == ["0.00pp", "0.00%", "0.000", "-0.01pp"], f"负零没清掉：{got['negZero']}"
     assert got["keepSmall"] == ["-1.23pp", "-2.10%"], f"把不该抹的抹了：{got['keepSmall']}"
