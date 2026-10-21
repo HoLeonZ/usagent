@@ -275,6 +275,37 @@ def test_the_report_says_which_excess_it_is_printed(chain):
     assert "不要互相印证" in doc, "报告没说清两个数的关系"
 
 
+def test_the_summary_table_says_which_excess_it_shows(chain):
+    """摘要表里那一格不能只写「超额」—— 它是「总收益 − 基准」，不是曝光匹配口径。
+
+    平台的结果面板里那一格叫「曝光匹配超额」（把闲置资金按等权池计息），报告这一格不是它
+    （两者方向甚至可能相反）。此前报告只写「超额」，而平台的 tooltip 里明写着"与报告摘要里
+    那个 tot−bench 的「超额」不是同一个量" ⇒ 同一件事两处各叫一个名字、只有一端说明。
+    """
+    doc, n, _ = _render(chain)
+    assert H.selfcheck(doc, n) == []
+    assert "超额（总收益 − 基准）" in doc, "摘要表里的「超额」没写清是哪个量"
+    assert "曝光匹配超额" in doc, "报告里没提另一个口径的数"
+
+
+def test_the_config_section_says_which_parameters_it_prints(chain):
+    """族型 preset 的族网格轴不能被标成 `signal.*` —— 那是**族参数**。
+
+    实测：us_reversal_dip_v1 用的是族 str 的掩码，它的参数住在 `family_params` 里，
+    而报告的「配置」那一节一律印 `signal.<键>` ⇒ **族网格的轴**被说成"信号参数"
+    （平台卡片上写的是「入场族 str · 参数 {…}」—— 两处同一件事两种说法）。
+
+    顺带：`None` 一律印成「未设」（平台口径是「未设 / 不清算」）—— 报告里印 Python 的
+    `None` 会让人以为那是个取值，而不是"这个参数没设、这条条件不生效"。
+    """
+    doc, n, _ = _render(chain)          # 默认 preset = us_reversal_dip_v1（族型）
+    assert H.selfcheck(doc, n) == []
+    assert "族参数.drop5" in doc, "族型 preset 的族参数还被标成 signal.*"
+    assert "signal.drop5" not in doc, "族网格的轴仍被标成 signal.*"
+    assert ">None<" not in doc, "报告里还有 Python 的 None（该印「未设」）"
+    assert "未设" in doc
+
+
 def test_family_rows_render_the_third_state_not_a_checkmark(chain):
     """族的行在报告里必须是「·」而不是「✓」—— 一个**假 ✓** 比没有这一列更坏。"""
     doc, _, _ = _render(chain, family="str")

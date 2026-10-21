@@ -567,6 +567,8 @@ def _summary(P: dict, res: dict, sig: pd.DataFrame, eq: pd.DataFrame,
     return {
         "preset_name": name, "preset": resolve(P),
         "signal": P.get("signal") or P.get("family_params") or {},
+        # 这组参数来自 signal 还是族参数（报告的「配置」节据此写前缀）
+        "signal_source": ("signal" if P.get("signal") else "family_params"),
         "lo": lo, "hi": hi,
         "cagr": float(metrics.cagr(eq["equity"], pd.Series(eq.index))),
         "max_dd": float(res["metrics"]["max_dd"]),

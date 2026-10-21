@@ -200,6 +200,9 @@ def run(lo: str, hi: str, preset_name: str = DEFAULT_PRESET,
         "preset_name": title or preset_name, "preset": preset,
         # signal 表：signal 型给 A~F 的参数，族型给族参数 —— 报告里那一节照旧显示"配置"
         "signal": P.get("signal") or P.get("family_params") or {},
+        # 这组参数**来自哪儿**（报告的「配置」那一节据此写前缀：族型 preset 的族网格轴
+        # 不能被标成 "signal.*" —— 那是同一件事的两种说法）
+        "signal_source": ("signal" if P.get("signal") else "family_params"),
         # 判读依据 = **策略自己声明的负面证据**（§5：负面证据必须与参数同时记录）。
         # 此前这里是写死"30% 目标"那段文字 —— 只对某一条 preset 成立，换一条就成了假陈述
         # （本文件的历史注释里记着两次翻车）。现在任何策略都渲染它自己的 verdict。

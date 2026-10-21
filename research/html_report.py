@@ -452,6 +452,16 @@ a{color:var(--acc)}
 """
 
 
+def _cfg_val(v: object) -> str:
+    """配置表里的值：`None` 印成「未设」，与平台结果面板的口径一致。
+
+    为什么不用 Python 的 `None`：平台上同一件事写的是「未设 / 不清算」（口径头的同一份
+    标签），报告里写 `None` ⇒ 同一件事两种词，读者会以为 `None` 是某个取值（"没设"与
+    "值为 None"在配置表里长得一样）。
+    """
+    return "未设" if v is None else str(v)
+
+
 def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                 cfg: dict, bench: pd.Series, summary: dict,
                 explain=None) -> str:
@@ -561,7 +571,11 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
         ("CAGR(12个月)", f'{summary["cagr"]*100:+.2f}%', "pos" if summary["cagr"] > 0 else "neg"),
         ("总收益", f'{tot*100:+.2f}%', "pos" if tot > 0 else "neg"),
         ("无脑等权持有", f'{bench_tot*100:+.2f}%', "pos" if bench_tot > 0 else "neg"),
-        ("超额", f'{(tot-bench_tot)*100:+.2f}pp', "pos" if tot > bench_tot else "neg"),
+        # ⚠️ 标签要写清是哪个量：这一格是「总收益 − 基准」，**没有**把闲置资金按等权池计息 ——
+        # 与平台结果面板里的「曝光匹配超额」不是同一个量（方向甚至可能相反）。此前只写
+        # 「超额」，读者会把它当成策略相对池子的边缘（平台那一格的 tooltip 里就写着这件事，
+        # 可报告这边一个字都没说 ⇒ 两处同一件事两种说法）。
+        ("超额（总收益 − 基准）", f'{(tot-bench_tot)*100:+.2f}pp', "pos" if tot > bench_tot else "neg"),
         ("最大回撤", f'{summary["max_dd"]*100:.2f}%', "neg"),
         ("胜率", f'{summary["win"]*100:.0f}%', ""),
         ("E[R]", f'{summary["e_r"]:+.2f}', "pos" if summary["e_r"] > 0 else "neg"),
@@ -576,13 +590,18 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
 
     parts.append('<h2 id="s-config">配置</h2><div class="card"><table class="conds">')
     parts.append('<tr><th>项</th><th>值</th></tr>')
+    # ⚠️ 前缀要说清这组参数**是什么**：族型 preset 的入场参数住在 `family_params` 里
+    # （`summary["signal"]` 是"signal 或 family_params"的二选一），此前一律印成
+    # `signal.<键>` ⇒ 对 us_reversal_dip_v1 这类族型 preset，**族网格的轴**被标成了
+    # "信号参数"。平台卡片上写的是「入场族 str · 参数 {…}」—— 两处同一件事两种说法。
+    _cfg_prefix = "族参数." if summary.get("signal_source") == "family_params" else "signal."
     for k, v in cfg.items():
-        parts.append(f'<tr><td>signal.{e(str(k))}</td><td>{e(str(v))}</td></tr>')
+        parts.append(f'<tr><td>{_cfg_prefix}{e(str(k))}</td><td>{e(_cfg_val(v))}</td></tr>')
     # 执行参数**全部**由已解析的 spec 渲染,不手写键名清单:手写清单会让新增的执行键
     # 从报告里静默消失。2026-10-15 复核实测:旧版只印了 5 个键,比引擎实际读的少 9 个。
     for k in sorted(summary["preset"]):
         parts.append(f'<tr><td>{e(k)}</td><td>'
-                     f'{e(str(summary["preset"][k]))}</td></tr>')
+                     f'{e(_cfg_val(summary["preset"][k]))}</td></tr>')
     parts.append('</table></div>')
 
     # ---- 交易总表 ----
@@ -793,7 +812,9 @@ def family_explain_rows(ind: pd.DataFrame, symbol: str, sig_date: pd.Timestamp,
             txt = str(v)
         out.append((col, f"掩码读了 {col}", txt, "—", None))
     for k, v in sorted((params or {}).items()):
-        out.append((f"param.{k}", "本次用的参数", str(v), "—", None))
+        # `None` 在这里的意思是**这个参数没有设**（这一条条件根本不生效），
+        # 不是"它的值叫 None" —— 印成「未设」，与配置表与平台口径一致。
+        out.append((f"param.{k}", "本次用的参数", _cfg_val(v), "—", None))
     if not out:
         out.append(("—", "这个掩码没有直接读面板列", "—", "—", False))
     return out
