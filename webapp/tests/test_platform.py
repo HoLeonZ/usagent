@@ -1437,6 +1437,7 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         "0 笔成交要单独说清（0 是「没参与」不是「不赚不亏」）": "function zeroTradesNote(",
         "显示上的 0 不带负号（−0.00pp 是浮点残差不是数字）": "const _z0 = (x, d) =>",
         "池子可评估范围在新标签页也能显示（从台账取回，否则那句话是假话）": "seedPoolFromRuns(",
+        "对比条在不够两条时要说明为什么（不能一声不吭地消失）": "「跑完两条候选怎么比」：",
         "窗口没填全要当场说（空窗口不许谎称碰 holdout）": "✗ 窗口没填全（起点与终点都要",
     }
     missing = [k for k, v in need.items() if v not in html]

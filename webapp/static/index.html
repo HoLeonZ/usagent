@@ -1168,7 +1168,15 @@ function keyOf(r) {
 // ① k 不同 ⇒ DSR 不可直接比（这是 2026-10-20 的教训）；② 窗口/参数不同 ⇒ 其它项也不同口径。
 function renderCompareBar() {
   const withJob = RUNS.filter(r => r.job_id);
-  if (withJob.length < 2) { $("cmpbar").innerHTML = ""; $("cmpout").innerHTML = ""; return; }
+  if (withJob.length < 2) {
+    // 不够两条就说清为什么、还差什么（此前这里是**空**的 —— "跑完两条候选怎么比"是页面上
+    // 写着的能力，却在你还没跑够两条时**一个字都不出现**，像是没有这个功能）。
+    $("cmpbar").innerHTML = `<span class="sub">「跑完两条候选怎么比」：${
+      withJob.length === 1
+        ? `现在只有 <b>1</b> 次带任务 id 的运行 —— 再跑一次，这儿就能选甲/乙逐项比。`
+        : `还没有带任务 id 的运行 —— 在任何一张卡片上点「回测」，跑出两次就能比。`}</span>`;
+    $("cmpout").innerHTML = ""; return;
+  }
   const label = (r) => `${(r.ts || "").slice(5, 16)} · ${r.strategy_id} · ${(r.window || []).join("..")} · k=${r.n_trials_k ?? "?"}`;
   const prevA = ($("cmpA") || {}).value, prevB = ($("cmpB") || {}).value;
   const sel = (id, def) => `<select id="${id}" aria-label="对比${id === "cmpA" ? "甲" : "乙"}">`
