@@ -396,6 +396,13 @@ def _run(job_id: str) -> None:
                    # 这条候选从哪条策略复制而来（§5：派生候选要把父策略的平台运行次数并进 k）
                    "derived_from": P.get("derived_from"),
                    "n_trades": m["n_trades"], "excess": m["excess"], "dsr": m["dsr"],
+                   # 台账里多记几个**动态指标** —— 否则"跑完两条候选怎么比"只能人去翻两份报告
+                   # （或从渲染好的 HTML 里反推事实，那是一份事实两处）。有了它们，平台就能
+                   # 直接给出逐项对比，并在 k 不同时**明说 DSR 不可比**（2026-10-20 的教训）。
+                   "cagr": m["cagr"], "exposure": m["exposure"], "bench_cagr": m["bench_cagr"],
+                   "maxdd": m["maxdd"], "win_pct": m["win_pct"], "e_r": m["E_R"],
+                   "profit_factor": m["profit_factor"], "folds_positive": m["folds_positive"],
+                   "alpha_annual": m["alpha_annual"], "t_alpha": m["t_alpha"],
                    # ⚠️ job_id 必须记：报告文件名就是 web_report_<job_id>.html，不记它这条台账
                    # 就是**死胡同** —— 想再看一眼那次结果只能重跑，而重跑会把 k 推高
                    # （拿统计预算买回已经付过费的结果）。审计实测：盘上 6 份报告、界面 0 个入口。

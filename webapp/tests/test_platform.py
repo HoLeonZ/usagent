@@ -664,6 +664,56 @@ def test_holdout_ledger_state_reports_both_kinds_and_refuses_to_hide_corruption(
     assert "error" in st3 and "LedgerCorrupt" in st3["error"], st3
 
 
+def test_compare_gives_deltas_and_flags_the_discipline_breaks(http, tmp_path, monkeypatch):
+    """「跑完两条候选怎么比」—— 逐项差值，并且**明说**这次比是不是同口径。
+
+    这是 2026-10-20 我自己**手工**做过一次的活（curl + 拼表），说明平台缺这个入口。
+    比它更有价值的是那两句提醒：k 不同 ⇒ DSR 不可直接比；窗口/参数不同 ⇒ 其它项也不同口径。
+    一个只给数字不给口径的对比表，会让人拿两次不同试验次数的 DSR 互比。
+    """
+    monkeypatch.setattr(srv_mod, "RESULTS", tmp_path)
+    monkeypatch.setattr(jobs, "RUNS_LEDGER", tmp_path / "web_runs.jsonl")
+    rows = [
+        {"ts": "2026-10-20T10:00:00", "job_id": "aaaaaaaaaaaa", "strategy_id": "preset:base",
+         "window": ["2025-01-01", "2025-10-13"], "params": {"a": 1}, "n_trials_k": 20,
+         "cagr": 0.10, "excess": -0.02, "bench_cagr": 0.30, "exposure": 0.1, "n_trades": 40,
+         "win_pct": 0.25, "e_r": -0.2, "profit_factor": 0.7, "maxdd": -0.2, "folds_positive": 1,
+         "alpha_annual": -0.01, "dsr": 0.003},
+        {"ts": "2026-10-20T11:00:00", "job_id": "bbbbbbbbbbbb", "strategy_id": "preset:cand",
+         "window": ["2025-01-01", "2025-10-13"], "params": {"a": 2}, "n_trials_k": 21,
+         "cagr": 0.12, "excess": -0.01, "bench_cagr": 0.30, "exposure": 0.09, "n_trades": 38,
+         "win_pct": 0.3, "e_r": -0.1, "profit_factor": 0.85, "maxdd": -0.21, "folds_positive": 1,
+         "alpha_annual": 0.0, "dsr": 0.01},
+    ]
+    (tmp_path / "web_runs.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    d = json.loads(_get(http + "/api/compare/aaaaaaaaaaaa/bbbbbbbbbbbb")[1])
+    assert d["a"]["strategy_id"] == "preset:base" and d["b"]["strategy_id"] == "preset:cand"
+    cagr = next(r for r in d["rows"] if r["key"] == "cagr")
+    assert abs(cagr["delta"] - 0.02) < 1e-12, cagr
+    pf = next(r for r in d["rows"] if r["key"] == "profit_factor")
+    assert abs(pf["delta"] - 0.15) < 1e-12, pf
+    # 三条纪律标志：k 不同（20 vs 21）、窗口同、参数不同
+    assert d["k_differs"] is True and d["window_differs"] is False and d["params_differ"] is True
+    # 坏输入：id 不存在 / 路径不合法
+    assert _get(http + "/api/compare/aaaaaaaaaaaa/deadbeefdead")[0] == 404
+    assert _get(http + "/api/compare/nothex/bbbbbbbbbbbb")[0] == 400
+
+
+def test_the_ledger_records_the_dynamic_metrics_the_compare_view_needs(offline):
+    """对比视图要的动态指标必须**记进台账** —— 否则只能去翻两份报告（或从渲染好的 HTML 里
+    反推事实，那是一份事实两处）。"""
+    st = _wait(jobs.submit({"kind": "preset", "id": "us_reversal_dip_v1",
+                            "lo": WIN[0], "hi": WIN[1]})["id"])
+    assert st["status"] == "done", st.get("error")
+    rec = [json.loads(x) for x in (offline / "web_runs.jsonl").read_text().splitlines()][-1]
+    for key in ("cagr", "exposure", "bench_cagr", "maxdd", "win_pct", "e_r",
+                "profit_factor", "folds_positive", "alpha_annual"):
+        assert key in rec, f"台账没记 {key}（对比视图会缺这一项）"
+    assert rec["cagr"] == pytest.approx(st["metrics"]["cagr"]), "台账与任务状态的同一个量不一致"
+
+
 def test_k_accounting_inherits_the_parents_platform_runs(tmp_path, monkeypatch):
     """派生候选的 k 必须继承**父策略**在本平台的运行次数（§5 记账）。
 
@@ -1005,6 +1055,9 @@ def test_the_page_has_the_affordances_development_and_backtesting_need():
         # 用平台真做一次迭代时撞出来的（界面审计看不见）：兄弟候选的 k 会偏小
         "开发指引里写明兄弟候选的记账规则（k 会偏乐观）": "别拿两次 k 不同的",
         "开发指引给出机制（derived_from），不只是规矩": "derived_from",
+        "跑完两条怎么比：对比条（选甲/选乙）": 'id="cmpbar"',
+        "对比表：逐项差值": "function fmtCell(",
+        "对比时提醒 k 不可比（上一轮的教训）": "DSR 不可直接比",
         "台账可视「载入全部」（此前第 31 条只能在 CSV 里看）": "载入全部（共 ${TOTAL} 条）",
         "平台越界运行里登记进权威账本的条数要说出来": "条登记进了这本账",
         "数据覆盖到哪天（拿多新的数据跑的结论）": "数据覆盖到",

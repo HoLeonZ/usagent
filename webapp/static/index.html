@@ -273,6 +273,8 @@ table.ledger td{white-space:nowrap}
   报告摘要里的「超额」＝自身总收益 − 基准总收益（不按敞口）。同一格子上两者可以差很多，
   别拿这一列去对报告摘要那一行。</div>
 <div id="lbar" class="sub"></div>
+<div class="sub" id="cmpbar"></div>
+<div id="cmpout"></div>
 <div id="ledger" class="scrollx"></div>
 
 <h2 id="reports">历史报告</h2>
@@ -894,6 +896,7 @@ function renderLedger() {
     ? ` · <span class="warn">碰过 holdout 的运行 ${scoped} —— §5：只准读一次</span>${sk}`
     : ` · 碰过 holdout 的运行：<b>0</b> 次 ${scoped}${sk}`;
   const htLine = `<div class="sub">${ht.trim().replace(/^·\s*/, "")}</div>${hl}`;
+  renderCompareBar();
   $("lbar").innerHTML = htLine + `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
       ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""}${ht} ·
     <select id="lf" aria-label="按策略筛选台账" onchange="renderLedger()">
@@ -981,6 +984,54 @@ function keyOf(r) {
   return r.strategy_id + "|" + JSON.stringify(r.params || null)
        + "|" + ((r.window || []).join(".."));
 }
+// 「跑完两条候选怎么比」—— 平台自己给逐项差值，并把两条纪律写在最前面：
+// ① k 不同 ⇒ DSR 不可直接比（这是 2026-10-20 的教训）；② 窗口/参数不同 ⇒ 其它项也不同口径。
+function renderCompareBar() {
+  const withJob = RUNS.filter(r => r.job_id);
+  if (withJob.length < 2) { $("cmpbar").innerHTML = ""; $("cmpout").innerHTML = ""; return; }
+  const label = (r) => `${(r.ts || "").slice(5, 16)} · ${r.strategy_id} · ${(r.window || []).join("..")} · k=${r.n_trials_k ?? "?"}`;
+  const prevA = ($("cmpA") || {}).value, prevB = ($("cmpB") || {}).value;
+  const sel = (id, def) => `<select id="${id}" aria-label="对比${id === "cmpA" ? "甲" : "乙"}">`
+    + withJob.map(r => `<option value="${esc(r.job_id)}"${r.job_id === (id === "cmpA" ? (prevA || def) : (prevB || def)) ? " selected" : ""}>${esc(label(r))}</option>`).join("")
+    + "</select>";
+  $("cmpbar").innerHTML = `对比两次运行：${sel("cmpA", withJob[0].job_id)} ↔ ${sel("cmpB", withJob[1].job_id)}
+    <button class="mini" onclick="doCompare()">比一比</button>
+    <span class="sub">（逐项差值 + k/窗口口径提醒 —— 两条候选怎么比就看这里）</span>`;
+}
+
+function fmtCell(v, unit) {
+  if (v === null || v === undefined || (typeof v === "number" && !isFinite(v))) return "—";
+  if (unit === "pct") return (v * 100).toFixed(2) + "%";
+  if (unit === "pp") return (v * 100).toFixed(2) + "pp";
+  if (unit === "int") return String(v);
+  return Number(v).toFixed(3);
+}
+
+async function doCompare() {
+  const a = $("cmpA").value, b = $("cmpB").value;
+  if (!a || !b) return;
+  let d;
+  try { d = await (await fetch(`/api/compare/${a}/${b}`)).json(); }
+  catch (exc) { $("cmpout").innerHTML = `<div class="sub neg">对比失败：${esc(exc.message)}</div>`; return; }
+  if (d.error) { $("cmpout").innerHTML = `<div class="sub neg">${esc(d.error)}</div>`; return; }
+  const head = (x, tag) => `<b>${tag}</b> ${esc(x.strategy_id)} · ${esc((x.window || []).join(".."))} · k=${x.k ?? "?"}`
+    + (x.derived_from ? ` <span class="sub">（派生自 ${esc(x.derived_from)}）</span>` : "")
+    + (x.params ? ` <code class="p">${esc(paramsOf(x.params))}</code>` : "");
+  const warn = [];
+  if (d.k_differs) warn.push(`⚠️ 两次的 <b>k 不同</b>（${d.a.k} vs ${d.b.k}）⇒ <b>DSR 不可直接比</b> —— 它俩的试验次数不同`);
+  if (d.window_differs) warn.push(`⚠️ 两次<b>窗口不同</b> ⇒ 除 DSR 外，其它指标也不是同口径比较`);
+  if (d.params_differ) warn.push(`⚠️ 两次<b>参数不同</b> —— 这是两个配置，不是同配置重跑`);
+  $("cmpout").innerHTML = `<div class="card"><div class="sub">${head(d.a, "甲：")}</div>
+    <div class="sub">${head(d.b, "乙：")}</div>
+    ${warn.length ? `<div class="verdict none">${warn.join("<br>")}</div>` : ""}
+    <table class="rsum"><thead><tr><th>指标</th><th>甲</th><th>乙</th><th>Δ（乙−甲）</th></tr></thead><tbody>
+    ${d.rows.map(r => `<tr><td>${esc(r.label)}</td><td>${fmtCell(r.a, r.unit)}</td>
+      <td>${fmtCell(r.b, r.unit)}</td>
+      <td class="${r.delta === null ? "" : (r.delta >= 0 ? "pos" : "neg")}">${
+        r.delta === null ? "—" : (r.delta >= 0 ? "+" : "") + fmtCell(r.delta, r.unit)}</td></tr>`).join("")}
+    </tbody></table></div>`;
+}
+
 function renderReports() {
   if (!REPORTS.length) { $("reports_body").innerHTML = `<div class="sub">（盘上还没有报告）</div>`; return; }
   // ⚠️ 接口一直发着 total/shown（50 条上限），但页面从没显示过 —— 40 行台账那边有

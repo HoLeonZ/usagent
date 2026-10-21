@@ -225,6 +225,42 @@ class Handler(BaseHTTPRequestHandler):
                                     # 权威 holdout 台账的状态（平台运行**不登记**进去）——
                                     # 不并排显示，读者会把平台那个数当成纪律账本上的次数
                                     "holdout_ledger": catalog.holdout_ledger_state(allruns)})
+        if p.startswith("/api/compare/"):
+            # 跑完两条候选**怎么比** —— 逐项差值 + 两条纪律提醒（k 不同 ⇒ DSR 不可比；
+            # 窗口不同 ⇒ 其它指标也不是同口径）。这是上一轮我**手工**做的事，现在平台自己做。
+            m = re.fullmatch(r"/api/compare/([0-9a-f]{6,32})/([0-9a-f]{6,32})", p)
+            if not m:
+                return self._json(400, {"error": "比较要两个任务 id：/api/compare/<a>/<b>"})
+            by_id = {r.get("job_id"): r for r in jobs.all_runs() if r.get("job_id")}
+            a, b = by_id.get(m.group(1)), by_id.get(m.group(2))
+            if a is None or b is None:
+                return self._json(404, {"error": "这两个任务 id 里有一个不在台账里"})
+            fields = [("cagr", "CAGR", "pct"), ("excess", "曝光匹配超额", "pp"),
+                      ("bench_cagr", "同窗等权池 CAGR", "pct"), ("exposure", "平均敞口", "pct"),
+                      ("n_trades", "成交笔数", "int"), ("win_pct", "胜率", "pct"),
+                      ("e_r", "E[R]", "num"), ("profit_factor", "盈亏比 PF", "num"),
+                      ("maxdd", "最大回撤", "pct"), ("folds_positive", "4 折为正", "int"),
+                      ("alpha_annual", "alpha 年化", "pct"), ("dsr", "DSR", "num")]
+            rows = []
+            for key, lab, kind in fields:
+                va, vb = a.get(key), b.get(key)
+                delta = (vb - va) if isinstance(va, (int, float)) and isinstance(vb, (int, float)) else None
+                rows.append({"key": key, "label": lab, "unit": kind, "a": va, "b": vb, "delta": delta})
+            ka, kb = a.get("n_trials_k"), b.get("n_trials_k")
+            return self._json(200, {
+                "a": {"job_id": a.get("job_id"), "strategy_id": a.get("strategy_id"),
+                      "window": a.get("window"), "k": ka, "ts": a.get("ts"),
+                      "params": a.get("params"), "derived_from": a.get("derived_from")},
+                "b": {"job_id": b.get("job_id"), "strategy_id": b.get("strategy_id"),
+                      "window": b.get("window"), "k": kb, "ts": b.get("ts"),
+                      "params": b.get("params"), "derived_from": b.get("derived_from")},
+                "rows": rows,
+                # 两条纪律提醒（这是"对比"视图最该说的话）
+                "k_differs": (ka is not None and kb is not None and ka != kb),
+                "window_differs": (a.get("window") != b.get("window")),
+                "params_differ": (json.dumps(a.get("params"), sort_keys=True)
+                                  != json.dumps(b.get("params"), sort_keys=True)),
+            })
         if p == "/api/jobs":
             # 在途任务（页面刷新后据此重建面板/徽标/取消入口）。只给这个页面用得上的最小字段。
             jobs_now = jobs.inflight()
