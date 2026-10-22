@@ -17,7 +17,7 @@ import pytest
 
 from research.panel import (
     MAX_LOOKBACK_BARS, RAW_COLS, PanelError, data_vintage, first_signal_date,
-    to_panel_frame,
+    price_digest, to_panel_frame,
 )
 
 DATES = pd.bdate_range("2024-01-01", periods=3)
@@ -75,11 +75,22 @@ def test_first_signal_date_rejects_a_panel_shorter_than_the_warmup():
 
 
 def test_data_vintage_is_a_stable_fingerprint():
+    """计数部分逐字稳定；价格部分（A6 加的）是 32 位十六进制摘要。
+
+    ⚠️ 这个 fixture 现在必须带 `raw_close`/`volume`：`data_vintage` 会在缺列时
+    **抛错**（一个看不见价格的"vintage 指纹"正是 A6 要修的那个缺陷），
+    所以最小 fixture 也得把这两个物理量给出来。
+    """
     panel = pd.DataFrame({
         "symbol": ["AAA", "AAA", "BBB"],
         "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-02"]),
+        "raw_close": [1.0, 2.0, 3.0],
+        "volume": [1e6, 1e6, 1e6],
     })
-    assert data_vintage(panel) == "rows=3;symbols=2;from=2024-01-01;to=2024-01-02"
+    v = data_vintage(panel)
+    assert v.startswith("rows=3;symbols=2;from=2024-01-01;to=2024-01-02;prices=")
+    digest = v.split("prices=")[1]
+    assert len(digest) == 32 and all(c in "0123456789abcdef" for c in digest)
 
 
 def test_load_full_panel_explains_a_missing_database(tmp_path, monkeypatch):
@@ -99,3 +110,59 @@ def test_load_full_panel_explains_a_missing_database(tmp_path, monkeypatch):
     monkeypatch.setattr(dbmod, "connect", lambda: sqlite3.connect(str(empty)))
     with pytest.raises(panel.PanelError, match="download_ohlcv"):
         panel.load_full_panel()
+
+
+# ---------------------------------------------------------------- 价格内容指纹（A6）
+
+def _mini(close: float = 1.0, volume: float = 1e6) -> pd.DataFrame:
+    return pd.DataFrame({
+        "symbol": ["AAA", "AAA", "BBB"],
+        "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-02"]),
+        "raw_close": [close, 2.0, 3.0], "volume": [volume, 1e6, 1e6],
+    })
+
+
+def test_vintage_detects_a_price_change_with_identical_counts():
+    """**这就是 A6 的场景**：行数/标的数/日期全同，只有价格变了 —— 旧指纹看不出来，
+    于是 golden 变红会被归因成"逻辑变了"。"""
+    a, b = _mini(), _mini(close=1.0000001)
+    assert (len(a), a["symbol"].nunique()) == (len(b), b["symbol"].nunique())
+    old_style_a = f"rows={len(a)};symbols={a['symbol'].nunique()}"
+    old_style_b = f"rows={len(b)};symbols={b['symbol'].nunique()}"
+    assert old_style_a == old_style_b, "旧口径本来就分不开 —— 这条测试的前提"
+    assert price_digest(a) != price_digest(b), "价格变了，指纹必须变"
+    assert data_vintage(a) != data_vintage(b)
+
+
+def test_vintage_detects_a_volume_change():
+    assert price_digest(_mini()) != price_digest(_mini(volume=1.1e6))
+
+
+def test_digest_is_independent_of_row_order():
+    """分块哈希必须与行序无关 —— 否则同一份数据换个载入顺序就"变 vintage 了"。"""
+    a = _mini()
+    assert price_digest(a) == price_digest(a.iloc[::-1].reset_index(drop=True))
+
+
+def test_digest_is_deterministic_and_short():
+    a = _mini()
+    d = price_digest(a)
+    assert d == price_digest(a) and len(d) == 32 and all(c in "0123456789abcdef" for c in d)
+
+
+def test_digest_fails_fast_on_missing_columns():
+    with pytest.raises(PanelError, match="price_digest"):
+        price_digest(pd.DataFrame({"symbol": ["A"], "date": [pd.Timestamp("2024-01-02")]}))
+
+
+def test_vintage_fails_fast_without_prices():
+    """缺价的面板造不出 vintage —— 不许退回"只有计数"的旧口径（那正是 A6）。"""
+    with pytest.raises(PanelError):
+        data_vintage(pd.DataFrame({"symbol": ["A"], "date": [pd.Timestamp("2024-01-02")]}))
+
+
+def test_vintage_still_reports_the_counts():
+    """计数那部分不能因为加了摘要就丢掉 —— 它回答的是另一个问题（有没有补到新数据）。"""
+    v = data_vintage(_mini())
+    assert "rows=3" in v and "symbols=2" in v and "from=2024-01-02" in v
+    assert "prices=" in v

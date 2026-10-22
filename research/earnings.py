@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import time
@@ -24,6 +25,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -148,15 +150,78 @@ def earnings_dates_by_symbol(cache: dict[str, list[str]]) -> dict[str, list[pd.T
     return out
 
 
+def calendar_coverage(calendar: dict[str, list[str]]) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """日历**覆盖到的**日期闭区间 (min, max)；日历为空时返回 None。
+
+    为什么需要它（审计 A5）：`has_earnings_between` 此前在"符号不在日历里"与
+    "那段日期我们根本没取过"两种情况下都返回 **False**（= 窗口内没有财报），
+    于是**过滤在样本尾部静默失效** —— 你看到的是一个"已经剔除了财报窗"的信号表，
+    而实际上它只是没数据。未知 ≠ 没有。
+    """
+    if not calendar:
+        return None
+    ds = sorted(pd.Timestamp(d) for d in calendar)
+    return ds[0], ds[-1]
+
+
 def has_earnings_between(by_symbol: dict[str, list[pd.Timestamp]], symbol: str,
-                         lo: pd.Timestamp, hi: pd.Timestamp) -> bool:
-    """[lo, hi] 闭区间内该标的是否有财报 —— 二分查找。"""
+                         lo: pd.Timestamp, hi: pd.Timestamp, *,
+                         coverage: tuple[pd.Timestamp, pd.Timestamp] | None) -> bool:
+    """[lo, hi] 闭区间内该标的是否有财报 —— 二分查找。
+
+    ⚠️ `coverage` 是**必填**的日历覆盖区间：窗口落在覆盖之外就抛错，
+    而不是回答"没有财报"。把"不知道"说成"没有"是这条路径此前最危险的失效方式 ——
+    它让一个失效的过滤器看起来像在正常工作。
+    """
+    if coverage is None:
+        raise EarningsError(
+            "日历为空 —— 无法判定财报窗（先把日历取下来：python -m research.earnings）")
+    c0, c1 = coverage
+    if pd.Timestamp(lo) < c0 or pd.Timestamp(hi) > c1:
+        raise EarningsError(
+            f"财报日历只覆盖 {c0.date()}..{c1.date()}，而查询窗口是 "
+            f"{pd.Timestamp(lo).date()}..{pd.Timestamp(hi).date()} —— **未知不等于没有**。\n"
+            f"  处置二选一：① 把日历补齐到覆盖整个样本期；"
+            f"② 不用财报过滤（并在结论里写明「未做事件过滤」）。\n"
+            f"  绝不接受：让过滤器在样本尾部静默失效却当成已生效。")
     ds = by_symbol.get(symbol)
     if not ds:
+        # 覆盖之内、符号不在日历里 ⇒ 那段时间它确实没有财报（这是**确定性**的答案）
         return False
     import bisect
     i = bisect.bisect_left(ds, lo)
     return i < len(ds) and ds[i] <= hi
+
+
+def last_earnings_gap_trading_days(by_symbol: dict[str, list[pd.Timestamp]], symbol: str,
+                                   day: pd.Timestamp,
+                                   trading_days) -> int | None:
+    """「距上一份财报」的**交易日数**（0 = 当天就出过财报）；没有更早的财报 ⇒ None。
+
+    为什么按交易日而不是自然日：机制说的是"信息还在扩散的那几天"，周末不算扩散日；
+    3/5/10 个交易日与自然日的差别在多年样本上不可忽略。
+
+    `None` 的两种来源（没查到更早的财报 / 符号根本不在日历里）在本项目里是**同一个
+    意思**：无法认定它"刚出过财报"。调用方按保守方向用 —— 不要把它当成"刚出过"。
+
+    `trading_days` 是面板的交易日轴（升序去重的日期数组）；不在轴上的日期 ⇒ None。
+    """
+    ds = by_symbol.get(symbol)
+    if not ds:
+        return None
+    day = pd.Timestamp(day)
+    i = bisect.bisect_right(ds, day)
+    if i == 0:
+        return None
+    last = ds[i - 1]
+    axis = np.asarray(pd.to_datetime(pd.unique(trading_days)))
+    axis = np.sort(axis)
+    a = int(np.searchsorted(axis, np.datetime64(last), side="left"))
+    b = int(np.searchsorted(axis, np.datetime64(day), side="left"))
+    if a >= len(axis) or b >= len(axis) or axis[a] != np.datetime64(last) \
+            or axis[b] != np.datetime64(day):
+        return None                      # 日期不在交易日轴上（数据缺口）⇒ 不猜
+    return b - a
 
 
 def main() -> int:

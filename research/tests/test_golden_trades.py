@@ -26,6 +26,20 @@ from research import golden_baseline as G
 from research import indicators, panel as panel_mod, presets
 
 
+# 用例按**名字/标注**取，不按下标（2026-10-17 注册表重构）：`CASES` 现在由注册表派生，
+# 顺序 = 定义体文件名；只要有一处按下标取，新增一条 preset 就可能把不相干的测试
+# 悄悄换成另一个对象。这里把两处语义写成显式的查询。
+_CLI_DEFAULT = [c for c in G.CASES if c.get("is_cli_default")]
+assert len(_CLI_DEFAULT) == 1, "必须正好有一条用例标注为 CLI 默认窗口"
+CLI_DEFAULT_CASE = _CLI_DEFAULT[0]
+# 这几条测试要的是**另一条** preset（非默认、窗口更短）：按名字取，别按位置猜
+ALT_PRESET = "us_uptrend_pullback_12m_target"
+try:
+    ALT_CASE = next(c for c in G.CASES if c["preset"] == ALT_PRESET)
+except StopIteration:                                      # pragma: no cover
+    raise AssertionError(f"{ALT_PRESET} 不在行为锁里 —— 这几条测试没有对象可测") from None
+
+
 @pytest.fixture(scope="module")
 def real_chain():
     """真库 → 指标。只加载一次(425k 行,逐用例重载没必要)。
@@ -36,7 +50,12 @@ def real_chain():
     if not G.db_available():
         pytest.skip(f"本地 DB 不在({G.db_path()}),跳过 golden 基线比对(§6:skip 不 error)")
     try:
-        panel = panel_mod.load_full_panel()
+        # ⚠️ 必须用**取池的唯一入口**（与 `golden_baseline._run_all` 同一条路径）。
+        # 这里此前是裸的 `load_full_panel()`（= 模式 all，不做流动性/连续性过滤）——
+        # 于是"测试"与"重生成"跑的是**两个不同的池子**：池子不同 ⇒ 等权指数不同 ⇒
+        # regime 门不同 ⇒ 交易列表不同。实测 12m preset 在两条路径上是 15 笔 vs 18 笔，
+        # 而且重生成之后**仍然对不上**（因为漂移的根因是两条入口，不是基线过期）。
+        panel = panel_mod.load_panel_for_preset(G.presets.get_preset(CLI_DEFAULT_CASE["preset"]))
     except Exception as exc:                                  # noqa: BLE001
         pytest.skip(f"本地 DB 不可读,跳过 golden 基线比对:{type(exc).__name__}: {exc}")
     return panel, indicators.compute_all(panel)
@@ -83,11 +102,14 @@ def test_golden_harness_reproduces_the_cli(real_chain):
     from research import run_baseline
 
     panel, ind = real_chain
-    case = G.CASES[0]
-    assert case.get("is_cli_default"), "CASES[0] 必须标注它等于 CLI 默认窗口"
+    case = CLI_DEFAULT_CASE
+    assert case is CLI_DEFAULT_CASE, "这条测的是标注为 CLI 默认的那条用例"
     default = run_baseline.run(argparse.Namespace(
         preset=case["preset"], start=case["start"], end=case["end"],
-        cost_bps=float(G.preset_cost(case["preset"])), windows=False,
+        cost_bps=float(G.preset_cost(case["preset"])),
+        # 手工搭的 Namespace 必须与 CLI 的字段集一致：缺一个字段就等于
+        # 用另一套成本口径跑同一份 preset —— 正是 §6 要消灭的"两个入口分叉"。
+        spread_model=None, windows=False,
         avoid_earnings=False))
 
     cur = G.run_case(case, panel, ind)
@@ -151,13 +173,13 @@ def _cli_run(monkeypatch, case, **over):
     monkeypatch.setitem(presets.PRESETS, case["preset"], p)
     return run_baseline.run(argparse.Namespace(
         preset=case["preset"], start=case["start"], end=case["end"],
-        cost_bps=None, windows=False, avoid_earnings=False))
+        cost_bps=None, spread_model=None, windows=False, avoid_earnings=False))
 
 
 def test_cli_honours_the_preset_cost(real_chain, monkeypatch):
     from core import costs
 
-    case = G.CASES[1]
+    case = ALT_CASE
     cheap = _cli_run(monkeypatch, case, cost_bps_roundtrip=costs.COST_BPS_ROUNDTRIP)
     dear = _cli_run(monkeypatch, case, cost_bps_roundtrip=100.0)
 
@@ -171,7 +193,7 @@ def test_report_and_cli_agree_on_the_same_preset(real_chain, monkeypatch):
     """报告与 CLI 必须跑出同一条曲线 —— 包括 preset 里那些「不常用的」执行键。"""
     from research import render_report
 
-    case = G.CASES[1]
+    case = ALT_CASE
     p = presets.get_preset(case["preset"])
     p["trailing_sl"] = True                    # 白名单时代就是被它丢掉的
     monkeypatch.setitem(presets.PRESETS, case["preset"], p)
@@ -203,12 +225,12 @@ def test_cli_default_window_start_is_derived_from_the_data(real_chain):
     panel, ind = real_chain
     out = run_baseline.run(argparse.Namespace(
         preset="us_uptrend_pullback_v1", start=None, end=None,
-        cost_bps=None, windows=False, avoid_earnings=False))
+        cost_bps=None, spread_model=None, windows=False, avoid_earnings=False))
 
     assert out["start"] == str(panel_mod.first_signal_date(ind).date())
-    # 还要把「CASES[0] 就是 CLI 默认窗口」这件事真正连起来 —— 旧版只断言了
-    # G.CASES[0]["is_cli_default"] 这个**字面量 True**,对窗口本身零校验。
-    case = G.CASES[0]
+    # 还要把「标注为 CLI 默认的那条用例就是 CLI 默认窗口」这件事真正连起来 —— 旧版只断言了
+    # CLI_DEFAULT_CASE["is_cli_default"] 这个**字面量 True**,对窗口本身零校验。
+    case = CLI_DEFAULT_CASE
     assert (case["start"], case["end"]) == (out["start"], out["end"]), (
         f"golden 用例的窗口 {case['start']}..{case['end']} 与 CLI 默认窗口 "
         f"{out['start']}..{out['end']} 不一致 —— is_cli_default 这个标注就成了空话"
@@ -227,7 +249,7 @@ def test_golden_carrier_uses_the_preset_regime(real_chain, monkeypatch):
     2026-10-15 复核实测:此前载体用默认值、CLI 用 preset 值,于是把 preset 的 regime
     改掉之后,载体锁住的仍是旧曲线 —— 护栏对着一条谁都不会跑的配置。
     """
-    case = G.CASES[1]
+    case = ALT_CASE
     before = G.run_case(case, *real_chain)["n_trades"]
 
     p = presets.get_preset(case["preset"])

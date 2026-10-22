@@ -24,6 +24,8 @@ import logging
 
 import pandas as pd
 
+from research import universe as mod_universe
+
 logger = logging.getLogger(__name__)
 
 ENTRY_COLS = [
@@ -112,6 +114,10 @@ def select_entries(
     if max_amount is not None:
         mask = mask & (df["amount60"] <= max_amount)
 
+    # 池资格（§3 PIT Mandate）：只在**可投资集**里找信号。缺列 fail-fast ——
+    # 不允许存在"忘了带池子"却照样出数字的路径。
+    mask = mask & mod_universe.require_eligible_mask(df)
+
     # 指标就绪(不靠 bfill 补预热期的空洞)
     for c in ("ma60", "above_ma60_ratio", "amount60", "macd_bar",
               "macd_bar_prev", "mom120"):
@@ -183,6 +189,7 @@ def filter_earnings_window(
     by_symbol: dict[str, list[pd.Timestamp]],
     *,
     forward_days: int,
+    coverage: tuple[pd.Timestamp, pd.Timestamp] | None,
 ) -> pd.DataFrame:
     """剔除「持有窗口内夹着财报」的信号。
 
@@ -202,8 +209,93 @@ def filter_earnings_window(
     for _, r in sig.iterrows():
         lo = pd.Timestamp(r["date"]) + pd.Timedelta(days=1)
         hi = pd.Timestamp(r["date"]) + pd.Timedelta(days=forward_days)
-        keep.append(not has_earnings_between(by_symbol, str(r["symbol"]), lo, hi))
+        # coverage 必填：窗口不在日历覆盖内会抛错（审计 A5：未知 ≠ 没有）
+        keep.append(not has_earnings_between(by_symbol, str(r["symbol"]), lo, hi,
+                                             coverage=coverage))
     out = sig[keep].reset_index(drop=True)
     logger.info("filter_earnings_window: %d -> %d 个信号(剔除 %d)",
                 len(sig), len(out), len(sig) - len(out))
     return out
+
+
+def filter_recent_earnings(
+    sig: pd.DataFrame,
+    by_symbol: dict[str, list[pd.Timestamp]],
+    *,
+    max_trading_days: int,
+    coverage: tuple[pd.Timestamp, pd.Timestamp] | None,
+    trading_days,
+) -> pd.DataFrame:
+    """只保留「距上一份财报 ≤ max_trading_days 个交易日」的信号（H2：事件刚过）。
+
+    假设（预注册，见 `docs/2026-10-17-event-preset-presearch.md`）：财报刚过 ⇒
+    不确定性刚被消解 ⇒ 随后的下跌更可能是**噪声**而不是坏消息。
+
+    按**交易日**计数（机制说的是"信息还在扩散的那几天"，周末不算）。
+    「距上一份财报」查不到（样本期里没有更早的财报 / 符号不在日历里 / 日期不在交易日轴上）
+    ⇒ **不算刚过**，保守方向，绝不当成"刚出过"。
+
+    覆盖之外的信号日期**抛错**（审计 A5：未知 ≠ 没有）—— 让一个失效的过滤器
+    看起来像在正常工作，是这条路径此前最危险的失效方式。
+    """
+    if sig.empty:
+        return sig
+    from research.earnings import EarningsError, last_earnings_gap_trading_days
+
+    if coverage is None:
+        raise EarningsError("日历为空 —— 无法判定事件窗口（先取日历）")
+    c0, c1 = coverage
+    keep = []
+    for _, r in sig.iterrows():
+        d = pd.Timestamp(r["date"])
+        if d < c0 or d > c1:
+            raise EarningsError(
+                f"财报日历只覆盖 {c0.date()}..{c1.date()}，而信号日在 {d.date()} —— "
+                f"**未知不等于没有**：不许让过滤器在样本尾部静默失效。")
+        gap = last_earnings_gap_trading_days(by_symbol, str(r["symbol"]), d, trading_days)
+        keep.append(gap is not None and gap <= max_trading_days)
+    out = sig[keep].reset_index(drop=True)
+    logger.info("filter_recent_earnings: %d -> %d 个信号(剔除 %d)",
+                len(sig), len(out), len(sig) - len(out))
+    return out
+
+
+def apply_event_filters(sig: pd.DataFrame, preset: dict, *, trading_days=None,
+                        force_avoid_earnings: bool = False) -> pd.DataFrame:
+    """按 preset **声明的**事件键过滤信号 —— **所有入口共用这一个入口**。
+
+    为什么必须只有一处（§2(b)）：本仓库已经吃过"两个入口各自处理、跑的不是同一份数据"
+    的亏（golden 载体与 CLI 曾因 7 键白名单分叉出两条曲线）。事件过滤同样会改信号集 ——
+    若 CLI 过滤而载体不过滤，行为锁锁住的就又是另一条曲线。
+
+    键经 `core.preset_contract.resolve()` 读（含默认值），所以"preset 里声明了却没人读"
+    在结构上不可能：`avoid_earnings` 此前只能由 CLI 的 `--avoid-earnings` 打开、
+    preset 无法声明 —— 这次补上，CLI 那个开关降级为**强制打开**的覆盖。
+    """
+    from core.preset_contract import resolve                  # 单一读取路径（含默认值）
+    spec = resolve(preset)
+    avoid = bool(spec["avoid_earnings"]) or force_avoid_earnings
+    recent = spec["require_earnings_within_trading_days"]
+    if not avoid and recent is None:
+        return sig                                            # 默认全关：不读日历、零成本
+    if sig.empty:
+        return sig
+
+    from research.earnings import (calendar_coverage, earnings_dates_by_symbol,
+                                   load_calendar)
+    cal = load_calendar()
+    by_symbol = earnings_dates_by_symbol(cal)
+    coverage = calendar_coverage(cal)
+    if avoid:
+        sig = filter_earnings_window(
+            sig, by_symbol,
+            forward_days=int(spec["avoid_earnings_forward_calendar_days"]),
+            coverage=coverage)
+    if recent is not None:
+        if trading_days is None:
+            raise ValueError(
+                "require_earnings_within_trading_days 需要 trading_days（面板的交易日轴）"
+                "—— 否则无法按交易日计数")
+        sig = filter_recent_earnings(sig, by_symbol, max_trading_days=int(recent),
+                                     coverage=coverage, trading_days=trading_days)
+    return sig

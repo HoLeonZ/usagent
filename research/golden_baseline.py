@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import sys
 from pathlib import Path
@@ -36,8 +37,9 @@ import numpy as np
 import pandas as pd
 
 from research import broker, indicators, presets, regime as regime_mod, signals
+from research import holdout as mod_holdout
 from research.broker import TRADE_LOCK_COLS, trade_fingerprint
-from research.panel import data_vintage, load_full_panel
+from research.panel import data_vintage, load_panel_for_preset
 
 BASELINE_DIR = Path(__file__).resolve().parent / "tests" / "baselines"
 
@@ -45,19 +47,29 @@ EQUITY_KEY_COLS = ["date", "equity", "cash", "n_pos"]
 
 # 锁哪两个用例。窗口**写死绝对值**,不用 CLI 的默认解析 —— 默认解析会随数据漂移,
 # 而 golden 基线必须钉在一个不会自己动的坐标上(vintage 另有一道断言看住数据)。
-CASES: list[dict] = [
-    {"name": "us_uptrend_pullback_v1", "preset": "us_uptrend_pullback_v1",
-     "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": True},
-    {"name": "us_uptrend_pullback_12m_target", "preset": "us_uptrend_pullback_12m_target",
-     "start": "2025-10-14", "end": "2026-10-14", "is_cli_default": False},
-    # WFV 搜索选出的候选:窗口取**全可评估期**,让行为锁覆盖尽量多的分支
-    # (它的预注册搜索期是 2024-04-09..2025-10-13,holdout 是 2025-10-14..2026-10-13)。
-    {"name": "us_uptrend_pullback_wfv", "preset": "us_uptrend_pullback_wfv",
-     "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": False},
-    # 族型 preset(走 families.py 的短周期反转):同样锁全可评估期
-    {"name": "us_reversal_dip_v1", "preset": "us_reversal_dip_v1",
-     "start": "2024-04-09", "end": "2026-10-14", "is_cli_default": False},
-]
+#
+# 2026-10-17 注册表重构：用例**从注册表派生**（窗口写在 `preset_defs/<name>.py` 里）。
+# 此前这里是手写清单 —— 新增 preset 时漏掉它**什么都不会发生**，新 preset 只是从此
+# 不在任何护栏里；而"漏了也没人知道"正是本仓库反复吃亏的那类缺陷。
+#
+# 豁免表：**空 = 全都锁**。它能被写大，但一次性写大的代价是被
+# `test_lock_coverage.test_exempt_table_cannot_grow_silently` 当场抓住 ——
+# 豁免名单一旦能无声扩大，这条护栏就等于没有。
+LOCK_EXEMPT: dict[str, str] = {}
+
+
+def _cases_from_registry() -> list[dict]:
+    out = []
+    for name, rec in sorted(presets.REGISTRY.items()):
+        if name in LOCK_EXEMPT:
+            continue
+        out.append({"name": name, "preset": name,
+                    "start": rec["window"][0], "end": rec["window"][1],
+                    "is_cli_default": rec["is_cli_default"]})
+    return out
+
+
+CASES: list[dict] = _cases_from_registry()
 
 
 # ---------------------------------------------------------------- 环境
@@ -130,13 +142,23 @@ def run_preset(case: dict, panel: pd.DataFrame,
         sig = signals.select_entries(
             ind, start_date=case["start"], end_date=case["end"],
             regime_df=reg if preset.get("regime") else None, **preset["signal"])
+    # 事件过滤与 CLI 走**同一个入口**（`signals.apply_event_filters`）——
+    # 两处实现会让载体锁住的曲线与 CLI 跑的不是同一条（§6 的老毛病）。
+    sig = signals.apply_event_filters(sig, preset, trading_days=np.sort(ind["date"].unique()))
     res = broker.simulate(preset, sig, ind, start=case["start"], end=case["end"],
                           cost_bps_roundtrip=preset_cost(case["preset"]))
     return res, sig
 
 
 def run_case(case: dict, panel: pd.DataFrame, ind: pd.DataFrame) -> dict:
-    """跑完整链路并返回指纹。"""
+    """跑完整链路并返回指纹。
+
+    台账登记为 `kind="lock"`（2026-10-17 审计 B1）：本用例会读到 holdout 窗口，
+    但**重跑一次行为锁不是拿 holdout 出结论**，所以只登记、不烧窗口。
+    台账因此能回答"这段窗口被谁读过几次"，而不会把护栏本身算成一次研究迭代。
+    """
+    mod_holdout.consume(case["start"], case["end"], script="golden_baseline",
+                        tag=case["name"], kind=mod_holdout.KIND_LOCK)
     res, _ = run_preset(case, panel, ind)
     return {
         "vintage": data_vintage(panel),
@@ -190,7 +212,15 @@ def save_baseline(name: str, case: dict, info: dict) -> Path:
 # ---------------------------------------------------------------- CLI
 
 def _run_all() -> list[tuple[dict, dict]]:
-    panel = load_full_panel()
+    # 行为锁跑的是一个**面板**，所以所有用例必须声明同一个取池口径；
+    # 声明不一致 ⇒ 这个锁本身是歧义的，fail-fast（§0），绝不挑一个默认的用。
+    specs = {json.dumps(presets.get_preset(c["preset"]).get("universe"), sort_keys=True)
+             for c in CASES}
+    if len(specs) != 1:
+        raise ValueError(
+            f"CASES 里的 preset 声明了 {len(specs)} 种不同的 universe —— "
+            f"行为锁必须跑在同一个池子上；请统一声明或拆成两把锁：{sorted(specs)}")
+    panel = load_panel_for_preset(presets.get_preset(CASES[0]["preset"]))
     ind = indicators.compute_all(panel)
     return [(c, run_case(c, panel, ind)) for c in CASES]
 

@@ -1,0 +1,22 @@
+# 运行期依赖（**钉住版本**）。
+#
+# 为什么必须钉住（2026-10-17 审计 G2）：本仓库的核心主张是"同输入 ⇒ 同输出"（§0），
+# 而 pandas 3.0 与 2.x 在 rolling/shift 的边界行为上并不保证一致、yfinance 的
+# 限流与字段也在变。不钉版本时，同一份代码在另一台机器上跑出的数字可能不同，
+# 而"不同"会被误读成策略的问题。
+#
+# 生成方式（本机实测）：pip freeze 里的直接与关键间接依赖。
+# 升级任何一项都等于**再验一次**：跑 pytest 全绿 + 对 golden 基线做 §6 的漂移判定。
+yfinance==1.7.0
+pandas==3.0.5
+numpy==2.4.3
+pytest==9.0.2
+# yfinance 的 HTTP 栈（它自己会 import；不固定的话不同机器上可能落到别的实现）
+curl_cffi==0.16.3
+requests==2.32.5
+platformdirs==4.9.4
+frozendict==2.4.6
+multitasking==0.0.13
+peewee==4.5.3
+protobuf==6.33.6
+websockets==16.0

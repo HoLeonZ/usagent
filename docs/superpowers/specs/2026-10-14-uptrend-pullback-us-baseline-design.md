@@ -57,7 +57,7 @@ SEC §31 ≈ 0.278bp(卖出侧);FINRA TAF $0.000166/股、上限 $8.30。
 
 ## 2. 目录与模块
 
-位置:`/Users/holeon/code/usagent/research/`。**不动 `src/`**(审计结论:数据层不被交易逻辑污染)。
+位置:`<仓库根>/research/`。**不动 `src/`**(审计结论:数据层不被交易逻辑污染)。
 
 ```
 research/
@@ -207,8 +207,8 @@ v21 信号参数(基线原样值):
 ## 7. 复现命令
 
 ```bash
-cd /Users/holeon/code/usagent
-PY=/opt/homebrew/Caskroom/miniconda/base/bin/python
+cd <仓库根>
+PY=python3
 
 # 基线(两个流动性候选 × 三档成本)
 $PY -m research.run_baseline --preset us_v21_baseline --n-trials 6

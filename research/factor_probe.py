@@ -46,11 +46,48 @@ import numpy as np
 import pandas as pd
 
 from core import costs
-from research import families as F, indicators, metrics, panel as mod_panel
+from research import families as F, holdout as mod_holdout, indicators, metrics
+from research import panel as mod_panel, universe as mod_universe
 
 logger = logging.getLogger("factor_probe")
 
 QUANTILES = (0.2, 0.3)
+
+# 预注册判据的 t 门槛。**它是预注册的，不得在看到结果之后放宽**（§5 迭代记账：
+# 事后改判据就是一次新的搜索，n_trials 要跟着涨）。族错误率校正的产物是
+# "在该族规模下还剩下几个"，不是"把判据改成另一个数"。
+PRE_REG_T = 2.0
+
+
+def _family_report(pairs: list[tuple[str, float]], label: str,
+                   q: float = 0.05) -> dict:
+    """把一次扫描里的多个点比较**按族错误率校正后**报出来（审计 B4 / §5(c)）。
+
+    为什么要两层：Bonferroni 控制的是最坏情况（FWER），在因子扫描这种族规模下
+    功效极低；BH-FDR 控制的是"被判为显著的那些里有多少是假的"，是因子研究里
+    通行的工具（Harvey-Liu-Zhu 那一类工作）。两个都给，读者才能判断
+    "点比较的显著"在族规模下还剩多少 —— 此前这里只有一句 |t| ≥ 2。
+    """
+    ts = [(nm, float(t)) for nm, t in pairs if np.isfinite(t)]
+    m = len(ts)
+    print(f"\n  ── 族错误率校正（{label}，可检验的比较数 k={m}）──")
+    if m == 0:
+        print("     没有可检验的比较（全部期数不足）⇒ 不下判词")
+        return {"k": 0, "bonferroni_t": float("nan"), "n_fdr": 0}
+    t_bonf = metrics.bonferroni_t_threshold(m, q)
+    bh = metrics.benjamini_hochberg([metrics.two_sided_p(t) for _, t in ts], q)
+    n_point = sum(1 for _, t in ts if abs(t) >= PRE_REG_T)
+    n_bonf = sum(1 for _, t in ts if abs(t) >= t_bonf)
+    print(f"     预注册判据仍是 |t| ≥ {PRE_REG_T:.2f}（**不事后放宽**）；按族规模校正后：")
+    print(f"     Bonferroni α={q} 双侧 ⇒ |t| ≥ {t_bonf:.2f}，存活 {n_bonf}/{m}")
+    fdr_txt = (f"临界 p ≤ {bh['crit_p']:.4f}" if bh["n_rejected"] else "无通过者")
+    print(f"     BH-FDR q={q} ⇒ {fdr_txt}，存活 {bh['n_rejected']}/{m}"
+          + (f"（点比较口径 {n_point}/{m}）" if n_point != bh["n_rejected"] else ""))
+    if bh["n_rejected"] == 0 and n_point:
+        print(f"     ⇒ 该族规模下，{n_point} 个「显著」**一个都过不了**族校正："
+              f"它们只能读作待验证，不能当判据用。")
+    return {"k": m, "bonferroni_t": t_bonf, "n_fdr": bh["n_rejected"],
+            "n_pointwise": n_point, "crit_p": bh["crit_p"]}
 # 因子:(列名, "low"/"high" = 取哪一档)—— 全部来自因果指标,日期 ≤T
 FACTORS: list[tuple[str, str]] = [
     ("rvol20", "low"),        # 低波动(唯一的承重线索)
@@ -265,13 +302,31 @@ def main(argv=None) -> int:
     ap.add_argument("--mid", default="2025-10-14",
                     help="判据②的切分线:预注册的搜索期/holdout 分界")
     ap.add_argument("--hi", default="2026-10-14")
+    ap.add_argument("--force-holdout", default=None, metavar="REASON",
+                    help="[mid,hi) 这半段是 holdout,已被消费过时须显式声明理由")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     if not a.run:
         ap.print_help()
         return 0
 
-    ind = F.add_family_indicators(indicators.compute_all(mod_panel.load_full_panel()))
+    # 判据②把窗口在 [mid, hi) 处切开，而后半段**就是 holdout** —— 在这里出结论
+    # 等于消费它，所以先过台账（2026-10-17 审计 B1）。默认拒绝二次消费。
+    try:
+        prior = mod_holdout.consume(
+            a.mid, a.hi, script="factor_probe",
+            tag="gate_scan" if a.gate_scan else "stability",
+            force_reason=a.force_holdout)
+    except mod_holdout.HoldoutBurned as exc:
+        print(f"\n[holdout 台账] 拒绝继续:\n{exc}\n")
+        return 2
+    if prior:
+        print(f"⚠️ 后半段 {a.mid}..{a.hi} 此前已被 claim 消费 {prior} 次 ⇒ "
+              f"本次的两半比较**不是样本外**。理由已记入台账：{a.force_holdout}\n")
+
+    # 诊断脚本没有 preset，用项目默认的 PIT 取池口径（显式，不靠隐含默认）
+    ind = F.add_family_indicators(indicators.compute_all(
+        mod_panel.load_full_panel(universe=mod_universe.DEFAULT_SPEC)))
     cb = costs.COST_BPS_ROUNDTRIP
     if a.gate_scan:
         _gate_scan(ind, lo=a.lo, mid=a.mid, hi=a.hi, cost_bps=cb)
@@ -288,15 +343,24 @@ def main(argv=None) -> int:
     print(f"{'因子':<12}{'平均IC':>9}{'t 值':>8}{'IC>0 期数占比':>14}{'期数':>6}{'每期候选数':>11}   方向判读")
     ics = {}
     for factor in dict.fromkeys(f for f, _ in FACTORS):
-        ic = rank_ic(ind, factor, lo=a.lo, hi=a.hi)
-        ics[factor] = ic
+        ics[factor] = rank_ic(ind, factor, lo=a.lo, hi=a.hi)
+    # 判词必须先看到**整个族**再下（审计 B4）：此前是逐个因子点比较 |t| ≥ 2，
+    # 于是"扫 8 个因子总有一个过 2"这件事对读者完全不可见。
+    _fam = {f: ic for f, ic in ics.items() if np.isfinite(ic.get("t", np.nan))}
+    _bh = metrics.benjamini_hochberg([metrics.two_sided_p(ic["t"]) for ic in _fam.values()], 0.05)
+    _adj_ok = dict(zip(_fam.keys(), _bh["rejected"]))
+    for factor, ic in ics.items():
         if not np.isfinite(ic["mean"]):
             print(f"{factor:<12}{'—— 期数不足':>42}")
             continue
-        verdict = ("**显著**" if abs(ic["t"]) >= 2.0 else "不显著")
+        pointwise = abs(ic["t"]) >= PRE_REG_T
+        verdict = "**显著**" if pointwise else "不显著"
+        if pointwise and not _adj_ok.get(factor, False):
+            verdict += "·族校正后不存活"
         arrow = "高值→未来收益高" if ic["mean"] > 0 else "高值→未来收益低"
         print(f"{factor:<12}{ic['mean']:>+9.3f}{ic['t']:>+8.2f}{ic['pos_frac']*100:>13.0f}%"
               f"{ic['n']:>6}{ic['n_cand']:>11.0f}   {arrow}({verdict})")
+    fam_ic = _family_report([(f, ic["t"]) for f, ic in _fam.items()], "判据① 秩相关 IC")
     fin = [v for v in ics.values() if np.isfinite(v["mean"])]
     if fin:
         fl = float(np.mean([v["floor"] for v in fin]))
@@ -345,6 +409,9 @@ def main(argv=None) -> int:
                   f"{st['net']['max_dd']*100:>7.1f}%{st['turnover']*100:>6.1f}%"
                   f"{ex*100:>+8.2f}{es['t']:>+9.2f}{es['win']*100:>10.0f}%")
 
+    _family_report([(nm, es["t"]) for nm, _st, _ex, es in rows],
+                   "判据③ 分位组合(逐月配对超额)")
+
     print(f"\n【检验④ 长-空价差(仅作测量,不可交易:未声明借券假设 §4(g))】q=30%")
     for factor in dict.fromkeys(f for f, _ in FACTORS):
         try:
@@ -365,11 +432,14 @@ def main(argv=None) -> int:
               f"|  最好的组合 {best[0]} 毛 {best[1]['gross']['cagr']*100:+.2f}%  "
               f"净 {best[1]['net']['cagr']*100:+.2f}%")
         try:
-            dsr = metrics.deflated_sharpe_ratio(best[1]["net"]["sharpe"],
-                                                n_trials=n_trials + 1614,
-                                                n_returns=max(2, best[1]["months"]))
-            print(f"【选择偏差】最好组合 Sharpe {best[1]['net']['sharpe']:+.2f},"
-                  f"k={n_trials + 1614}(含前几轮的 1614)⇒ DSR {dsr['deflated_sharpe']:.3f}")
+            # 月度净收益序列 ⇒ periods_per_year=12（此前把月频 Sharpe 除以 √252，
+            # 又把月数当 T —— 两处单位都不一致，审计 B3）
+            dsr = metrics.deflated_sharpe_from_returns(
+                best[1]["net_rets"], n_trials=n_trials + 1614, periods_per_year=12,
+                label="factor_probe 月度净收益")
+            print(f"【选择偏差】最好组合月频 Sharpe {dsr['observed_sharpe']:+.2f}"
+                  f"（{dsr['n_returns']} 个月）,k={n_trials + 1614}(含前几轮的 1614)"
+                  f"⇒ DSR {dsr['deflated_sharpe']:.3f}")
         except Exception as e:                                          # noqa: BLE001
             print(f"【选择偏差】DSR 跳过:{e}")
     print(f"\nn_trials = {n_trials}(本文件) + 1614(前几轮搜索)")

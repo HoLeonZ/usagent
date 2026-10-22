@@ -50,3 +50,6 @@ research/results/
 # Playwright 检查报告时的临时产物
 .playwright-mcp/
 report-top.png
+
+# 内部文档（不提交到远程仓库）—— 见 ~/.claude/CLAUDE.md
+docs/superpowers/

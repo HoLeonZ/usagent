@@ -71,10 +71,17 @@ class SearchError(RuntimeError):
 
 
 def make_preset(cfg: dict) -> dict:
-    """把搜索配置翻成 broker 能吃的 preset。"""
-    return {
-        "atr_sl_mult": cfg.get("sl_mult", BASE_EXIT["sl_mult"]),
-        "atr_tp_mult": cfg.get("tp_mult", BASE_EXIT["tp_mult"]),
+    """把搜索配置翻成 broker 能吃的 preset。
+
+    ⚠️ 退出几何两套都要支持（审计 G5）：契约允许 `atr_sl_mult/atr_tp_mult` 或
+    `sl_pct/tp_pct`（恰好一套），而这里此前**只认 ATR 那套** —— 于是"运气对照"
+    对一个合法的 pct preset 直接 KeyError。cfg 里给了 `sl_pct`/`tp_pct` 就走百分比那套，
+    两套同时给 ⇒ fail-fast（不许猜）。
+    """
+    _pct = ("sl_pct" in cfg) or ("tp_pct" in cfg)
+    if _pct and (("sl_mult" in cfg) or ("tp_mult" in cfg)):
+        raise SearchError("cfg 同时给了 ATR 与百分比两套退出几何 —— 契约要求恰好一套")
+    out = {
         "max_hold": cfg.get("max_hold", BASE_EXIT["max_hold"]),
         "max_positions": cfg.get("max_positions", 1),
         "risk_per_trade": cfg.get("risk_per_trade", 0.01),
@@ -85,6 +92,13 @@ def make_preset(cfg: dict) -> dict:
         "atr_slip_scale": costs.ATR_SLIP_SCALE,
         "cost_bps_roundtrip": costs.COST_BPS_ROUNDTRIP,
     }
+    if _pct:
+        out["sl_pct"] = cfg.get("sl_pct", 0.05)
+        out["tp_pct"] = cfg.get("tp_pct", 0.20)
+    else:
+        out["atr_sl_mult"] = cfg.get("sl_mult", BASE_EXIT["sl_mult"])
+        out["atr_tp_mult"] = cfg.get("tp_mult", BASE_EXIT["tp_mult"])
+    return out
 
 
 def signal_kwargs(cfg: dict) -> dict:
@@ -92,6 +106,13 @@ def signal_kwargs(cfg: dict) -> dict:
     for k in SIGNAL_AXES:
         if cfg.get(k) is not None:
             kw[k] = cfg[k]
+    # ⚠️ 显式 `"max_amount": None` = **移除流动性上界**（审计 C2）。
+    # 在 A 股语境里上界是防小盘/涨停票的，搬到这个池子上它几乎全被击穿；
+    # 而**族型策略没有这一条** ⇒ 不把它显式关掉，"族 vs 基准线"就是两个不同的机会集比较。
+    # 注意与上面 SIGNAL_AXES 的差别：那里 None 表示"这一轴不动"，这里"键存在且为 None"
+    # 表示"明确移除"。两种语义必须分开，否则没法表达"移除"。
+    if "max_amount" in cfg:
+        kw["max_amount"] = cfg["max_amount"]
     return kw
 
 
@@ -116,14 +137,23 @@ def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
                                      regime_df=reg if use_regime else None, **kw)
     else:
         sig = signals_df
+    # 基准先算（与信号是否为空无关）：空信号窗返回 cagr=None，但**同一窗口的基准
+    # 照样要有** —— 否则"这个窗里有 0 笔成交"那一行无从与任何东西比较（§5(e)）。
+    bench = regime.window_benchmark_cagr(reg, lo, hi) if reg is not None else float("nan")
     if sig.empty:
-        return {"cagr": None, "trades": 0, "reason": "no_signals", "cfg": cfg}
+        return {"cagr": None, "trades": 0, "reason": "no_signals", "cfg": cfg,
+                "bench_cagr": bench, "excess": float("nan")}
 
     # 不覆盖成本口径 —— 让引擎读 preset 里的(§2(b) 单一来源)
-    res = broker.simulate(make_preset(cfg), sig, ind, start=lo, end=hi)
+    res = broker.simulate(make_preset(cfg), sig, ind, start=lo, end=hi,
+                          # D4：声明了 regime_exit_policy="close" 的配置需要它
+                          regime_ok=(regime.regime_ok_dates(reg) if reg is not None
+                                     else None))
 
     eq, tr = res["equity"], res["trades"]
     cagr = metrics.cagr(eq["equity"], eq["date"])
+    # 逐日收益（供 pooled 口径算 DSR：DSR 需要一条**收益序列**，而不是逐窗 Sharpe 的均值）
+    daily_ret = eq["equity"].pct_change().fillna(0.0).astype(float).tolist()
     ts = metrics.tail_stats(tr) if len(tr) else {"expectancy_r": float("nan")}
     return {
         "cagr": float(cagr), "trades": int(len(tr)),
@@ -135,6 +165,11 @@ def evaluate(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
         "win": float(res["metrics"].get("win_rate", float("nan"))),
         "e_r": float(ts.get("expectancy_r", float("nan"))),
         "exposure": float(res["metrics"]["avg_exposure"]),
+        # 基准（§5(e)）：搜索层此前**完全没有基准** ⇒ argmax(绝对 CAGR) 选出来的是
+        # "在牛市里拿得最多的那个"。现在每次评估都带上同窗口等权池 CAGR 与超额。
+        "bench_cagr": bench,
+        "excess": (float(cagr) - bench) if np.isfinite(bench) else float("nan"),
+        "daily_ret": daily_ret,
         "reason": "ok", "cfg": cfg,
     }
 
@@ -255,8 +290,14 @@ def _wf_fmt(df: pd.DataFrame) -> str:
     d = df.copy()
     d["train_cagr"] = d["train_cagr"].map(lambda v: f"{v*100:+.1f}%")
     d["test_cagr"] = d["test_cagr"].map(lambda v: f"{v*100:+.1f}%")
-    return d[["train_lo", "train_hi", "train_cagr", "train_trades",
-              "test_lo", "test_hi", "test_cagr", "test_trades", "cfg"]].to_string(index=False)
+    if "test_excess" in d.columns:
+        d["test_excess"] = d["test_excess"].map(
+            lambda v: "—" if v is None or not np.isfinite(v) else f"{v*100:+.1f}%")
+    cols = ["train_lo", "train_hi", "train_cagr", "train_trades",
+            "test_lo", "test_hi", "test_cagr"]
+    if "test_excess" in d.columns:
+        cols.append("test_excess")
+    return d[cols + ["test_trades", "cfg"]].to_string(index=False)
 
 
 def _fmt(df: pd.DataFrame) -> str:
@@ -273,7 +314,11 @@ def _fmt(df: pd.DataFrame) -> str:
                             else f"{v:+.2f}")
     d["exposure"] = d["exposure"].map(lambda v: "—" if v is None or not np.isfinite(v)
                                       else f"{v*100:.0f}%")
-    return d[["axis", "value", "trades", "cagr", "total", "max_dd",
+    if "excess" not in d.columns:
+        d["excess"] = float("nan")
+    d["excess"] = d["excess"].map(lambda v: "—" if v is None or not np.isfinite(v)
+                                  else f"{v*100:+.1f}%")
+    return d[["axis", "value", "trades", "cagr", "excess", "total", "max_dd",
               "win", "e_r", "exposure"]].to_string(index=False)
 
 
@@ -375,7 +420,8 @@ def walk_forward(ind, reg, *, grid: list[dict], folds: list[tuple],
        这是 §5(b) 的全部内容。判据是「同一份网格在训练窗上的 argmax」,不做任何
        测试窗反馈(那正是 stage2 的错)。
 
-    返回每折一行:train_lo/hi、train_cagr、test_lo/hi、test_cagr、test_trades、cfg。
+    返回每折一行:train_lo/hi、train_cagr、test_lo/hi、test_cagr、**test_excess**、
+    test_trades、cfg。超额列是必须的 —— 只有绝对 CAGR 时，牛市里任何配置看着都行。
     `evaluate_fn` 只用于测试注入(默认走模块级 `evaluate`)。
     """
     if not folds:
@@ -407,6 +453,9 @@ def walk_forward(ind, reg, *, grid: list[dict], folds: list[tuple],
             "train_cagr": best_val, "train_trades": best_trades,
             "test_lo": te_lo, "test_hi": te_hi,
             "test_cagr": te.get("cagr"),
+            # 测试窗的**超额**：只有绝对 CAGR 时，牛市里任何配置看着都行（审计 C3）
+            "test_excess": te.get("excess"),
+            "test_bench": te.get("bench_cagr"),
             "test_trades": te.get("trades"),
             "test_e_r": te.get("e_r"),
             "cfg": cfg_key(best),
@@ -438,7 +487,8 @@ def main() -> int:
     a = ap.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
-    p = panel_mod.load_full_panel()
+    # 诊断脚本没有 preset，用项目默认的 PIT 取池口径（显式，不靠隐含默认）
+    p = panel_mod.load_full_panel(universe=mod_universe.DEFAULT_SPEC)
     ind = indicators.compute_all(p)
     reg = regime.compute_regime(ind)
 

@@ -32,7 +32,9 @@ import pandas as pd
 import weakref
 
 from core import costs
+from core import spread as spread_mod
 from core.preset_contract import resolve
+from research import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +50,39 @@ TRADE_COLS = [
     # 每笔的**计划风险**宽度与金额。hiagent 的 tail_objective 用固定 sl_pct 推 R,
     # 但 ATR 归一化后每笔的止损宽度不同,所以必须逐笔记录,否则 E[R] 算不出来。
     "sl_width", "tp_width", "risk_amount",
+    # sizing_cap = 最终决定股数的那个约束（policy / volume_cap / max_weight /
+    # max_heat / cash）。2026-10-17 审计 D3：现金闸门曾在**无日志**的情况下把
+    # 声明风险改写成另一个值（12m preset 第二仓从声明 5% 权益掉到 ~0.6%），
+    # 使"单笔风险预算"变成记账副作用。记下来之后这条路径是可审计的。
+    "sizing_cap",
+    # entry_overflow_bps = 入场价高于**当日 bar 最高价**的幅度（bp）。>0 表示记录里的
+    # 成交价在物理上不存在（滑点/价差加成把它顶出了当日振幅）。审计 E7。
+    "entry_overflow_bps",
+    # risk_frac = 该笔的计划风险 / 入场时的权益。声明值与实际值并排可读。
+    "risk_frac",
+    # volume_cap = 入场当日由 §4(a) 量能上限算出的**可成交股数上限**。
+    # 它让"这套策略能装多少钱"变成可读的数：capacity_headroom = volume_cap / size，
+    # 即"在当前单笔规模上还能放大几倍才会撞到量能上限"。审计 E4/D5 之前，
+    # 库和报告里都没有任何量能/容量读数。
+    "volume_cap",
+    # sl_penetration = 触发止损时"bar 的最低点比止损价低多少"（相对止损价）。
+    # 它衡量的是**这条假定有多要紧**：我们按触发价成交，而当日实际到过更低的位置。
+    # 只在盘中止损（sl）上有意义；跳空（sl_gap）按开盘价成交，谈不上"穿价"。
+    "sl_penetration",
+    # spread_cost = 本笔因跨越买卖价差付出的钱（入场侧 + 出场侧）。
+    # 它体现在成交价里、不在 fees 里，所以必须单独记一列 —— 否则"成本"这一栏
+    # 只显示规费（占建模成本的两成上下），读者会以为滑点/价差不存在。
+    "spread_cost",
 ]
 
 VALID_TIEBREAK = ("sl_first",)
 
-EXIT_REASONS = ("sl", "sl_gap", "tp", "tp_gap", "max_hold", "eod")
+# 相关性闸门的尾部窗口（交易日）。60 个交易日 ≈ 一个季度：
+# 短于此会把噪声当信号，长于此会让"最近才变高相关"的两个名字漏过去。
+# 它是**实现参数**而不是策略旋钮（preset 只声明 max_pair_corr 这个阈值）。
+CORR_LOOKBACK = 60
+
+EXIT_REASONS = ("sl", "sl_gap", "tp", "tp_gap", "max_hold", "eod", "regime")
 
 
 # 锁「交易列表行为」用的列(CLAUDE.md §6)。sl_width/tp_width 必须在内:它们是
@@ -114,6 +144,16 @@ class Position:
     # 截至**前一交易日**的最高 high。只用 ≤D-1 的数据决定 D 日的止损位 ——
     # 若用 D 日自身的 high 抬高止损再拿 D 日的 low 去触发,就是同 bar 前视。
     high_water: float = float("nan")
+    # 最终压住股数的那个约束（见 TRADE_COLS 里的说明）。
+    sizing_cap: str = "policy"
+    volume_cap: int = 0
+    entry_overflow_bps: float = 0.0
+    # 入场时的权益 —— "计划风险占权益多少"的分母。用入场时刻的值，
+    # 而不是事后某一天的权益（否则这个数会随时间漂移，无法回答"我当时冒了多大风险"）。
+    equity_at_entry: float = float("nan")
+    # 入场时（信号日）估到的**单边**价差费率。出场沿用同一个值：
+    # 决策时只能知道当时的估计，用出场当日的估计属于偷看未来。
+    half_spread: float = 0.0
 
 
 @dataclass
@@ -126,16 +166,20 @@ class _Book:
 # **弱引用 + 身份比较**:面板一被回收,弱引用变 None,缓存自动失效,不可能命中错的面板。
 # 效果(实测):一次 pooled 调用从 1.43s 降到 ~0.05s(425k 行的 groupby+取数组是纯重复劳动,
 # 而搜索里同一份面板要被用几千次)。
-_BAR_INDEX_CACHE: list[tuple[weakref.ref, tuple, tuple]] = []
+# ⚠️ 缓存项就是 (弱引用, 值) —— **没有 key 槽**（审计 G6）。
+# 此前是 (弱引用, key=(), 值) 三元组，而那个 key **恒为空元组、从不参与比较**：
+# 它看起来像"按 key 校验"，实际只按对象身份命中。留着它比删掉更坏 —— 下一个读者会
+# 以为缓存有失效逻辑（比如按面板内容变化失效），从而在别处依赖一个不存在的保证。
+# 身份比较本身就是正确的机制：面板一次载入、进程内不变。
+_BAR_INDEX_CACHE: list[tuple[weakref.ref, tuple]] = []
 
 
 def _bar_index_cached(panel: pd.DataFrame):
-    for ref, key, val in _BAR_INDEX_CACHE:
+    for ref, val in _BAR_INDEX_CACHE:
         if ref() is panel:
             return val
     val = _bar_index(panel)
-    key = ()
-    _BAR_INDEX_CACHE.insert(0, (weakref.ref(panel), key, val))
+    _BAR_INDEX_CACHE.insert(0, (weakref.ref(panel), val))
     del _BAR_INDEX_CACHE[4:]                     # 只留最近 4 个面板
     return val
 
@@ -170,6 +214,16 @@ def _bar_index(panel: pd.DataFrame) -> tuple[dict[str, dict[str, int]], list[pd.
         sub = sub.sort_values("date")
         per_sym[sym] = {d: i for i, d in enumerate(sub["date"])}
         data[sym] = {c: sub[c].to_numpy(dtype=float) for c in cols}
+        # 买卖价差估计（Corwin-Schultz，逐日、因果）。用 **as-traded** high/low ——
+        # 价差是物理盘口属性，复权价会把它缩放成另一个量。与面板同生命周期缓存，
+        # 所以搜索里几千次模拟只算一次。
+        # 尾部收益（相关性闸门用；因果：只用 ≤T 的价格）
+        rc = data[sym]["raw_close"]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            data[sym]["ret1"] = np.concatenate([[np.nan], rc[1:] / rc[:-1] - 1.0])
+        data[sym]["spread_bps"] = spread_mod.rolling_median(
+            spread_mod.corwin_schultz(sub["raw_high"].to_numpy(dtype=float),
+                                      sub["raw_low"].to_numpy(dtype=float)))
     return per_sym, days, data
 
 
@@ -181,6 +235,7 @@ def simulate(
     start: str,
     end: str,
     cost_bps_roundtrip: float | None = None,
+    regime_ok: set | None = None,
 ) -> dict:
     """在 [start, end) 上跑一次回测。
 
@@ -236,6 +291,50 @@ def simulate(
     # VERI +25.0% 最后全部亏着出场 —— 固定价位止损 + 不可达 TP = 只止损不止盈。
     trailing_sl = bool(spec["trailing_sl"])
 
+    # 组合层风险预算（2026-10-17 审计 D1/D2）。三者都是"不设 = 关闭"，
+    # 但引擎无论如何都会**输出观测值**（单名权重峰值、组合 heat）——
+    # 没设上限这件事不许是隐形的。
+    max_weight = spec["max_weight"]
+    max_heat = spec["max_heat"]
+    max_dd_halt = spec["max_drawdown_halt"]
+    for _nm, _v in (("max_weight", max_weight), ("max_heat", max_heat)):
+        if _v is not None and not (0.0 < float(_v) <= 1.0):
+            raise BrokerError(f"{_nm} ∈ (0,1]，得到 {_v!r}")
+    if max_dd_halt is not None and not (0.0 < float(max_dd_halt) < 1.0):
+        raise BrokerError(f"max_drawdown_halt ∈ (0,1)，得到 {max_dd_halt!r}")
+    liquidate_at_end = bool(spec["liquidate_at_end"])
+    sl_overshoot = float(spec["sl_overshoot"])
+    if not (0.0 <= sl_overshoot <= 1.0):
+        raise BrokerError(f"sl_overshoot ∈ [0,1]，得到 {sl_overshoot!r}")
+    spread_model = spec["spread_model"]
+    if spread_model not in ("none", "corwin_schultz"):
+        raise BrokerError(
+            f"spread_model 必须是 'none' 或 'corwin_schultz'，得到 {spread_model!r}")
+    max_weight = None if max_weight is None else float(max_weight)
+    max_heat = None if max_heat is None else float(max_heat)
+    max_dd_halt = None if max_dd_halt is None else float(max_dd_halt)
+
+    # 组合内两两相关性上限（审计 D6）。用**尾部相关**而不是外部行业分类：
+    #   * 数据驱动、因果（只用 ≤ 信号日的收益）、不需要我们没有的行业数据；
+    #   * 只与**已在场**的标的做两两比较（≤2 笔），不是全矩阵 ⇒ 每次入场 O(在持数)，
+    #     不用每天算 3028² 的相关矩阵。
+    # 语义：相关性高的两个名字在经济上是**同一个仓位**，同时持有等于加倍下注。
+    max_pair_corr = spec["max_pair_corr"]
+    if max_pair_corr is not None and not (-1.0 <= float(max_pair_corr) <= 1.0):
+        raise BrokerError(f"max_pair_corr ∈ [-1,1]，得到 {max_pair_corr!r}")
+    max_pair_corr = None if max_pair_corr is None else float(max_pair_corr)
+    clamp_entry_to_bar = bool(spec["clamp_entry_to_bar"])
+    # regime 翻转时的**出场侧**政策（审计 D4）。默认 "none" = 只挡入场 ——
+    # 但把"择时只管入场"这件事从**隐含假设**变成**声明**，并给出组合层的降杠杆选项。
+    regime_exit_policy = spec["regime_exit_policy"]
+    if regime_exit_policy not in ("none", "close"):
+        raise BrokerError(f"regime_exit_policy 必须是 none/close，得到 {regime_exit_policy!r}")
+    if regime_exit_policy == "close" and regime_ok is None:
+        # 声明了"翻转就平仓"却没给 regime 数据 ⇒ 静默退化成"只挡入场"是不可接受的
+        raise BrokerError(
+            "regime_exit_policy='close' 需要调用方传入 regime_ok（regime 有效的交易日集合）"
+            " —— 不许在没有 regime 数据时静默退化成'只挡入场'")
+
     if max_positions < 1:
         raise BrokerError(f"max_positions 必须 >= 1,得到 {max_positions}")
     if not (0 < position_fraction <= 1.0):
@@ -273,7 +372,9 @@ def simulate(
     lo, hi = pd.Timestamp(start), pd.Timestamp(end)
     axis = [d for d in days if lo <= d < hi]
     if not axis:
-        raise BrokerError(f"窗口 {start}..{end} 内没有任何交易日")
+        # 报错要**可行动**：只说"没有交易日"，读者无从知道该填什么。数据轴就在手边。
+        raise BrokerError(f"窗口 {start}..{end} 内没有任何交易日 —— 本池子的交易日范围是 "
+                          f"{days[0].date()} .. {days[-1].date()}")
 
     cost_half = costs.half_rate(cost_bps_roundtrip)
 
@@ -290,6 +391,54 @@ def simulate(
     day_pos = {d: i for i, d in enumerate(days)}
     # 上一交易日收盘的权益 —— 当日入场的风险预算只能用它(见步骤 0 的快照)。
     prev_equity = initial_cash
+    # 组合层风险的状态（D1/D2）：
+    #   planned_risk(pos) = 入场时即固定的计划风险；它是 heat 与 E[R] 共同的分子，
+    #   所以只能有一个定义（此处），不能在别处再写一遍。
+    #   peak_equity 是**已实现路径**的权益峰值，停机判定只用 ≤ 上一收盘的信息。
+    def planned_risk(pos: Position) -> float:
+        return pos.sl_width * pos.entry_price * pos.size
+
+    def trailing_corr(a: str, b: str, end_idx: int, dates: list) -> float:
+        """a 与 b 在**截至信号日**的尾部窗口里的相关系数（对齐到共同日期）。
+
+        对齐必须按**日期**而不是按下标：面板里各标的的日期覆盖不同（晚间上市、
+        停牌、退市），按下标对齐会把不同日期的收益配成一对 —— 那是错的相关系数，
+        而且错得看不出来。共同观测不足窗口一半 ⇒ 返回 nan（不判定）。
+        """
+        ka = per_sym.get(a, {})
+        kb = per_sym.get(b, {})
+        xa, xb = [], []
+        d0 = end_idx - CORR_LOOKBACK
+        for j in range(max(d0, 0), end_idx + 1):
+            d = dates[j]
+            ia, ib = ka.get(d), kb.get(d)
+            if ia is None or ib is None:
+                continue
+            ra, rb = data[a]["ret1"][ia], data[b]["ret1"][ib]
+            if np.isfinite(ra) and np.isfinite(rb):
+                xa.append(ra)
+                xb.append(rb)
+        if len(xa) < CORR_LOOKBACK // 2:
+            return float("nan")
+        xa_, xb_ = np.array(xa), np.array(xb)
+        if xa_.std() <= 0 or xb_.std() <= 0:
+            return float("nan")
+        return float(np.corrcoef(xa_, xb_)[0, 1])
+
+    peak_equity = initial_cash
+    stats_halted_days = 0
+    # 因相关性超限被挡掉的入场次数（审计 D6：这类约束此前完全没有）
+    stats_blocked_corr = 0
+    # 窗口末尾因"当日无 bar"而**无法**清算的仓位个数（见步骤 3b 的注释）。
+    stats_unliquidated = 0
+    # 持仓**当日无 bar** 的次数（停牌/退市/数据中断）。审计 A3：这些日子权益是按
+    # "最近一次已知收盘"重估的（陈价），此前没有任何读数 —— 于是"这只票到底停了多久"
+    # 只能靠人肉看数据。累计位-日与占比进指标。
+    stats_stale_days = 0
+    # §4(b) 部分成交（出场侧卖不完）的次数。入场侧的对应量是 sizing_cap="volume_cap"。
+    partial_exits = 0
+    # 入场价越出当日 bar 区间的笔数（审计 E7）
+    stats_entry_overflow = 0
 
     def mark_to_market(day: pd.Timestamp) -> float:
         """equity = cash + Σ qty × close。这是唯一正确的口径(见模块 docstring)。
@@ -311,7 +460,10 @@ def simulate(
 
     def close_position(pos: Position, day: pd.Timestamp, px: float, reason: str,
                        *, bar_lo: float | None = None, bar_hi: float | None = None,
-                       bar_vol: float | None = None) -> None:
+                       bar_vol: float | None = None,
+                       sl_penetration: float | None = None) -> bool:
+        """平仓。返回**是否真的成交了**（False = 这一根 bar 根本没法交易）。"""
+        nonlocal partial_exits          # §4(b) 部分成交计数（审计 E6）
         """平仓。`px` 是**触发价**,本函数负责把它变成成交价。
 
         三条纪律:
@@ -332,16 +484,37 @@ def simulate(
                     f"{pos.symbol} {day.date()} 触发价 {px:.6f} 落在该 bar 的 "
                     f"[{bar_lo}, {bar_hi}] 之外 —— 物理上不可能({reason})"
                 )
-        # §4(a) 量能上限:**与滑点无关**,是独立的一条要求。
+        # §4(a) 量能上限 + §4(b) **部分成交是合法状态**（审计 E6）。
+        #
+        # 此前的行为是**不对称**的：入场侧超量能就静默缩量（等于 IOC 撤单，现金留在账上），
+        # 出场侧却直接 fail-fast。而准则 §4(b) 说得很清楚:部分成交是合法状态,
+        # 未成交部分不许排队、也不许抛异常。出场侧的经营含义也不一样 ——
+        # 入场可以"decline"（少买点），出场**不能**（止损触发就是必须卖）。
+        # 所以出场侧的正确处置是:**卖掉能卖的，剩下的继续持有**，而不抛错。
+        # 零量 bar = 那天根本没有成交 ⇒ **不得造出成交**（与入场侧对称：
+        # 入场侧早有 `if not (o > 0) or not (bar_vol > 0): continue`）。
+        # 此前出场侧漏了这条：bar_vol=0 会让上面的量能上限分支整个被跳过，
+        # 于是"一根零量 bar"也能足额卖出 —— 实测用一条测试打出来的（E6 的邻居缺陷）。
+        if bar_vol is not None and (not np.isfinite(bar_vol) or bar_vol <= 0):
+            return False
+        exit_qty = pos.size
         if bar_vol is not None and np.isfinite(bar_vol) and bar_vol > 0:
             cap = int(np.floor(float(bar_vol) * max_participation))
             if pos.size > cap:
-                raise BrokerError(
-                    f"{pos.symbol} {day.date()} 要卖 {pos.size} 股 > 该 bar 量能上限 {cap} 股 —— "
-                    f"§4(a) 的 IOC 部分成交**未实现**(实测余量 24~127 倍,永不咬合);"
-                    f"此处 fail-fast 而不是给出一个足额的假成交({reason})"
-                )
+                if cap <= 0:
+                    # 这一根 bar 完全卖不动（停牌前的零量）—— 那不是"部分成交"，
+                    # 是物理上的"卖不掉"。这时**不造假的足额成交**，也不硬崩；
+                    # 由调用方按"当日无法出场"处理（顺延到下一根 bar）。
+                    raise BrokerError(
+                        f"{pos.symbol} {day.date()} 该 bar 量能上限为 0 股,"
+                        f"无法卖出任何一股（{reason}）—— 这不是部分成交,是卖不掉")
+                exit_qty = cap
+                partial_exits += 1
         fill_px = px
+        # 卖出同样要跨价差：成交价再低半个价差（只在这笔建仓时估到的那个值）。
+        # 放在滑点之前是等价位置 —— 两者都是"成交比触发差"这件成本。
+        if pos.half_spread > 0:
+            fill_px = fill_px * (1.0 - pos.half_spread)
         if atr_slip_scale > 0:
             ok = (bar_vol is not None and np.isfinite(bar_vol) and bar_vol > 0
                   and np.isfinite(pos.atr_pct) and pos.atr_pct > 0)
@@ -352,34 +525,57 @@ def simulate(
                 )
             fill_px = px * (1.0 - atr_slip_scale * pos.atr_pct
                             * float(np.sqrt(pos.size / float(bar_vol))))
-        notional_exit = fill_px * pos.size
+        # ⚠️ 全部按 **exit_qty**（本次真正卖掉的股数）记账，而不是 pos.size ——
+        # 部分成交时剩下的股数继续持有（§4(b)），它们的分红与成本不能算进这一笔。
+        _frac = exit_qty / pos.size
+        div_out = pos.dividends * _frac
+        notional_exit = fill_px * exit_qty
         exit_fee = notional_exit * cost_half
-        entry_notional = pos.entry_price * pos.size
+        entry_notional = pos.entry_price * exit_qty
         entry_fee = entry_notional * cost_half
-        gross = (fill_px - pos.entry_price) * pos.size
+        gross = (fill_px - pos.entry_price) * exit_qty
         fees = entry_fee + exit_fee
+        # 价差成本单独记账：入场侧付在更高的买入价上，出场侧付在更低的卖出价上。
+        # 它已经体现在 gross 里，这里只是把它**显式化**供归因（不重复计费）。
+        spread_cost = pos.half_spread * pos.entry_price * exit_qty \
+            + pos.half_spread * fill_px * exit_qty
         # 分红是这笔交易的**已实现收入**(§3(c)),必须进净盈亏。
-        net = gross + pos.dividends - fees
+        net = gross + div_out - fees
         cost_basis = entry_notional + entry_fee
         book.cash += notional_exit - exit_fee
         trades.append({
             "entry_date": pos.entry_date, "exit_date": day, "symbol": pos.symbol,
             "exit_reason": reason,
-            "entry_price": pos.entry_price, "exit_price": fill_px, "size": pos.size,
+            "entry_price": pos.entry_price, "exit_price": fill_px, "size": exit_qty,
             "exit_trigger": px,
             # bars_held 是**已走完**的 bar 数:入场当日盘中出场 → 0,持满 max_hold → max_hold。
             # 不要写 +1 —— 那会让 max_hold=18 的仓位报出 hold_days=19(实测踩过)。
             "hold_days": pos.bars_held,
-            "gross_pnl": gross, "dividends": pos.dividends, "fees": fees, "net_pnl": net,
+            "gross_pnl": gross, "dividends": div_out, "fees": fees, "net_pnl": net,
             "net_return": net / cost_basis if cost_basis > 0 else float("nan"),
             "atr_pct": pos.atr_pct,
             # 计划风险:入场时即固定(止损宽度 × 股数),与最终出场无关。
-            # E[R] = net_pnl / risk_amount —— 分母必须是计划风险,不能是事后结果
-            # (hiagent tail_objective 的原话)。
+            # 部分成交时按**卖出的股数**取比例 —— 否则一笔半仓出场的 R 会被系统性放大。
+            "volume_cap": int(pos.volume_cap),
+            "entry_overflow_bps": float(pos.entry_overflow_bps),
+            "sl_penetration": (float("nan") if sl_penetration is None
+                               else float(sl_penetration)),
             "sl_width": pos.sl_width, "tp_width": pos.tp_width,
-            "risk_amount": pos.sl_width * pos.entry_price * pos.size,
+            "risk_amount": pos.sl_width * pos.entry_price * exit_qty,
+            "spread_cost": spread_cost,
+            "sizing_cap": pos.sizing_cap,
+            "risk_frac": ((pos.sl_width * pos.entry_price * exit_qty)
+                          / pos.equity_at_entry if pos.equity_at_entry > 0
+                          else float("nan")),
         })
+        if exit_qty < pos.size:
+            # §4(b)：剩下的继续持有 —— 不排队（下一次该出场时按当时的 bar 再判）、
+            # 也不抛异常。账本里剩下的股数连同它们未领的分红一起留下。
+            pos.size -= exit_qty
+            pos.dividends -= div_out
+            return True          # 部分成交：这次卖出成功，剩下的继续持有
         del book.positions[pos.symbol]
+        return True              # 全额成交
 
     for day in axis:
         # ---------- 0) 当日入场的账本快照(CLAUDE.md §2(d) Settlement Isolation)----------
@@ -396,6 +592,41 @@ def simulate(
         spent_today = 0.0
         filled_today = 0
 
+        # ---- 组合层风险快照（D1/D2）----
+        # heat = Σ 计划风险（入场时固定的 止损宽度×入场价×股数）。它衡量的是
+        # "若同时全部止损，权益会掉多少" —— 机构里这是组合层的第一约束，
+        # 而本引擎此前**完全没有**这个概念（只有 max_positions 数个数）。
+        # 与现金/仓位槽一样取**上一交易日收盘**的快照（§2(d) 结算隔离）。
+        heat_at_open = sum(planned_risk(book.positions[s_]) for s_ in held_at_open)
+        heat_used = heat_at_open
+        # 停机开关（D2）：按**上一交易日收盘**权益判回撤，当日盘中回撤最早也要等到
+        # 收盘才进入下一日的判定 —— 不偷看当日盘中最低点。
+        halted_today = (max_dd_halt is not None
+                        and equity_at_open <= peak_equity * (1.0 - max_dd_halt))
+        if halted_today:
+            stats_halted_days += 1
+
+        # ---------- 0b) regime 翻转 ⇒ 开盘降杠杆（审计 D4）----------
+        # 择时此前**只作用于入场**（signals 按 regime_ok 过滤信号），已建仓位在
+        # regime 翻转后没有任何组合层处置路径 —— 而"市场转弱就降杠杆"恰恰是机构在
+        # 组合层做的事（单笔止损管不了系统性风险）。
+        # 因果性：regime_ok(T−1) 在 T−1 收盘后已知 ⇒ 最早 T 开盘能动手，正是这里。
+        _prev_day = days[day_pos[day] - 1] if day_pos[day] > 0 else None
+        if (regime_exit_policy == "close" and _prev_day is not None
+                and _prev_day not in regime_ok and book.positions):
+            for _sym in list(book.positions):
+                _pos = book.positions[_sym]
+                _k = per_sym.get(_sym, {}).get(day)
+                if _k is None:
+                    continue            # 当日无 bar ⇒ 卖不掉（§1），顺延
+                _o = float(data[_sym]["raw_open"][_k])
+                if not (_o > 0):
+                    continue
+                close_position(_pos, day, _o, "regime",
+                               bar_lo=float(data[_sym]["raw_low"][_k]),
+                               bar_hi=float(data[_sym]["raw_high"][_k]),
+                               bar_vol=float(data[_sym]["volume"][_k]))
+
         # ---------- 1) 持仓:开盘 gap → 盘中 SL/TP ----------
         for sym in list(book.positions):
             pos = book.positions[sym]
@@ -405,6 +636,7 @@ def simulate(
                 pos.sl_price = max(pos.sl_price, pos.high_water - pos.trail_width)
             k = per_sym.get(sym, {}).get(day)
             if k is None:                      # 当日无数据 → 无法成交,顺延
+                stats_stale_days += 1          # 该持仓这一天是按陈价重估的（A3）
                 continue
             # 现金分红显式入账(§3(c) Event-Sourced Corporate Actions)。位置放在步骤 1
             # 的**开头**,领息资格以「开盘时在场」为准,两个边界因此都对:
@@ -433,12 +665,19 @@ def simulate(
 
             hit_sl = low_ <= pos.sl_price
             hit_tp = h >= pos.tp_price
+            # 盘中触发止损的**成交触发价**：sl_price 之下按 θ 向当日最低点靠。
+            # θ=0 ⇒ 就是 sl_price（既有行为）。穿透深度同时被记进交易列表，
+            # 于是"这条假定值多少"是可读的，而不是只能被相信。
+            pen = (pos.sl_price - low_) / pos.sl_price if pos.sl_price > 0 else 0.0
+            sl_fill_at = pos.sl_price - sl_overshoot * max(0.0, pos.sl_price - low_)
             if hit_sl and hit_tp:
                 # 盘中盲区:两根阈值同 bar 触及 → 按最坏情况(CLAUDE.md §4)
-                close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=v)
+                close_position(pos, day, sl_fill_at, "sl", bar_lo=low_, bar_hi=h, bar_vol=v,
+                               sl_penetration=pen)
                 continue
             if hit_sl:
-                close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=v)
+                close_position(pos, day, sl_fill_at, "sl", bar_lo=low_, bar_hi=h, bar_vol=v,
+                               sl_penetration=pen)
                 continue
             if hit_tp:
                 close_position(pos, day, pos.tp_price, "tp", bar_lo=low_, bar_hi=h, bar_vol=v)
@@ -447,7 +686,7 @@ def simulate(
         # ---------- 2) 入场:前一交易日(T)的信号在今日(T+1)开盘成交 ----------
         # 预算与容量都取自步骤 0 的快照,不读当日的出场所得与释放的槽位(§2(d))。
         prev_idx = day_pos[day] - 1
-        if prev_idx >= 0:
+        if prev_idx >= 0 and not halted_today:
             sig_day = days[prev_idx]
             cash_avail = cash_at_open
             for sig in pending.get(sig_day, []):
@@ -458,6 +697,15 @@ def simulate(
                     # 开盘时仍持有(它当天盘中才出场)⇒ 不得在当日再次建仓,
                     # 否则等于用一根尚未走完的 bar 同时做两件事。
                     continue
+                if max_pair_corr is not None and book.positions:
+                    # 与**已在场**的每个标的比尾部相关（审计 D6）。超限就不建并计数 ——
+                    # 相关性高的两个名字同时持有，经济上等于加倍下注同一件事。
+                    # 窗口右端取**信号日**（prev_idx）：入场日的收益在开盘那一刻还不知道。
+                    if any((lambda c: np.isfinite(c) and c > max_pair_corr)(
+                            trailing_corr(sym, other, prev_idx, days))
+                           for other in list(book.positions)):
+                        stats_blocked_corr += 1
+                        continue
                 k = per_sym.get(sym, {}).get(day)
                 if k is None:
                     continue
@@ -502,11 +750,47 @@ def simulate(
                 #    (high==open 时滑点归零),那是用一个更大的错误换一个小错误。
                 #    另一侧的 gap 修复(见开仓当日的 §4(f) 分支)保证了**触发型**成交
                 #    (止损/止盈/跳空)永远落在 bar 区间内 —— 那才是会产生「不存在的成交」的一侧。
-                entry_px = o * (1.0 + slip)
+                # 买入要跨价差：从买方角度看，开盘价之上再付半个价差。
+                # 用**信号日**（≤T）的估计 —— 用成交当日的估计属于偷看未来。
+                sym_spread = data[sym]["spread_bps"][k - 1] if k >= 1 else float("nan")
+                half_spread = (spread_mod.half_spread_rate(sym_spread)
+                               if spread_model != "none" else 0.0)
+                entry_px = o * (1.0 + slip) * (1.0 + half_spread)
+                # E7：滑点/价差加成可能把成交价顶出当日 bar 的 [low, high] —— 那是
+                # **物理上不存在**的成交价，而它会同时把止损/止盈的锚点往上挪。
+                # 先把越界幅度**记下来**（默认不钳制，见上面那段取舍说明），
+                # 想钳制就显式声明 `clamp_entry_to_bar`（代价：窄 bar 上滑点被抹平）。
+                overflow_bps = 0.0
+                if h_entry > 0 and entry_px > h_entry:
+                    overflow_bps = (entry_px - h_entry) / h_entry * 1e4
+                    stats_entry_overflow += 1
+                    if clamp_entry_to_bar:
+                        entry_px = h_entry
 
-                # 现金闸门(两种口径都要):风险预算可能算出一个买不起的股数
-                qty = min(target_qty(entry_px), cap,
-                          int(np.floor(cash_avail / (entry_px * (1.0 + cost_half)))))
+                # ---- 组合层上限（D1/D3）----
+                # 顺序施加，并**记下最后压住它的那个约束**。为什么必须记：
+                # 此前这里只有一句 min(..., 现金闸门)，于是"声明 5% 权益的单笔风险"
+                # 会被静默改写成 0.6%（实测 12m preset 第二仓），而报告里看不出来。
+                # 记录之后，"声明风险 vs 实际风险"在交易列表里逐笔可查。
+                qty = target_qty(entry_px)
+                cap_by = "policy"
+                volume_cap = cap
+                if qty > volume_cap:
+                    qty, cap_by = volume_cap, "volume_cap"
+                if max_weight is not None:
+                    w_cap = int(np.floor(
+                        max_weight * equity_at_open / (entry_px * (1.0 + cost_half))))
+                    if qty > w_cap:
+                        qty, cap_by = w_cap, "max_weight"
+                if max_heat is not None:
+                    # 剩余风险额度：heat 上限 - 已用（上一收盘持仓 + 今日已建仓）
+                    room = max_heat * equity_at_open - heat_used
+                    h_cap = int(np.floor(room / (sl_w * entry_px))) if room > 0 else 0
+                    if qty > h_cap:
+                        qty, cap_by = h_cap, "max_heat"
+                cash_cap = int(np.floor(cash_avail / (entry_px * (1.0 + cost_half))))
+                if qty > cash_cap:
+                    qty, cap_by = cash_cap, "cash"
                 if qty <= 0:
                     continue
 
@@ -521,8 +805,13 @@ def simulate(
                         f"{day.date()} 入场 {sym} 后现金为负({book.cash:.6f})—— "
                         f"闸门漏了,物理上不可能"
                     )
+                # 建仓后立即占用风险额度：同日后续信号的 heat 判定要看得见它。
+                heat_used += sl_w * entry_px * qty
                 book.positions[sym] = Position(
                     symbol=sym, entry_date=day, entry_price=entry_px, size=qty,
+                    sizing_cap=cap_by, equity_at_entry=equity_at_open,
+                    half_spread=half_spread, volume_cap=int(volume_cap),
+                    entry_overflow_bps=overflow_bps,
                     sl_price=entry_px * (1.0 - sl_w),
                     tp_price=entry_px * (1.0 + tp_w),
                     atr_pct=sym_atr, sl_width=sl_w, tp_width=tp_w,
@@ -544,9 +833,13 @@ def simulate(
                 elif h >= pos.tp_price and o >= pos.tp_price:
                     close_position(pos, day, o, "tp_gap", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
                 elif low_ <= pos.sl_price and h >= pos.tp_price:
-                    close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
+                    close_position(pos, day, pos.sl_price - sl_overshoot * max(0.0, pos.sl_price - low_),
+                                   "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol,
+                                   sl_penetration=(pos.sl_price - low_) / pos.sl_price)
                 elif low_ <= pos.sl_price:
-                    close_position(pos, day, pos.sl_price, "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
+                    close_position(pos, day, pos.sl_price - sl_overshoot * max(0.0, pos.sl_price - low_),
+                                   "sl", bar_lo=low_, bar_hi=h, bar_vol=bar_vol,
+                                   sl_penetration=(pos.sl_price - low_) / pos.sl_price)
                 elif h >= pos.tp_price:
                     close_position(pos, day, pos.tp_price, "tp", bar_lo=low_, bar_hi=h, bar_vol=bar_vol)
 
@@ -566,11 +859,50 @@ def simulate(
                                bar_hi=data[sym]["raw_high"][k],
                                bar_vol=data[sym]["volume"][k])
 
+        # ---------- 3b) 窗口末尾清算（C5）----------
+        # 为什么必须清算：不清算时，**头条收益/Sharpe/maxDD 来自权益曲线（含未实现
+        # 浮盈）**，而 **E[R]/胜率/盈亏比只覆盖已平仓成交** —— 同一份报告里的两组数
+        # 落在两个不同的样本上，且窗口末尾刚好浮盈时会系统性地抬高头条。
+        # 这里按最后一根收盘价成交（正常收出场成本），于是两组数同源；
+        # 代价是"本会继续持有的仓位也付了一次出场成本"，方向保守。
+        if liquidate_at_end and day == axis[-1] and book.positions:
+            exit_day = axis[-1]
+            for sym in list(book.positions):
+                k2 = per_sym.get(sym, {}).get(exit_day)
+                if k2 is None:
+                    # ⚠️ 当日没有该标的的 bar（停牌/退市/数据中断）⇒ **不得**造一个成交。
+                    # 准则 §1 的原文:Suspended names are marked at the last raw_close
+                    # and **MUST NOT generate fills** until trading resumes。
+                    # 所以这里什么都不做，把它留作未平仓，并由 `_window_metrics` 把
+                    # "仍有未平仓 ⇒ 两个样本未对齐"**显式报出来** —— 而不是假装清算干净。
+                    stats_unliquidated += 1
+                    continue
+                pos = book.positions[sym]
+                if not close_position(pos, exit_day, data[sym]["raw_close"][k2], "eod",
+                                      bar_lo=data[sym]["raw_low"][k2],
+                                      bar_hi=data[sym]["raw_high"][k2],
+                                      bar_vol=data[sym]["volume"][k2]):
+                    stats_unliquidated += 1      # 零量 bar：没成交，仍算未清算
+
         eq_today = mark_to_market(day)
         prev_equity = eq_today            # 供**下一交易日**的入场定预算(§2(d) 快照)
+        peak_equity = max(peak_equity, eq_today)
+        # 组合层风险的**逐日观测值**：不设上限时它们是唯一的可见性来源，
+        # 设了上限时它们是事后复核（上限有没有真的生效）。
+        open_risk = sum(planned_risk(p) for p in book.positions.values())
+        notional = {}
+        for p in book.positions.values():
+            k = per_sym.get(p.symbol, {}).get(day)
+            px = (data[p.symbol]["raw_close"][k] if k is not None
+                  else p.entry_price)
+            notional[p.symbol] = p.size * px
         equity_rows.append({"date": day, "equity": eq_today,
                             "cash": book.cash, "n_pos": len(book.positions),
-                            "exposure": (eq_today - book.cash) / eq_today})
+                            "exposure": (eq_today - book.cash) / eq_today,
+                            "heat": open_risk / eq_today if eq_today > 0 else float("nan"),
+                            "top_weight": (max(notional.values()) / eq_today
+                                           if notional and eq_today > 0 else 0.0),
+                            "halted": bool(halted_today)})
 
     equity = pd.DataFrame(equity_rows)
     trades_df = pd.DataFrame(trades, columns=TRADE_COLS)
@@ -578,6 +910,25 @@ def simulate(
         trades_df = trades_df.sort_values("entry_date").reset_index(drop=True)
 
     metrics = _window_metrics(equity, trades_df, max_hold=max_hold)
+    # 显式暴露"样本是否对齐"：只有全部仓位都在窗口末尾被真实清算时，
+    # 权益口径的头条与交易口径的 E[R] 才落在同一个样本上。
+    metrics["n_unliquidated"] = int(stats_unliquidated)
+    # 陈旧重估占"持仓-日"的比例：>0 才说明有停牌/退市真的进了回测。
+    pos_days = int(equity["n_pos"].sum())
+    metrics["stale_position_days"] = int(stats_stale_days)
+    metrics["n_blocked_by_corr"] = int(stats_blocked_corr)
+    metrics["n_partial_exits"] = int(partial_exits)
+    metrics["n_entry_overflow"] = int(stats_entry_overflow)
+    if len(trades_df):
+        # ⚠️ 这里必须用 trades_df（DataFrame）；simulate 里的 `trades` 是**list**
+        # —— 我第一版写成 trades.columns，44 个用例当场报 'list' object has no attribute。
+        _ov = trades_df["entry_overflow_bps"].astype(float)
+        metrics["max_entry_overflow_bps"] = float(_ov.max())
+        metrics["median_entry_overflow_bps"] = float(_ov.median())
+    metrics["pct_position_days_stale"] = (stats_stale_days / pos_days) if pos_days else 0.0
+    # 判据只有一条：窗口结束时账本里还剩不剩仓位。
+    # 剩 ⇒ 权益口径含未实现浮盈、而交易口径只覆盖已平仓 ⇒ 两组数不同源。
+    metrics["samples_aligned"] = bool(equity["n_pos"].iloc[-1] == 0)
     return {"trades": trades_df, "equity": equity, "metrics": metrics}
 
 
@@ -589,11 +940,21 @@ def _window_metrics(equity: pd.DataFrame, trades: pd.DataFrame, *, max_hold: int
     if not np.all(np.isfinite(e)) or np.any(e <= 0):
         raise BrokerError("权益曲线含非有限值或非正值 —— 记账错了")
 
-    ret = equity["equity"].pct_change().fillna(0.0).to_numpy(dtype=float)
+    # Sharpe 只有一份定义（research.metrics.annualized_sharpe）—— 此前 broker 自己
+    # 又写了一遍（`pct_change().fillna(0)` + √252），与 DSR 里那条序列算出来的
+    # 不是同一个数（首日那个填出来的 0 让 n 差 1、均值被稀释）。同一份报告里
+    # 两个 Sharpe 并列是"同指标两口径"的老毛病，这里收成一处。
+    ret = equity["equity"].pct_change().dropna().to_numpy(dtype=float)
     total_return = e[-1] / e[0] - 1.0
-    std = float(np.std(ret, ddof=1)) if len(ret) > 1 else float("nan")
-    sharpe = (float(np.mean(ret)) / std * np.sqrt(252)
-              if std and np.isfinite(std) and std > 1e-12 else float("nan"))
+    sharpe = metrics.annualized_sharpe(ret, metrics.TRADING_DAYS)
+    # ⚠️ 口径双报（审计 B7）：`sharpe` 把**空仓日**（收益恰好为 0）也算进去 ——
+    # 那是"这个策略作为一个账户"的真实收益流，也是 DSR 应当用的序列；
+    # 而 `sharpe_invested` 只用**在场日**，回答的是另一个问题：
+    # "它的信号在它真在场时有多好"。本仓库的策略敞口常低到个位数百分比，
+    # 两者会差很多；只报一个就会被读成另一个。
+    expo = equity["exposure"].to_numpy(dtype=float)[1:]
+    ret_inv = ret[expo > 0] if len(expo) == len(ret) else ret
+    sharpe_invested = metrics.annualized_sharpe(ret_inv, metrics.TRADING_DAYS)
     peak = np.maximum.accumulate(e)
     max_dd = float(np.min(e / peak - 1.0))
 
@@ -601,13 +962,52 @@ def _window_metrics(equity: pd.DataFrame, trades: pd.DataFrame, *, max_hold: int
         "start": equity["date"].iloc[0], "end": equity["date"].iloc[-1],
         "trades": int(len(trades)), "total_return": float(total_return),
         "sharpe": float(sharpe), "max_dd": max_dd,
+        "sharpe_invested": float(sharpe_invested),
+        "n_days_invested": int((expo > 0).sum()) if len(expo) == len(ret) else int(len(ret)),
         "avg_exposure": float(equity["exposure"].mean()),
         "days": int(len(equity)),
+        # ---- 组合层风险的观测值（D1/D2）----
+        # 这三项让"组合层有没有失控"变成可读的量，而不是靠人肉推演：
+        #   peak_heat        单日同时在场仓位的计划风险峰值（占权益）
+        #   peak_name_weight 单名名义额峰值（占权益）
+        #   pct_days_halted  停机开关生效的交易日占比（未声明上限时为 0）
+        "peak_heat": (float(equity["heat"].max())
+                      if "heat" in equity.columns else float("nan")),
+        "peak_name_weight": (float(equity["top_weight"].max())
+                             if "top_weight" in equity.columns else float("nan")),
+        "pct_days_halted": (float(equity["halted"].mean())
+                            if "halted" in equity.columns else 0.0),
     }
     if trades.empty:
         out.update({"win_rate": float("nan"), "avg_hold_days": float("nan"),
                     "tp_count": 0, "sl_count": 0, "time_count": 0})
         return out
+
+    # 「声明风险 vs 实际风险」的可审计性（D3）：有多少笔的股数其实是被
+    # 量能/单名权重/heat/现金压下来的（即 declaration 与 realized 不一致）。
+    # 容量余量（D5/E4）：volume_cap/size = "当前单笔规模还能放大几倍才会撞到量能上限"。
+    # 这是"这套策略能装多少钱"唯一可读的答案；小于 1 表示已经被量能上限截断。
+    if "volume_cap" in trades.columns and (trades["size"] > 0).all():
+        hr = trades["volume_cap"].astype(float) / trades["size"].astype(float)
+        out["capacity_headroom_min"] = float(hr.min())
+        out["capacity_headroom_median"] = float(hr.median())
+
+    # 止损穿价的分布（E2）：这是「按触发价成交」这条假定的**代价读数**。
+    # 只统计盘中止损（sl）：跳空（sl_gap）按开盘价成交，谈不上"穿价"。
+    if "sl_penetration" in trades.columns:
+        sl = trades.loc[trades["exit_reason"] == "sl", "sl_penetration"].dropna()
+        out["median_sl_penetration_bps"] = (float(sl.median()) * 1e4 if len(sl)
+                                            else float("nan"))
+        out["p90_sl_penetration_bps"] = (float(sl.quantile(0.9)) * 1e4 if len(sl)
+                                         else float("nan"))
+        out["n_sl"] = int(len(sl))
+
+    if "sizing_cap" in trades.columns:
+        capped = trades["sizing_cap"] != "policy"
+        out["capped_trades"] = int(capped.sum())
+        out["capped_share"] = float(capped.mean())
+        if "risk_frac" in trades.columns:
+            out["max_risk_frac"] = float(trades["risk_frac"].max())
 
     wins = trades["net_pnl"] > 0
     reasons = trades["exit_reason"]

@@ -24,6 +24,7 @@ import logging
 import sqlite3
 from collections.abc import Iterable
 
+import numpy as np
 import pandas as pd
 
 import series
@@ -84,12 +85,16 @@ def load_full_panel(
     symbols: Iterable[str] | None = None,
     *,
     adjust: str = "total",
-    universe_path: str | None = None,
+    universe: dict | str | None = None,
 ) -> pd.DataFrame:
     """载入全部标的的全部历史,返回长表。
 
     symbols 为 None 时,从 ohlcv 表里取全部 distinct symbol。
     adjust 默认 "total"(拆股+分红复权,总收益口径)。
+
+    `universe` 是**取池声明**（见 research/universe.py）:挂一列因果可判定的
+    `eligible`,不删行。此前的 `universe_path` 形参是**死参数**（声明了却没人读,
+    2026-10-17 审计 A2）,已删除并换成真正会被消费的 `universe`。
     """
     import db  # 延迟导入:调用方可能用 -m 从仓库根运行
 
@@ -105,7 +110,7 @@ def load_full_panel(
                 # 立刻抛,但也要抛得可行动)。
                 raise PanelError(
                     f"读不到 ohlcv 表({exc})—— data/*.db 不随仓库分发,先跑取数:\n"
-                    f"    python src/download_ohlcv.py --universe oi100 --as-of <YYYY-MM-DD>\n"
+                    f"    python src/download_ohlcv.py --universe all --as-of <YYYY-MM-DD>\n"
                     f"    (--as-of 钉住数据 vintage;窗口与命令见 research/README.md 的「复现」)"
                 ) from exc
             symbols = [r[0] for r in rows]
@@ -137,17 +142,64 @@ def load_full_panel(
         len(panel), panel["symbol"].nunique(),
         panel["date"].min().date(), panel["date"].max().date(), adjust,
     )
-    return panel[PANEL_COLS + RAW_COLS + ["dividends", "splits"]]
+    panel = panel[PANEL_COLS + RAW_COLS + ["dividends", "splits"]]
+    # 取池资格：挂列不删行（见 research/universe.attach 的 docstring）。
+    from research import universe as mod_universe
+    return mod_universe.attach(panel, universe)
+
+
+def load_panel_for_preset(preset: dict, *, adjust: str = "total") -> pd.DataFrame:
+    """按 preset 声明的 `universe` 载入面板 —— **取池的唯一入口**。
+
+    存在的理由：preset 声明过 `universe`，而引擎此前根本不读它（core/preset_contract.py
+    的 docstring 自己承认），回测池等于"DB 里恰好有什么"（2026-10-17 审计 A2）。
+    把入口收成一个函数之后，「忘了带池子」在代码层就没有位置了 ——
+    这也正是本仓库为根除"声明了却没人读"而立的规矩（§2(a)）。
+    """
+    if not isinstance(preset, dict):
+        raise PanelError(f"load_panel_for_preset 需要 preset dict，得到 {type(preset).__name__}")
+    return load_full_panel(adjust=adjust, universe=preset.get("universe"))
+
+
+def price_digest(panel: pd.DataFrame) -> str:
+    """**价格内容**指纹 —— 让「数据换了」与「逻辑变了」可归因（审计 A6）。
+
+    为什么必须有：`data_vintage` 此前只有行数/标的数/起止日。厂商**重述**价格时
+    （拆股后的整段回补、错价更正）行数往往一字不变 ⇒ 指纹也一字不变 ⇒ 此时 golden
+    变红会被**归因成"逻辑变了"**，而真正的原因在下游（我在本仓库实测过这一幕：
+    全量重下之后旧的 `data_vintage` 描述不出一丝价格差异）。
+
+    取 (symbol, date, as-traded close, volume) 的规范序列化后 sha256：
+      * 用 **as-traded** 价：它才是执行与记账的物理量（复权价是派生量）；
+      * 按 (symbol, date) 稳定排序后再哈希 ⇒ 与面板的行序无关；
+      * 分块 update，避免为 197 万行构造一个上百 MB 的临时字符串。
+
+    它不是加密用途，是**变更检测**：32 位十六进制足够。
+    """
+    import db as _db          # 延迟导入：与 load_full_panel 同样的理由
+    need = ["symbol", "date", "raw_close", "volume"]
+    miss = [c for c in need if c not in panel.columns]
+    if miss:
+        raise PanelError(f"price_digest 需要 {need}，缺 {miss}")
+    sub = panel[need].sort_values(["symbol", "date"], kind="mergesort")
+    # ⚠️ 规范序列化只有一份、在 db.price_digest_of 里（审计 A6/A7）：
+    # 我第一版在这里另写了一套哈希构造，结果同一份数据上两个摘要不相等 ——
+    # 测试当场发现。多写一份"看起来一样"的实现，必然漂移。
+    return _db.price_digest_of(
+        (r.symbol, r.date.strftime("%Y-%m-%d"), r.raw_close, r.volume)
+        for r in sub.itertuples(index=False))
 
 
 def data_vintage(panel: pd.DataFrame) -> str:
-    """数据 vintage 指纹:行数 / 标的数 / 起止日。不含任何收益信息(§7)。
+    """数据 vintage 指纹:行数 / 标的数 / 起止日 / **价格内容摘要**。不含任何收益信息(§7)。
 
     被 run_baseline 的结果 JSON 与 golden 基线共用 —— 没有它,「当前代码 + 一条命令」
     复现不出任何历史数字,因为 data/*.db 本身不入库(§0/§7)。
+    价格摘要见 `price_digest`（审计 A6：只有计数时，"数据换了"与"逻辑变了"分不开）。
     """
     return (f"rows={len(panel)};symbols={panel['symbol'].nunique()};"
-            f"from={panel['date'].min():%Y-%m-%d};to={panel['date'].max():%Y-%m-%d}")
+            f"from={panel['date'].min():%Y-%m-%d};to={panel['date'].max():%Y-%m-%d};"
+            f"prices={price_digest(panel)}")
 
 
 def first_signal_date(panel: pd.DataFrame) -> pd.Timestamp:

@@ -48,6 +48,7 @@ import sys
 import numpy as np
 import pandas as pd
 
+from research import holdout as mod_holdout
 from research import indicators, metrics, panel as mod_panel, presets, regime, search_12m as S
 
 logger = logging.getLogger("wfv_search")
@@ -98,8 +99,11 @@ def pooled(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
     """
     EVAL_COUNT["n"] += 1
     cagrs, dds, ers, sharpes, tcounts, no_sig = [], [], [], [], [], 0
+    per_win_rets: list[tuple[tuple[str, str], list[float]]] = []
     for lo, hi in windows:
         r = S.evaluate(ind, reg, cfg, lo, hi)
+        if r.get("daily_ret") is not None:
+            per_win_rets.append(((lo, hi), r["daily_ret"]))
         if r["cagr"] is None:
             no_sig += 1
             tcounts.append(0)
@@ -110,7 +114,9 @@ def pooled(ind: pd.DataFrame, reg: pd.DataFrame, cfg: dict,
         sharpes.append(r["sharpe"])
         tcounts.append(r["trades"])
     out = {"n_windows": len(windows), "n_no_signals": no_sig,
-           "trades_per_window": tcounts, "n_trades": int(sum(tcounts))}
+           "trades_per_window": tcounts, "n_trades": int(sum(tcounts)),
+           # 拼接后的测试期逐日收益（窗口重叠时为 None ⇒ 不报 DSR）
+           "pooled_daily_ret": metrics.pool_windows_rets(per_win_rets)}
     if not cagrs:
         out.update({"mean_cagr": None, "mean_dd": None, "worst_dd": None,
                     "mean_e_r": None, "mean_sharpe": None, "cagrs": []})
@@ -148,7 +154,8 @@ def _fmt_row(tag: str, i: dict) -> str:
             f"空信号窗 {i['n_no_signals']}/{i['n_windows']}")
 
 
-def report(ind: pd.DataFrame, reg: pd.DataFrame) -> dict:
+def report(ind: pd.DataFrame, reg: pd.DataFrame, *,
+           force_holdout: str | None = None) -> dict:
     fs = folds()
     train = [(a, b) for a, b, _, _ in fs]
     test = [(c, d) for _, _, c, d in fs]
@@ -240,13 +247,23 @@ def report(ind: pd.DataFrame, reg: pd.DataFrame) -> dict:
               f"⇒ 第 {pct:.1f} 百分位  失败 {ctl['n_failed']}")
 
     # ---------------- DSR ----------------
-    dsr = metrics.deflated_sharpe_ratio(te["mean_sharpe"], n_trials=N_TRIALS,
-                                        n_returns=max(2, te["n_trades"]))
-    print(f"\nDSR:测试窗平均 Sharpe {te['mean_sharpe']:+.2f},k={N_TRIALS} ⇒ "
-          f"{dsr['deflated_sharpe']:.3f} (p={dsr['dsr_p_value']:.3f})")
+    # DSR 必须从**一条收益序列**算（审计 B3）：此前的口径是"逐窗 Sharpe 的均值 +
+    # 成交笔数当 T" —— 那不是任何一条序列的 DSR。现在用测试期逐日收益的拼接。
+    dsr = _report_dsr(te, N_TRIALS, "wfv_search 测试期拼接")
 
     # ---------------- 一次性 holdout ----------------
+    # ⚠️ 先过台账再跑（2026-10-17 审计 B1）：这个窗口此前已被 claim 消费过，
+    #    所以默认**拒绝**继续（HoldoutBurned），要继续必须给出显式理由。
+    #    理由不是流程仪式：§5 要求最终结论落在未参与任何迭代的窗口上，而
+    #    「已消费」这件事此前只写在注释里，机器无从验证。
+    prior_claims = mod_holdout.consume(
+        HOLDOUT_LO, HOLDOUT_HI, script="wfv_search", tag=f"wf={TRAIN_MONTHS}/{TEST_MONTHS}",
+        force_reason=force_holdout)
     print("\n" + "=" * 104)
+    if prior_claims:
+        print(f"⚠️ holdout {HOLDOUT_LO}..{HOLDOUT_HI} 此前已被 claim 消费 {prior_claims} 次 ⇒ "
+              f"**本次结果不是样本外**，只能当描述性数字读。")
+        print(f"   强制继续的理由已记入台账：{force_holdout}")
     print(f"一次性 holdout(全程未参与任何选择):{HOLDOUT_LO}..{HOLDOUT_HI}")
     ho = pooled(ind, reg, chosen, [(HOLDOUT_LO, HOLDOUT_HI)])
     ho_base = pooled(ind, reg, {}, [(HOLDOUT_LO, HOLDOUT_HI)])
@@ -265,19 +282,42 @@ def report(ind: pd.DataFrame, reg: pd.DataFrame) -> dict:
             "folds": fs, "n_trials": N_TRIALS, "eval_count": EVAL_COUNT["n"]}
 
 
+def _report_dsr(te: dict, k: int, label: str) -> dict:
+    """统一的口径 + 一致的失败话术：拿不到可拼接的收益序列就**不报**这个数。"""
+    rets = te.get("pooled_daily_ret")
+    if not rets:
+        print(f"\nDSR：**不报** —— 本入口拿不到可拼接的收益序列（窗口重叠或全窗无信号）。"
+              f"「逐窗 Sharpe 的均值 + 成交笔数」不是任何一条序列的 DSR（审计 B3）。")
+        return {"deflated_sharpe": float("nan"), "dsr_p_value": float("nan"),
+                "n_trials": k, "reason": "no_poolable_returns"}
+    dsr = metrics.deflated_sharpe_from_returns(rets, n_trials=k, label=label)
+    print(f"\nDSR:{label} {dsr['n_returns']} 个日收益,年化 Sharpe "
+          f"{dsr['observed_sharpe']:+.2f},偏度 {dsr['skewness']:+.2f},峰度 "
+          f"{dsr['kurtosis']:.1f},自相关 {dsr['autocorr_lag1']:+.3f},k={k} ⇒ "
+          f"{dsr['deflated_sharpe']:.3f} (p={dsr['dsr_p_value']:.3f})")
+    return dsr
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="WFV 搜索(预注册网格 + 一次性 holdout)")
     ap.add_argument("--run", action="store_true", help="真的跑(默认只打印帮助)")
+    ap.add_argument("--force-holdout", default=None, metavar="REASON",
+                    help="该 holdout 窗口已被消费过时,显式声明理由后继续(理由写入台账)")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     if not a.run:
         ap.print_help()
         return 0
-    p = mod_panel.load_full_panel()
-    ind = indicators.compute_all(p)
     preset = presets.get_preset("us_uptrend_pullback_v1")
+    p = mod_panel.load_panel_for_preset(preset)
+    ind = indicators.compute_all(p)
     reg = regime.compute_regime(ind, **(preset.get("regime") or {}))
-    report(ind, reg)
+    try:
+        report(ind, reg, force_holdout=a.force_holdout)
+    except mod_holdout.HoldoutBurned as exc:
+        # 默认拒绝 —— 这不是异常路径,而是 §5 在起作用。
+        print(f"\n[holdout 台账] 拒绝继续:\n{exc}\n")
+        return 2
     return 0
 
 

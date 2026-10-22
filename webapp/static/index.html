@@ -1,0 +1,1709 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>usagent 策略平台</title>
+<!-- 内联 favicon（data URI）：此前每次加载都有 /favicon.ico 的 404 —— 对打开 devtools 的人
+     看起来像有东西坏了。data URI 不产生任何外部请求，页面仍然自包含。 -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230f1115'/><path d='M5 3.5v9M3.8 6h2.4v4H3.8zM11 3.5v9M9.8 4.5h2.4v5H9.8z' stroke='%2331c48d' fill='none' stroke-width='1.1'/></svg>">
+<style>
+:root{--bg:#0f1115;--fg:#e6e8ee;--dim:#9aa3b2;--line:#262b36;--up:#31c48d;--dn:#f05252;
+      --warn:#f6ad55;--card:#161a21;--btn:#22303f;--btnb:#33475c;
+      /* ⚠️ --acc 原先**只被引用、从未定义**（:75 的 button.thbtn:focus-visible 用了它）——
+         var() 未定义 ⇒ 该声明在 computed-value 阶段作废 ⇒ outline:none。于是键盘用户 Tab 到
+         台账列头时看不出焦点在哪（审计 blocking：实测 getComputedStyle(:root) 取 --acc 为空串、
+         :focus-visible 命中但 outline-style 为 none）。 */
+      --acc:#7aa7ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,
+     "Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1280px;margin:0 auto;padding:0 18px 60px}
+/* 顶栏常驻：策略多了以后，"我在哪 / 怎么跳"必须是零成本操作 */
+.top{position:sticky;top:0;z-index:9;background:rgba(15,17,21,.96);border-bottom:1px solid var(--line);
+     padding:10px 0 9px;backdrop-filter:blur(6px)}
+.top .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.top h1{font-size:16px;margin:0;white-space:nowrap}
+.top a.nav{color:var(--dim);text-decoration:none;font-size:12.5px;border:1px solid var(--line);
+           border-radius:999px;padding:2px 10px}
+.top a.nav:hover{color:var(--fg);border-color:var(--btnb)}
+input[type=search]{background:#0c0f13;color:var(--fg);border:1px solid var(--line);border-radius:6px;
+                   padding:5px 9px;font-size:13px;min-width:230px}
+input[type=text]{background:#0c0f13;color:var(--fg);border:1px solid var(--line);border-radius:6px;
+                 padding:5px 9px;font-size:12.5px;min-width:210px}
+/* 窄屏（手机/半屏窗口）：顶栏是 sticky 的，每一行都从正文里**永久**扣走一条 ——
+   把两个输入框的 min-width 收窄，让它们并排，顶栏从 186px 降到约一屏的四分之一以下。 */
+/* ⚠️ 窄屏那档必须放在**样式表末尾**：媒体查询不提高优先级，同优先级的后写规则会盖掉它 ——
+   上一版把它写在前面，于是 132px 从来没生效过（实测 1280→480 全是 96px）。 */
+@media (max-width:560px){
+  input[type=search]{min-width:150px}
+  input[type=text]{min-width:140px;flex:1 1 140px}
+  .top h1{font-size:15px}
+}
+h2{font-size:16px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line);
+   /* 常驻顶栏会吃掉锚点落点。实测顶栏高：78px@1920–1280、83@1100、114@700、118@480 ——
+      原先一律 64px，所以**每个视口都还差一截**（审计实测标题被盖住 15–54px；
+      我上一轮那次测量用了 top<200 的松容差，把这个问题漏过去了）。 */
+   scroll-margin-top:96px}
+.sub{color:var(--dim);font-size:12.5px}
+.banner{margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--warn);
+        background:#1a1712;border-radius:6px;font-size:12.5px;color:#f0d9b5}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(420px,100%),1fr));gap:14px}
+/* 首次使用的入门块：**默认收起**（老手不想每次多滚一屏），但一开就有三步入门 + 六个词。 */
+details.ft{margin:10px 0;border:1px solid var(--line);border-radius:8px;background:#12171e}
+details.ft summary{cursor:pointer;font-size:12.5px;color:var(--dim);padding:9px 12px}
+details.ft summary:hover{color:var(--fg)}
+details.ft[open] summary{border-bottom:1px solid var(--line);color:var(--fg)}
+.ftbody{padding:10px 14px 12px;font-size:12.5px;line-height:1.75}
+.ftbody ol{margin:0 0 10px;padding-left:22px}
+.ftbody li{margin:4px 0}
+.ftbody dl{margin:0;display:grid;grid-template-columns:max-content 1fr;gap:3px 12px}
+.ftbody dt{color:#cbd5e1;font-weight:600}
+.ftbody dd{margin:0;color:var(--dim)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:13px 14px}
+.card{scroll-margin-top:96px}
+/* ⚠️ 光给 h2/.card 设不够：顶栏那个「本次结果」锚的是 #run，而它是普通 div ——
+   实测（用 Range 量标题文字上沿 vs 顶栏底边）它落在 15px、被 79px 的顶栏整条盖住。
+   凡是**会被锚点跳到**的元素都要让开顶栏。 */
+#run{scroll-margin-top:96px}
+.card:target{border-color:var(--up)}
+.card h3{margin:0 0 4px;font-size:14.5px}
+.card h3 a{color:inherit;text-decoration:none}
+.card h3 a:hover{color:var(--up)}
+.card .mech{color:var(--dim);font-size:12.5px;margin:0 0 9px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+/* 全局链接色。此前页面只有 .top a.nav / .card h3 a / .busy a 三处作用域规则，中间那些
+   直接挂文字的 <a>（卡片「报告」、台账「打开」、历史报告「打开报告」/「CSV」）全部落到
+   UA 默认蓝 #0000EE —— 在 --card #161a21 上只有 1.86:1（AA 要 4.5:1），实测共 57 个。 */
+a{color:var(--acc)}
+td,th{padding:3px 6px;border-bottom:1px solid #20242c;vertical-align:top;text-align:left;
+      /* 审计实测（2026-10-18）：参数那一格是 JSON.stringify 出来的**无断点长串**（最长 245 字符），
+         没有这一行时 td 撑到 1708px、整页 scrollWidth 2329px vs 视口 1200px ⇒
+         「看策略与参数」这个首屏唯一的核心动作在所有视口都是坏的（6/6 张 preset 卡的
+         table 都宽于卡片）。overflow-wrap:anywhere 让长串可断，代价只是 JSON 多折几行。 */
+      overflow-wrap:anywhere}
+th{color:var(--dim);font-weight:400}
+td.k{color:var(--dim);width:46%}
+td code.p{color:#9fb3c8;font-size:11.5px}   /* 参数格：等宽、可断，别再把表撑破 */
+/* 顶栏的"有任务在跑"徽标。为什么必须有：一次回测是 35–66 秒的重活，而卡片区有 20 多屏 ——
+   点完回测往下滚，页面上就没有任何地方告诉你它还在跑、跑了多久（审计实测：滚走即失联）。 */
+.busy{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#f0d9b5;
+      border:1px solid #4a3a12;background:#241d0e;border-radius:999px;padding:2px 10px}
+.busy a{color:inherit;text-decoration:none}
+.busy a:hover{text-decoration:underline}
+/* 链接当按钮用（一个动作一个 Tab 停靠点：原先 <a><button> 会停两次，且两处语义重复） */
+a.btnlink{display:inline-block;background:var(--btn);color:#dce7f2;border:1px solid var(--btnb);
+          border-radius:6px;padding:6px 12px;font-size:12.5px;text-decoration:none}
+a.btnlink:hover{background:#2a3b4d}
+a.btnlink.mini{padding:3px 9px;font-size:12px;background:transparent}
+/* 列头按钮的点击目标：原先 padding:0 ⇒ 「k」那一列实测只有 7×19px，远小于可用尺寸 */
+button.thbtn{background:none;border:0;padding:6px 4px;min-height:24px;min-width:20px;color:inherit;
+             font:inherit;cursor:pointer}
+button.thbtn:hover{color:var(--fg)}
+button.thbtn:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+@media (max-width:560px){
+  h2,.card,#run{scroll-margin-top:132px}      /* 窄屏顶栏换行到 114–118px（放末尾才不被盖） */
+}
+/* 兜底：将来任何一格再塞进不可断的内容，也只让**这张表**横滚，不再把整页顶破 */
+.scrollx{overflow-x:auto}
+.verdict{margin:9px 0 0;padding:8px 9px;background:#141a16;border-left:3px solid var(--up);
+         border-radius:5px;font-size:12px;color:#cfe3d6;max-height:150px;overflow:auto;white-space:pre-wrap}
+.verdict.none{border-left-color:var(--warn);color:#f0d9b5}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0}
+input[type=date],select{background:#0c0f13;color:var(--fg);border:1px solid var(--line);border-radius:5px;
+                 padding:4px 6px;font-size:12.5px}
+select.grid{border-color:var(--btnb)}
+button{background:var(--btn);color:#dce7f2;border:1px solid var(--btnb);border-radius:6px;padding:6px 12px;
+       font-size:12.5px;cursor:pointer}
+button:hover{background:#2a3b4d}
+button.mini{padding:3px 9px;font-size:12px;background:transparent}
+button:disabled{opacity:.5;cursor:default}
+.pos{color:var(--up)}.neg{color:var(--dn)}.warn{color:var(--warn)}
+details.src{margin:9px 0 0}
+details.src .devhint{font-size:12px;color:#f0d9b5;background:#1a1712;border:1px solid #4a3a12;
+                     border-radius:6px;padding:8px 10px;margin:8px 0 0;line-height:1.6}
+details.src pre{max-height:320px;overflow:auto;background:#0c0f13;border:1px solid var(--line);
+                border-radius:6px;padding:9px;font-size:11.5px;line-height:1.45}
+.run{margin:22px 0 0;padding:14px;border:1px solid var(--btnb);border-radius:8px;background:#12171e;display:none}
+.steps{font-size:12.5px;color:var(--dim);margin:8px 0}
+.metrics{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px 14px;margin-top:8px}
+.metrics div{font-size:12.5px;display:flex;justify-content:space-between;border-bottom:1px solid #1d222a;padding:2px 0}
+.metrics span:first-child{color:var(--dim)}
+iframe{width:100%;height:70vh;border:1px solid var(--line);border-radius:6px;background:#fff;margin-top:10px}
+code{font-size:12px;color:#cbd5e1;overflow-wrap:anywhere}
+/* code 里的东西（命令、文件名、定义体路径）常是**一个超长不可断的 token** —— 实测 390px 视口下
+   复制命令里的 --out 文件名有 405px 宽，把整页顶出 47px 横向滚动。机器内容就该在任意处断。 */
+table.ledger{font-size:12.5px}
+/* cursor:pointer 只在**真能排序**的表头上有 —— 历史报告那张表的 th 不可排序，
+   但它共用 .ledger 这个类，于是鼠标手势在撒谎（审计实测）。 */
+table.ledger th{white-space:nowrap}
+table.ledger th.sortable{cursor:pointer;user-select:none}
+table.ledger th:hover{color:var(--fg)}
+table.ledger td{white-space:nowrap}
+.clip{background:#0c0f13;border:1px solid var(--line);border-radius:6px;padding:7px 9px;margin-top:8px;
+      font-size:11.5px;color:#cbd5e1;white-space:pre-wrap;word-break:break-all;display:none}
+</style>
+</head>
+<body>
+<div class="top"><div class="wrap" style="padding-bottom:0"><div class="row">
+  <h1>usagent 策略平台</h1>
+  <a class="nav" href="#presets">交付 preset</a>
+  <a class="nav" href="#families">策略族</a>
+  <a class="nav" href="#run">本次结果</a>
+  <a class="nav" href="#reports">历史报告</a>
+  <a class="nav" href="#runs">运行台账</a>
+  <a class="nav" href="#" onclick="reloadCatalog();return false"
+     title="重新拉一次目录并重渲卡片（你改过的窗口/族参数会回到默认）。
+注意：改了定义体要先重启服务 —— 注册表是启动时读一次的">重新读目录</a>
+  <input type="search" id="q" aria-label="搜索策略卡片与历史报告" title="过滤策略卡片与「历史报告」表（台账不过滤）"
+         placeholder="搜索：策略卡片 + 历史报告（⌘K 聚焦）">
+  <input type="text" id="note" aria-label="本次运行的备注（写进台账）"
+         placeholder="备注（可选：这次改了什么 / 为什么跑）"
+         title="写进台账的备注列。台账是拿来对比两次运行的 —— 没有备注，两次点击在纸面上长得一模一样。">
+  <label class="sub" title="同止损止盈、同笔数、随机入场 200 次 ⇒ 这条策略落在随机分布的第几百分位。
+这是把「运气」与「本事」分开的唯一判词；默认关是因为它让每次点击多花几秒到半分钟（视笔数）。">
+    <input type="checkbox" id="ctl"> 运气对照 200 次（+约 3–26 秒）</label>
+  <span class="sub" id="count"></span>
+  <span id="busy" class="busy" style="display:none" role="status" aria-live="polite"></span>
+</div></div></div>
+
+<div class="wrap">
+<div class="banner" id="banner">正在读目录…</div>
+
+<details id="firsttime" class="ft">
+  <summary>第一次用？三步 + 六个词（点开）</summary>
+  <div class="ftbody">
+    <ol>
+      <li><b>挑一条</b>：卡片上的「最近一次」是它上次跑出来的读数（没跑过就写"还没跑过"）；
+        也可以用上面的「视图 → 跑得多的在前」。</li>
+      <li><b>选一段窗口</b>：卡片上那排按钮各自把日期填好，鼠标悬停能看到它会填哪两天
+        （preset 四个、族三个 —— 族没有"声明窗"，第四个位置是禁用的说明）；
+        池子真正可评估的范围在窗口旁边写着。</li>
+      <li><b>点「回测」</b>：<b>第一次要 30–70 秒</b>（在载全池面板 —— 顶栏会出现"⏳ 在跑"，
+        别以为它挂了）；之后命中缓存约 7 秒。结果落在「本次结果」，并且每次都会进「运行台账」。</li>
+    </ol>
+    <dl>
+      <dt>preset</dt><dd>已交付的策略：参数冻结，并且声明过 n_comparisons（它是在多少次试验里
+        被选出来的 —— 这个数进 DSR 的分母）。</dd>
+      <dt>族</dt><dd>候选机制，还不是交付物。它的参数是一张<b>预注册网格</b>（这一页一次只跑一格，
+        想跑整张网格用「复制网格命令」）。</dd>
+      <dt>k</dt><dd>DSR 的分母 = 声明值/网格数 + <b>这次之前</b>在本平台跑过的次数（所以同一策略
+        每跑一次，下一次的 k 就 +1 —— 这一次自己不算进自己的 k）。点一次回测 k 就 +1，
+        这是有意的（§5 迭代记账：能一键重跑的界面会诱发 p-hacking，纪律不是禁止点击，而是让次数可见）。</dd>
+      <dt>holdout</dt><dd>留出来只准读一次的那段窗口。碰了它会被标黄，台账表头有累计次数。</dd>
+      <dt>曝光匹配超额</dt><dd>把闲置资金按等权池计息之后的超额（空仓时精确为 0）——
+        与报告摘要里"总收益 − 基准"那个「超额」<b>不是同一个量</b>，别互相印证。</dd>
+      <dt>价格口径</dt><dd>数学指标用分红回补价；成交价、止损止盈触发、逐日市值与盈亏一律
+        as-traded（§3(b) 双轨），现金分红在穿除息日时显式入账。</dd>
+    </dl>
+  </div>
+</details>
+
+<details id="maintain" class="ft">
+  <summary>接手这个仓库？代码地图 + 改完跑什么（点开）</summary>
+  <div class="ftbody">
+    <p><b>引擎在哪儿</b>（改行为都在这些文件里，别在别处改）：</p>
+    <dl>
+      <dt>research/broker.py</dt><dd>成交与记账：何时进/出、按什么价成交、现金与持仓
+        （费用<b>只调用</b>下面那个模块，不定义常数）</dd>
+      <dt>core/costs.py</dt><dd>费用与滑点的常数（<code>COST_BPS_ROUNDTRIP</code> 等）与
+        <code>half_rate()</code> —— 改成本口径改这里</dd>
+      <dt>research/signals.py</dt><dd>单个 preset 的入场信号（族型 preset 的入场在掩码里）</dd>
+      <dt>research/family_defs/*.py</dt><dd>族的入场掩码（自由 Python）＋ <code>research/families.py</code> 的预注册网格</dd>
+      <dt>research/metrics.py</dt><dd>E[R]/胜率/PF/DSR 等指标</dd>
+      <dt>research/overlay.py</dt><dd>曝光匹配口径（<b>唯一</b>一处实现）</dd>
+      <dt>research/html_report.py</dt><dd>报告的<b>全部</b>呈现（与策略无关）</dd>
+      <dt>core/preset_contract.py</dt><dd>preset 的契约与 <code>resolve()</code>（参数的唯一入口）</dd>
+      <dt>research/preset_defs/*.py</dt><dd>每条已交付 preset 的定义体（<code>NAME</code>、
+        参数、<code>n_comparisons</code>、<code>VERDICT</code>、声明窗）—— 交付一条新候选就是
+        在这里加一个文件（页面上的「复制成新候选」给你改好的骨架）</dd>
+    </dl>
+    <p><b>这个页面自己的源码</b>（你在看的这个东西；没有构建步骤、没有依赖安装 —— 它只跑标准库。
+      改 <code>webapp/static/index.html</code> <b>刷新浏览器即可</b>；改那几个 <code>.py</code>
+      要<b>重启服务</b>（模块与注册表都是启动时读一次的，刷新不管用）：</p>
+    <dl>
+      <dt>webapp/server.py</dt><dd>HTTP 路由（只绑 127.0.0.1，<code>http.server</code>；
+        每个 <code>/api/*</code> 一条路由）</dd>
+      <dt>webapp/jobs.py</dt><dd>跑一次任务：取链路 → 信号 → 回测 → 渲染 → <b>记账</b>。
+        <b>DSR 的 k 在这里算，且只在这里算</b>（面板、台账、测试都读它）</dd>
+      <dt>webapp/catalog.py</dt><dd>把注册表编译成页面用的目录（卡片上的口径标签、族网格、
+        行为锁基线状态、候选骨架）</dd>
+      <dt>webapp/static/index.html</dt><dd>页面的全部前端：内联的样式与脚本（原生 DOM，
+        无框架无构建）。改完刷新即可</dd>
+      <dt>webapp/tests/test_platform.py</dt><dd>平台的测试：路由、记账口径、页面里"按钮还在不在"
+        的清单断言，以及把内联脚本装进最小 DOM 桩<b>真的执行</b>的护栏</dd>
+    </dl>
+    <p><b>命令行入口</b>（页面<b>没有</b>按钮直达的那些也都在这里 —— 免得你以为页面上没有的
+      事就做不了。每条都实测过 <code>--help</code> 可用）：</p>
+    <dl>
+      <dt>research.render_report</dt><dd>单条策略的逐笔报告 —— 页面「复制命令」用的就是它</dd>
+      <dt>research.family_search</dt><dd>跑整张预注册网格（网格 × 折数逐项计入 k）—— 页面「复制网格命令」用的它</dd>
+      <dt>research.rank_strategies</dt><dd>所有 preset + 族的横向排名（页面上只能看「最近一次读数」）</dd>
+      <dt>做一条兄弟候选时</dt><dd>复制一条 preset 改一个参数来试，是这套工具最常见的用法。平台按
+        <b>策略名</b>各自数运行次数 ⇒ 新名字的 prior 恒为 0，DSR 分母 k 会<b>偏小、判词偏乐观</b>
+        （它其实是同一片搜索空间里的又一次试验）。<br>
+        机制：候选的定义体里声明 <code>"derived_from": "&lt;父策略 id&gt;"</code>，平台就把
+        <b>父策略在这台机器上被跑过几次</b>并进 k（父策略的<b>声明值</b>不并 —— 那要作者自己写进
+        本条的 <code>n_comparisons</code>）。实测：基线 k=20（17+3），兄弟不声明时记成 17（17+0），
+        声明后是 21（17+3+1）—— 与手算一致。<br>
+        另外：<b>别拿两次 k 不同的 DSR 互相比较</b>；面板的「DSR 的 k」格里会写清它由哪几项构成。<br>
+        <b>动手的那一步不用手抄</b>：preset 卡上的「复制成新候选」会把骨架生成好（NAME 与文件名
+        改成 <code>&lt;id&gt;_cand</code>、<code>n_comparisons</code> 已 +1、已声明 <code>derived_from</code>、
+        VERDICT 已换成「尚未判定」），并给出建议落盘路径。它<b>只生成、不写盘</b> —— 存与改由你决定。</dd>
+      <dt>交付一条候选前（四条判据）</dt><dd>四条<b>同时</b>满足才算战胜。预注册出处是
+        <code>research/family_search.py</code> 的<b>模块 docstring</b>（它写着"写在这里意味着跑之前就定死"）；
+        协议与 <code>research/wfv_search.py</code> 完全一致，网格 / 折窗 / holdout 的预注册声明在后者。
+        <code>preset_defs/</code> 里那条 preset 的 docstring 是<b>复述</b>，别把它当出处。
+        四条：① 池化测试窗平均 CAGR &gt; 基准线　② 连续净值 CAGR &gt; 基准线
+        ③ 4 折里 ≥3 折为正　④ 4 折里 ≥3 折打赢「同止损止盈、同笔数、同机会集」的随机入场对照（中位以上）。
+        这里的<b>基准线</b>不是池子，是 <code>us_uptrend_pullback_v1</code> 的 <b>WFV 配置</b>
+        （由 <code>research/family_search.py</code> 用同一条代码路径重算；判据① 用的是与族<b>同一机会集</b>的那条线，
+        不是带 v21 流动性上界的历史口径）。<br>
+        <b>判给谁看</b>：族（候选机制）走 <code>python3 -m research.family_search --run</code>；
+        WFV 网格选出来的、以及它的<b>参数兄弟</b>走 <code>python3 -m research.wfv_search --run</code>
+        （<code>wfv_noearn</code> / <code>wfv_postearn</code> 的 docstring 写着"复现：python -m research.wfv_search --run"）。<br>
+        <b>这一页能答到哪</b>：② = 结果面板的「CAGR」对「同窗等权池 CAGR」；③ = 「判据折为正」；
+        ④ 勾了「运气对照」后有一格，但那是<b>整窗一个数</b>，不是逐折 ——
+        <b>① 的池化口径（4 折 CAGR 的均值）与 ④ 的逐折口径本页不出，而且本页跑的是单窗、不是 WFV</b>。
+        所以上面那些数<b>只能当线索</b>：判定以那两条命令的裁决为准，别拿面板的数去声称过了 ①/④。<br>
+        另外三件交付前置：<code>NAME</code> 与文件名一致（注册表校验）、<code>n_comparisons</code> 是这一条
+        <b>声明的试验次数</b>（派生候选要在父策略那个数上<b>加上本轮新做的试验</b>；
+        <code>preset_defs/</code> 里 <code>wfv_noearn</code> / <code>wfv_postearn</code> 的 docstring 就是累加的先例）、
+        行为锁基线在（卡片上的「行为锁基线」行）。</dd>
+      <dt>research.run_baseline</dt><dd>成本敏感性 / 逐窗口分解 / 带 HAC 的归因</dd>
+      <dt>research.wfv_search</dt><dd>WFV 搜索 —— holdout claim 的唯一入口</dd>
+      <dt>src/validate.py</dt><dd>数据覆盖体检（「从没尝试过的名字」）</dd>
+      <dt>src/download_ohlcv.py</dt><dd>取数（换机器时的第一步）</dd>
+    </dl>
+    <p class="sub">⚠️ 注意一处不对称：页面上点一次回测会进台账、会推高 k；上面这些命令行的运行
+      <b>不进平台台账</b>（<code>family_search</code> 自带 k 记账，其余靠调用方自己声明）——
+      换句话说，「我在命令行试了几组」这件事，平台上的 k 是看不见的。这本账得自己心里有。</p>
+
+    <p style="margin-top:10px"><b>改完必须跑</b>：</p>
+    <ul>
+      <li><code>bash tools/preflight.sh</code> —— 快检（卫生/契约/离线行为锁，几秒）。提交钩子跑的就是它。</li>
+      <li><code>bash tools/preflight.sh --full</code> —— 再跑全量，含<b>真数据行为锁</b>：
+        6 条 preset 的交易列表与权益曲线 sha256（基线在 <code>research/tests/baselines/</code>，
+        只放哈希与计数、不放收益数字，§7）。</li>
+      <li><code>python -m research.golden_baseline --regen</code> —— 只在<b>有意</b>改口径时用，
+        并且必须在提交信息里说明成因。<b>不要</b>用它去掩盖变红。</li>
+    </ul>
+    <p><b>三条纪律</b>（<b>注意：这套 §0–§7 的原文不在本仓库里</b> —— 它写在维护者另一处的
+      <code>CLAUDE.md</code>；本仓库里能读的是 <code>README.md</code> 与
+      <code>research/README.md</code> 的引用）：§3 双轨价格 —— 指标用分红回补价、
+      成交与记账用 as-traded；§5 记账 —— 每次试验都进 k，改了参数空间要同步改声明；
+      §6 行为锁 —— 交易列表与净值不许无声变化。
+      <br>另：<code>research/preset_defs/*.py</code> 是<b>数据</b>不是代码 —— 改它要重启服务、
+      并且 <code>n_comparisons</code> 要跟着改（换了参数空间就是一次新搜索）。</p>
+  </div>
+</details>
+
+<div id="content"></div>
+<div class="run" id="run" style="display:block">
+  <div id="runhead" class="sub" role="status" aria-live="assertive">还没跑过 —— 在上面任一策略卡片上点「回测」。
+    结果会显示在这里（含逐笔报告），跑过的每一次都留在下面的台账与「历史报告」里。</div>
+  <div class="steps" id="steps"></div>
+  <div id="result"></div>
+</div>
+
+<h2 id="runs">运行台账</h2>
+<div class="sub">每点一次都会记账（<code>research/results/web_runs.jsonl</code>）。点列头可排序 ——
+  「同一策略两次」或「两条策略」的对比就看这张表。<b>k 会随点击次数上涨</b>（§5 迭代记账：
+  能一键重跑的界面会诱发 p-hacking，纪律不是禁止点击，而是让次数可见）。<br>
+  ⚠️ 两个「超额」不是同一个量：这里的<b>曝光匹配超额</b>＝按敞口加权的超额（空仓时算 0），
+  报告摘要里的「超额」＝自身总收益 − 基准总收益（不按敞口）。同一格子上两者可以差很多，
+  别拿这一列去对报告摘要那一行。</div>
+<div id="lbar" class="sub"></div>
+<div class="sub" id="cmpbar"></div>
+<div id="cmpout"></div>
+<div id="ledger" class="scrollx"></div>
+
+<h2 id="reports">历史报告</h2>
+<div class="sub">盘上已有的报告（<code>research/results/web_report_*.html</code>）。报告是自包含 HTML，
+  直接打开即可看 K 线 / 入场价 / 出场价 / SL·TP / 当日指标；<b>不必为了再看一眼而重跑</b> ——
+  重跑会推高这条策略的 k（§5 迭代记账）。</div>
+<div id="reports_body" class="scrollx"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pct = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v*100, d).toFixed(d) + "%";
+const num = (v, d=3) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v, d).toFixed(d);
+// ⚠️ 「−0.00」不是数字，是显示 bug：浮点残差经 toFixed 之后带上负号，读起来像"略微为负"。
+// 实测（2026-10-21）：一段 0 笔成交的真数据窗口，曝光匹配超额算出来是 −5.1e-15 ——
+// 而"零敞口 ⇒ 超额精确为 0"是本仓库的不变量，面板上却印成 **−0.00pp**。
+// 所以凡是在显示精度上就是 0 的，一律不带负号：|x| 小于半个显示单位，本来也印不出非零。
+// 这不改任何计算口径，只改"-0"这个符号。
+const _z0 = (x, d) => (Math.abs(x) < 0.5 * Math.pow(10, -d) ? 0 : x);
+// 超额类数字的单位是**百分点**（两条年化收益率之差），不是百分比。报告与 CLI 一直印 "pp"，
+// 平台此前把它印成 "%" —— 同一个量两处两种单位（审计实测：台账 −19.59% 与报告 −43.93pp 并排）。
+const pp = (v, d=2) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v*100, d).toFixed(d) + "pp";
+// 三个窗口预设。HOLDOUT 与 TRAIN **必须**从目录接口取（那边才是出处：holdout 台账的常量、
+// WFV 的搜索期）—— 在本文件里再抄一份就会各自漂移，而 HOLDOUT 还担着"与 holdout 重叠"的
+// 警示判据（抄错就会错报）。FULL 是**视图默认值**（训练窗起点 .. 数据末端），不是台账事实。
+let HOLDOUT = ["2025-10-14", "2026-10-13"];      // 目录到达前先用与服务器一致的兜底值
+let TRAIN = ["2024-04-09", "2025-10-13"];
+// 「全窗」的右端 = 数据末端的**次日**（窗口是左闭右开 `[lo, hi)`，写死日期会静默丢掉最后几天：
+// 实测硬编码的 2026-10-14 把数据的 10-15、10-16 两天关在窗外）。目录到达后按 data_through 修正。
+let FULL = ["2024-04-09", "2026-10-14"];
+// ⚠️ 与 catalog.touches_holdout **同一个语义**：运行的窗口是左闭右开 `[lo, hi)`（引擎
+// `broker.py:373`），holdout 是按日点名的一段 ⇒ "读了 holdout"= `hi > h0 && lo <= h1`。
+// 先前的闭区间写法会把"终点正好落在 holdout 第一天"的**合法**窗口误报成越界。
+const overlaps = (w, h) => w[1] > h[0] && w[0] <= h[1];
+let CAT = null, RUNS = [], REPORTS = [], SORT = {key: "ts", dir: -1};
+const T0 = {};                       // job id → 提交时刻（显示「已用 Ns」，冷启动不该像假死）
+const INFLIGHT = new Set();          // 还没结束的任务（顶栏徽标据此显示；滚到哪儿都看得见）
+const CANCELREQ = new Set();         // 已经点过"取消"的任务（面板每轮重绘，提示要能活下来）
+let _busyTimer = null;
+
+function paintBusy() {
+  const el = $("busy"), n = INFLIGHT.size;
+  if (!n) { el.style.display = "none"; el.textContent = ""; return; }
+  const ids = [...INFLIGHT];
+  const oldest = Math.min(...ids.map(i => T0[i] || Date.now()));
+  const secs = ((Date.now() - oldest) / 1000).toFixed(0);
+  el.style.display = "";
+  el.innerHTML = `<a href="#job-${esc(ids[0])}">⏳ ${n} 个任务在跑 · 最久的已用 ${secs}s
+    （点这里跳到结果）</a>`;
+}
+function trackInflight(jobId, running) {
+  if (running) INFLIGHT.add(jobId); else INFLIGHT.delete(jobId);
+  paintBusy();
+  // 只在真的有任务时开表：空闲时不留一个每秒醒一次的定时器
+  if (INFLIGHT.size && !_busyTimer) _busyTimer = setInterval(paintBusy, 1000);
+  if (!INFLIGHT.size && _busyTimer) { clearInterval(_busyTimer); _busyTimer = null; }
+}
+
+// ---------------------------------------------------------------- 目录与卡片
+
+function windowPresets(e) {
+  // 声明窗是**已交付 preset** 的属性（那是它被验证过的那段）。族是候选机制，还没有声明窗 ——
+  // 此前这里对族取 FULL，于是族卡上「声明窗」与「全窗」是同一件事（四个按钮里有一个空操作，
+  // 审计实测）。宁可少一个按钮，也不要一个按下去什么都没发生的按钮。
+  if (e.kind !== "preset") {
+    return [["训练窗", TRAIN], ["全窗", FULL], ["holdout", HOLDOUT],
+            ["（族没有声明窗）", null]];
+  }
+  return [["训练窗", TRAIN], ["全窗", FULL], ["声明窗", e.window], ["holdout", HOLDOUT]];
+}
+
+function familyParamControls(e) {
+  if (e.kind !== "family" || !Object.keys(e.grid).length) return "";
+  // 只允许选**预注册网格上的取值**：网格就是这次搜索的空间，自由取参会让这次运行
+  // 落在预注册空间之外（§5）。所以这里是 select，不是自由输入框。
+  const rows = Object.entries(e.grid).map(([k, vals]) =>
+    `<tr><td class="k">${esc(k)}</td><td><select class="grid" id="p-${e.id}-${k}">${
+      vals.map(v => `<option value='${esc(JSON.stringify(v))}'${JSON.stringify(v) === JSON.stringify(e.default_params[k]) ? " selected" : ""}>${esc(JSON.stringify(v))}</option>`).join("")
+    }</select></td></tr>`).join("");
+  return `<table>${rows}</table>
+    <div class="sub">族的参数只给<b>预注册网格</b>上的取值（默认=中点）。要跑网格之外的值，
+    应先在定义体里改网格并重跑搜索 —— 那是一次新的搜索，n_trials 要跟着涨。</div>`;
+}
+
+function paramTable(e) {
+  if (e.kind === "preset") {
+    const rows = e.engine_spec.map(x => `<tr><td class="k">${esc(x.label)}</td><td>${esc(x.value)}</td></tr>`).join("");
+    const st = e.strategy;
+    const extra = st.type === "family"
+      ? `<tr><td class="k">入场族</td><td>${esc(st.family)} ${esc(JSON.stringify(st.family_params))}</td></tr>`
+      : `<tr><td class="k">信号参数</td><td>${esc(JSON.stringify(st.signal_params))}</td></tr>`;
+    return `<table>${rows}${extra}
+      <tr><td class="k" title="§6 行为锁：这条 preset 的交易列表与权益曲线有 sha256 基线；
+没有基线 = 它不受保护，而且 test_golden_trades 会对它红。交付一条新候选时必须先生成基线
+（python3 -m research.golden_baseline --regen）—— 但只在「有意」改口径时用，别用它掩盖变化。">行为锁基线</td>
+        <td>${e.golden_baseline && e.golden_baseline.exists
+          ? `<span class="pos">✔ 已锁</span> <span class="sub">${esc(e.golden_baseline.mtime || "")}</span>`
+          : `<span class="warn">⚠️ 无基线</span> <span class="sub">交付前须生成（research.golden_baseline --regen），否则行为锁测试会对它红</span>`}</td></tr>
+      <tr><td class="k">试验次数 n_comparisons</td><td>${e.n_comparisons}</td></tr>
+      <tr><td class="k" title="validated 说的是：这条 preset 有没有被当作「可交易的策略」验证过。
+false 不是「没做完」，而是「如实交付的产物」—— 它带着自己的负面证据（VERDICT），
+用来记录一次被否掉的探索，而不是拿来下单。">validated</td>
+        <td>${e.validated ? "true" : "false"}${e.validated ? ""
+          : ` <span class="sub">（如实交付的产物，不是可交易策略 —— 见下面那条判读）</span>`}</td></tr>
+      <tr><td class="k">声明窗</td><td>${esc(e.window.join(" .. "))}${e.touches_holdout
+        ? ' <span class="warn">（含 holdout 天数）</span>' : ""}</td></tr>
+      <tr><td class="k">定义体</td><td><code>research/preset_defs/${esc(e.id)}.py</code></td></tr>
+    </table>`;
+  }
+  const grid = Object.entries(e.grid).map(([k, v]) =>
+    `<tr><td class="k">${esc(k)}</td><td>${esc(JSON.stringify(v))}</td></tr>`).join("") ||
+    "<tr><td>（参考族：无网格，不参与搜索）</td><td></td></tr>";
+  const fixed = Object.entries(e.fixed || {});
+  return `<table>${grid}
+    ${fixed.length ? `<tr><td class="k">固定轴</td><td><code class="p">${
+        fixed.map(([k, v]) => k + "=" + JSON.stringify(v)).join(" ")
+      }</code><br><span class="sub">这些参数<b>不参与搜索</b>（被固定在某个取值上）——
+        读网格结果时必须知道这一点：网格里变的是别的轴，它们不是。</span></td></tr>` : ""}
+    <tr><td class="k">网格组数</td><td>${e.grid_size}</td></tr>
+    <tr><td class="k" title="族的入场排序分：同一天信号多于容量上限时，按它「从大到小」决定谁先做
+（只影响先后，不影响谁入选 —— 入选由掩码决定）。标注「取负」是因为这一族的量「越小越优先」，
+取负之后才与其它族同一个方向（见 research/families.py 的 SCORE_COL / SCORE_NEGATED）。">排序分</td>
+      <td>${esc(e.score_col)}${e.score_negated ? "（取负）" : ""}</td></tr>
+    <tr><td class="k" title="这一族的入场是否还要求 regime 门为真（与 preset 的 regime 是同一道门）：
+「是」表示除掩码之外还要市场状态允许，否则信号被丢掉。">需要 regime</td><td>${e.needs_regime ? "是" : "否"}</td></tr>
+    ${e.control_arm ? `<tr><td class="k">方向对照臂</td><td>${esc(e.control_arm)}</td></tr>` : ""}
+    ${e.delivered_as.length ? `<tr><td class="k">已交付为</td><td>${esc(e.delivered_as.join(", "))}</td></tr>` : ""}
+    <tr><td class="k">定义体</td><td><code>research/family_defs/${esc(e.id)}.py</code></td></tr>
+  </table>`;
+}
+
+// 卡片上的「最近一次」读数。⚠️ 它**不是**"这条策略的水平" —— 那是最近一次运行（可能是个
+// 刻意选的怪窗口、也可能是刚改过参数的样子）。所以窗口和 k 必须一起显示，读者才能判断
+// 这次比的是什么；跨窗口的数字不可直接比（台账那边同样的规矩）。
+function lastRunLine(e) {
+  const r = LAST[e.kind + ":" + e.id];
+  if (!r) return `<div class="sub">还没跑过 —— 上面的「回测」跑一次，这里会显示最近一次的读数。</div>`;
+  const when = (r.ts || "").slice(0, 16).replace("T", " ");
+  const ex = r.excess == null ? "—" : pp(r.excess);
+  const cls = (r.excess || 0) >= 0 ? "pos" : "neg";
+  return `<div class="sub">最近一次（${esc(when)}）：曝光匹配超额 <b class="${cls}">${ex}</b>
+    · DSR ${r.dsr == null ? "—" : Number(r.dsr).toFixed(3)} · k ${r.n_trials_k ?? "—"}
+    · 窗口 ${esc((r.window || []).join(".."))}
+    ${reportLink(r.job_id)}
+    <br><span class="sub">⚠️ 这是<b>最近一次</b>的读数，不是这条策略的水平；跨窗口的数字不能直接比。</span></div>`;
+}
+
+// 报告链接只在**盘上真有那份文件**时才渲染 —— 否则整列都是死链（审计实测：6/25 行的
+// 「报告」列指向不存在的文件，而报告就在同一页的「历史报告」里）。判据用现有的 REPORTS 清单，
+// 不新增接口：它是 /api/reports 扫盘得到的，正是"文件在不在"的答案。
+function haveReport(jobId) {
+  return !!jobId && REPORTS.some(x => x.job_id === jobId);
+}
+function reportLink(jobId) {
+  if (haveReport(jobId)) return `· <a href="/report/${esc(jobId)}" target="_blank">报告</a>`;
+  if (jobId) return `<span class="sub" title="台账里有这条运行，但盘上已经没有对应的报告文件了">· 报告已不在盘上</span>`;
+  // ⚠️ 没有 job_id 的老记录不能说"盘上没有" —— 实测那 6 条**盘上都有**同名同窗的报告
+  // （5–6 份），只是这条记录没记 id、指不到具体哪一份。诚实的说法是"指不到"，不是"没有了"。
+  return `<span class="sub" title="这条记录早于 job_id 记账（2026-10-18 之前）—— 报告可能还在「历史报告」里，
+但同名同窗的可能有好几份，这条记录无法按 id 定位到其中一份">· 无 job_id，指不到</span>`;
+}
+
+function card(e, runCount) {
+  const w = (e.kind === "preset") ? e.window : FULL;
+  const held = overlaps(w, HOLDOUT);
+  const verdict = (e.verdict || "").trim();
+  const vbox = e.kind === "preset"
+    ? `<div class="verdict ${verdict ? "" : "none"}">${verdict ? esc(verdict) : "（本策略没有声明负面证据 —— §5 要求负面证据与参数同时记录）"}</div>`
+    : `<div class="verdict none">${e.delivered_as && e.delivered_as.length
+        ? `族本身没有 VERDICT（候选机制）；它的交付物 <b>${esc(e.delivered_as.join(" / "))}</b> 有 ——
+           被验证过的是交付出去的那条 preset，不是族。`
+        : "族本身没有 VERDICT（它是候选机制，不是交付物）。跑出来的报告会就地写明这一点。"}</div>`;
+  const a = `${e.kind}-${e.id}`;
+  const _last = LAST[e.kind + ":" + e.id];
+  return `<div class="card" id="${a}" data-runs="${runCount || 0}" data-held="${held ? 1 : 0}"
+    data-last="${_last && _last.excess != null ? _last.excess : ""}">
+    <h3><a href="#${a}">${esc(e.name)}</a></h3>
+    <p class="mech">${esc(e.kind === "preset" ? (e.is_cli_default ? "preset · CLI 默认" : "preset")
+      : "族 · " + e.mechanism)}</p>
+    ${paramTable(e)}
+    <div id="last-${a}">${lastRunLine(e)}</div>
+    ${familyParamControls(e)}
+    ${e.kind === "family" && e.grid_size ? `<div class="sub">本族有 <b>${e.grid_size}</b> 组预注册参数：
+      <b>这一页一次只跑一组</b>（k 记的是 ${e.grid_size} —— 一次搜索的完整空间）。
+      想把整张网格跑完，用下面的「复制网格命令」：那个工具会把网格 × 折数逐项计入 k。
+      <b>别在这页上把 ${e.grid_size} 个格点各点一次</b> —— 那等于把它记成 ${e.grid_size} 次独立试验，
+      而它们本来就是一次搜索。</div>` : ""}
+    <div class="bar">
+      ${windowPresets(e).map(([lab, ww]) => ww
+        ? `<button class="mini" title="${ww[0]} .. ${ww[1]}"
+             onclick="setWindow('${e.kind}','${e.id}','${ww[0]}','${ww[1]}')">${lab}</button>`
+        : `<button class="mini" disabled title="声明窗是已交付 preset 的属性：族是候选机制，` +
+          `还没有被验证过的那段窗口。跑完网格、交付成 preset 之后它才有声明窗。">${lab}</button>`
+        ).join("")}
+    </div>
+    <div class="bar">
+      <label>窗口 <input type="date" id="lo-${a}" value="${w[0]}" aria-label="窗口起点">
+        → <input type="date" id="hi-${a}" value="${w[1]}" aria-label="窗口终点"></label>
+      <button id="btn-${a}" onclick="run('${e.kind}','${e.id}')">回测</button>
+      <button class="mini" onclick="copyCmd('${e.kind}','${e.id}')">复制命令</button>
+      ${e.kind === "family" && e.grid_size ? `<button class="mini" title="跑完整张网格（${e.grid_size} 组 × 折数，工具自己逐项记账）。
+⚠️ 这个工具固定用 WFV 搜索窗 —— 它与上面那排窗口按钮无关，窗口在这个工具里是写死的（改它会推翻它自己的基线对照）。"
+        onclick="copyGridCmd('${e.id}', ${runCount || 0})">复制网格命令</button>` : ""}
+      <button class="mini" onclick="showSrc('${e.kind}','${e.id}')">查看定义体</button>
+      ${e.kind === "preset" ? `<button class="mini" title="拷一份改好的骨架：NAME 与文件名已是 <id>_cand、n_comparisons 已 +1、已声明 derived_from、VERDICT 已换成「尚未判定」—— 四件最容易忘的事都替你填了。" onclick="newCandidate('${e.id}')">复制成新候选</button>` : ""}
+      <span class="sub" id="cnt-${a}">已跑 <b>${runCount || 0}</b> 次</span>
+      <span class="sub poolhint">（池子可评估范围：跑过任意一条后显示）</span>
+    </div>
+    <div class="clip" id="clip-${a}"></div>
+    <div class="sub ${held ? "warn" : ""}" id="flag-${a}" role="status" aria-live="polite">${held ? "⚠ 与 holdout 重叠（只准读一次）" : ""}</div>
+    <details class="src" id="src-${a}"><summary class="sub">定义体源码（只读）</summary>
+      <pre id="srcbody-${a}">点「查看定义体」加载…</pre>
+      <div class="devhint" id="srchint-${a}"></div></details>
+    ${vbox}
+  </div>`;
+}
+
+// ---------------------------------------------------------------- 交互
+
+function setWindow(kind, id, lo, hi) {
+  $("lo-" + kind + "-" + id).value = lo; $("hi-" + kind + "-" + id).value = hi;
+  revalidate(kind, id);
+}
+function revalidate(kind, id) {
+  const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
+  const f = $("flag-" + kind + "-" + id);
+  // ⚠️ **没填全**要单独判（2026-10-21 实测）：日期选择器里可以清空某一格，清空之后
+  // ① 旧判据 `!(lo < hi)` 把 "" 当成"最早"⇒ 不报非法；② 而 `overlaps(["", hi], …)`
+  // 会因为 `"" <= holdout_end` 成立 ⇒ 卡片**谎称**"与 holdout 重叠（只准读一次）"。
+  // 空窗口既不合法、也不碰 holdout —— 两件事都得说清楚。
+  const empty = !lo || !hi;
+  const bad = empty || !(lo < hi);
+  const held = !empty && overlaps([lo, hi], HOLDOUT);
+  // 与池子范围完全不重叠 ⇒ 这一跑必然空手（审计：此前要先等信号跑完才由 broker 报错，
+  // 而且报错不告诉你合法范围）。范围跑过一次就有（POOL），有就当场说。
+  const miss = POOL && !bad && !(lo < POOL[1] && hi > POOL[0]);
+  f.textContent = empty ? "✗ 窗口没填全（起点与终点都要 —— 日期选择器里可以清空）"
+    : bad ? "✗ 窗口非法（起点必须早于终点）"
+    : miss ? `✗ 这段窗口与池子范围（${POOL[0]} .. ${POOL[1]}）完全不重叠 —— 跑下去只会空手`
+    : (held ? "⚠ 与 holdout 重叠（只准读一次）" : "");
+  f.className = "sub " + (bad || held || miss ? "warn" : "");
+}
+// 池子可评估范围（= 指标预热完成日 .. 数据最后一天）。跑过任意一条之后由任务状态带回来 ——
+// 不预取是因为"知道"这件事本身就要求先载面板，而载面板正是那个 30–70 秒的重活。
+// 存进 sessionStorage：刷新一次页面不该把"刚从一次 30 秒的重活里学到的东西"丢掉
+// （只在本次标签页里 —— 这是"这次会话说的话"，不是需要落盘的产物）。
+let TOTAL = 0;                    // 盘上台账**总共**几条（表只显示最近 30 条）
+let BYSTRAT = {};                 // 每条策略全文运行次数（与 k 同一个计数）
+let LAST = {};                    // 每条策略最近一次运行的读数（卡片上显示"现在是多少"）
+let HOULDOUT_TOUCHES = 0;         // **平台台账**里碰过 holdout 的运行次数
+let CLI_HOLDOUT_TOUCHES = null;   // 命令行产物文件名里能认出来的次数（null = 服务端没给）
+let CUR_SHA = "", CUR_DIRTY = null;   // 当前代码版本（§6 归因：sha 单独不够，脏树要一起看）
+let SKIPPED_LINES = 0;                // 台账里读不出来的行数（>0 = 记账可能偏小，必须说出来）
+let REPORTS_TOTAL = null;             // 盘上报告总份数（接口的 50 条上限之外还有多少）
+let HLEDGER = null;                   // **权威** holdout 台账的状态（research/results/holdout_ledger.jsonl）
+let POOL = (() => { try { return JSON.parse(sessionStorage.getItem("pool") || "null"); }
+                    catch (e) { return null; } })();
+function applyPoolHint() {
+  document.querySelectorAll(".poolhint").forEach(el => {
+    el.textContent = POOL ? `池子可评估范围 ${POOL[0]} .. ${POOL[1]}（早于起点的部分没有信号）`
+                          : "（池子可评估范围：跑过任意一条后显示）";
+  });
+}
+// 范围**只**由"跑过一次"得到（服务端在窗口体检里算的）。它存在 sessionStorage 里，
+// 所以**新开一个标签页**就没了 —— 而页面上那句「跑过任意一条后显示」这时是假话
+// （台账里明明跑过很多次）。范围是**池子**的属性（所有 preset/族共用同一套 DEFAULT_SPEC），
+// 所以从台账里任意一条带这个字段的旧运行取回来都成立。取不到才留占位文案。
+function seedPoolFromRuns(runs) {
+  if (POOL) return false;
+  const rows = runs || [];
+  for (let i = 0; i < rows.length; i++) {
+    const w = rows[i].pool_range;
+    if (Array.isArray(w) && w.length === 2 && w[0] && w[1]) {
+      POOL = [w[0], w[1]];
+      applyPoolHint();
+      try { sessionStorage.setItem("pool", JSON.stringify(POOL)); } catch (e) { /* 隐私模式等 */ }
+      return true;
+    }
+  }
+  return false;
+}
+function currentParams(kind, id) {
+  if (kind !== "family") return null;
+  const e = CAT.families.find(x => x.id === id); const out = {};
+  Object.keys(e.grid).forEach(k => { const el = $("p-" + id + "-" + k); if (el) out[k] = JSON.parse(el.value); });
+  return out;
+}
+// 短指纹（FNV-1a 取 32 位）—— 只用来让"不同参数的产物不撞名"，不参与任何判据。
+function shortHash(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+// 命令的**唯一**构造点：输入全部由调用方给。
+// 为什么要把"输入"抽出来（2026-10-21 实测的缺陷）：这个函数原来直接读卡片上的**当前**输入
+// （窗口输入框、族参数下拉、运气对照勾选框、备注框）。那是"按现在这些输入，该跑哪条命令"的
+// 正确写法 —— 但面板上那句「完整命令」描述的是**已经在跑的那个任务**。页面刷新之后
+// （`recoverInflight` 重建面板）卡片输入已回到默认值，于是面板上印出一条**像是这次任务的
+// 命令、其实是另一套配置**的命令。刷新后要复制命令复现它的人会被带到别处，而且不报错。
+function cliCmdFor(kind, id, lo, hi, params, controlRuns, note) {
+  // 这条命令必须与"点一下回测"做的事**逐项一致**，否则"界面不是黑箱"就是空话（审计实测
+  // 原本三处不一致：没有 --control-runs ⇒ CLI 默认 200，开关关着也照跑；没有 --note；
+  // --out 用了 report_*.html 而 /api/reports 只认 web_report_* ⇒ 命令的产物页面上看不见）。
+  const ctl = Number(controlRuns) || 0;
+  const nt = note || "";
+  const pr = kind === "family" ? JSON.stringify(params).replace(/'/g, "") : "";
+  // 与平台同一个命名空间（`/api/reports` 会列出来 ⇒ 跑完能在「历史报告」里打开）。
+  // ⚠️ 文件名必须带上**参数指纹**：同一族、同一窗口、两组不同的网格参数此前会算成同一个
+  // 文件名 ⇒ 后一次把前一次的报告**静默覆盖**（而「历史报告」里看着还是同一份）。
+  const fp = pr ? "p" + shortHash(pr) : "";
+  const out = `research/results/web_report_cli_${id}_${lo}_${hi}${fp ? "_" + fp : ""}.html`
+    .replace(/[^A-Za-z0-9_./-]/g, "");
+  const tail = ` --lo ${lo} --hi ${hi} --control-runs ${ctl} --out ${out}`
+    + (nt ? ` --note '${nt.replace(/'/g, "")}'` : "");
+  if (kind === "preset") return `python3 -m research.render_report --preset ${id}${tail}`;
+  return `python3 -m research.render_report --family ${id} --params '${pr}'${tail}`;
+}
+function cliCmd(kind, id) {
+  // 卡片上的「复制命令」：按**现在**这些输入拼（用户接下来要跑什么）
+  // ⚠️ 顺序要紧：`pr` 必须在 `fp` **之前**声明。上一版把 `const fp = pr ? …` 写在了
+  // `const pr = …` 上面 ⇒ TDZ ReferenceError ⇒ cliCmd 抛错 ⇒ panel() 建不出面板 ⇒
+  // **整条回测流程是死的**（而没有一条静态断言看得出来：语法正确、字符串都在）。
+  return cliCmdFor(kind, id, $("lo-" + kind + "-" + id).value, $("hi-" + kind + "-" + id).value,
+                   currentParams(kind, id), $("ctl").checked ? 200 : 0,
+                   ($("note") || {}).value || "");
+}
+// 族的批量入口：`family_search` 是仓库里唯一会跑**整张网格**的工具，它自己把网格 × 折数
+// 逐项计进 n_trials —— 所以"整套一次跑"与 k 的口径是对齐的。--k-offset 用这个族在平台上
+// 已经跑过的次数（那些点击也是评估，§5 迭代记账）。
+function gridCmd(id, priorRuns) {
+  return `python3 -m research.family_search --run --families ${id} --k-offset ${priorRuns || 0}`;
+}
+function copyGridCmd(id, priorRuns) {
+  const cmd = gridCmd(id, priorRuns), box = $("clip-family-" + id);
+  box.style.display = "block";
+  navigator.clipboard?.writeText(cmd).then(
+    () => { box.textContent = `已复制到剪贴板（整张网格一次跑完）：\n${cmd}`; },
+    () => { box.textContent = `（复制失败，请手动选中）\n${cmd}`; });
+}
+function copyCmd(kind, id) {
+  const box = $("clip-" + kind + "-" + id);
+  box.style.display = "block";
+  box.style.wordBreak = "break-all";    // 回到长命令的换行方式（newCandidate 改成过 break-word）
+  // 窗口没填全时**不给命令**：给了也是一条坏命令（`--lo  --hi …` 少一个值），
+  // 而复制出去的人不会知道它缺了什么。
+  const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
+  if (!lo || !hi) { box.textContent = "窗口没填全（起点与终点都要）—— 先填好再复制命令。"; return; }
+  const cmd = cliCmd(kind, id);
+  navigator.clipboard?.writeText(cmd).then(
+    () => { box.textContent = "已复制到剪贴板：\n" + cmd; },
+    () => { box.textContent = "（复制失败，请手动选中）\n" + cmd; });
+}
+// 候选生命周期的**第一步**：拷一份定义体、改 NAME、n_comparisons +1、声明 derived_from、
+// 换掉继承来的 VERDICT。四件事里任何一件忘了都不会当场报错（VERDICT 抄错 → 报告与判词
+// 互相矛盾；derived_from 漏写 → DSR 的分母 k 偏小），所以不靠"记得"，靠**替人填好**。
+async function newCandidate(id) {
+  const box = $("clip-preset-" + id);
+  box.style.display = "block";
+  box.style.wordBreak = "break-word";   // 源码按词换行（.clip 默认 break-all 是给长命令用的）
+  box.textContent = "正在生成骨架…";
+  let j;
+  try { j = await (await fetch(`/api/candidate_skeleton/${id}`)).json(); }
+  catch (exc) { box.textContent = `生成失败：${exc.message}`; return; }
+  if (j.error) { box.textContent = `生成失败：${j.error}`; return; }
+  const head = `建议保存到：${j.path}\n`
+    + (j.renamed_because
+        ? `（${j.renamed_because}.py 已经在盘上，所以换了个没用过的名字 —— 免得盖掉你那条候选）\n`
+        : "")
+    + "下一步：把它存成上面那个文件（内容见下），重启平台服务后刷新页面。\n"
+    + "─".repeat(60) + "\n";
+  const body = j.text;
+  box.textContent = head + body;                      // 先落字：剪贴板可能不给权限
+  const mark = (ok) => { box.textContent = (ok ? "已复制到剪贴板（正文如下）\n" : "（剪贴板不可用，请手动选中下面这段）\n") + head + body; };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      const pr = navigator.clipboard.writeText(body);
+      if (pr && pr.then) pr.then(() => mark(true), () => mark(false));
+      else mark(true);
+    } catch (exc) { mark(false); }
+  } else mark(false);
+}
+async function showSrc(kind, id) {
+  const d = $("src-" + kind + "-" + id); d.open = true;
+  const body = $("srcbody-" + kind + "-" + id);
+  if (body.dataset.loaded) return;
+  body.textContent = "加载中…";
+  const j = await (await fetch(`/api/source/${kind}/${id}`)).json();
+  body.textContent = j.error ? ("读不到：" + j.error) : (j.path + "\n" + "─".repeat(60) + "\n" + j.text);
+  body.dataset.loaded = "1";
+  // 开发循环里最容易踩的一步：**注册表是服务启动时读一次的**（research/presets.py 在 import
+  // 时 _build()），所以改完定义体、光刷页面不会生效 —— 不说清这件事，人会在"改了没反应"里打转。
+  if (!j.error) {
+    $("srchint-" + kind + "-" + id).innerHTML =
+      `<b>改这个文件之后</b>：① 重启平台服务（注册表在启动时读一次，光刷新页面不会生效）；
+       ② 再点顶栏的「重新读目录」。<br>
+       ⚠️ 「重新读目录」会<b>重渲卡片</b>，所以你改过的窗口与族参数会回到默认 ——
+       这是有意的：定义体可能刚变，旧输入未必还对得上。<br>
+       运行中：<code>python3 -m webapp.server --port 8765</code>
+       （修改后的 <code>n_comparisons</code> / 网格必须跟着一起改 —— 换了参数空间就是一次新搜索，§5）`;
+  }
+}
+// 排序只 reorder DOM。为什么不重渲 #content（那是最省事的写法）：重渲会把用户改过的窗口、
+// 族参数、展开的源码全部重置 —— 本仓库为此吃过一次亏（审计实测），所以这里是 appendChild。
+function applyCardSort() {
+  const mode = ($("csort") || {}).value || "default";
+  document.querySelectorAll("#content .grid").forEach(g => {
+    if (!g._orig) g._orig = [...g.children];        // 第一次调用时记下注册表顺序
+    const name = (c) => (c.querySelector("h3") || {}).textContent || "";
+    const cards = [...g._orig];
+    if (mode === "runs") cards.sort((a, b) => Number(b.dataset.runs || 0) - Number(a.dataset.runs || 0)
+                                            || name(a).localeCompare(name(b), "zh"));
+    else if (mode === "name") cards.sort((a, b) => name(a).localeCompare(name(b), "zh"));
+    else if (mode === "last") {
+      // 没跑过的排最后（空字符串 → -Infinity），而不是当成 0 —— 0 会混进"正好不赚不亏"里
+      const v = (c) => c.dataset.last === "" ? -Infinity : Number(c.dataset.last);
+      cards.sort((a, b) => v(b) - v(a) || name(a).localeCompare(name(b), "zh"));
+    }
+    cards.forEach(c => g.appendChild(c));           // 按新顺序重挂（default 时就是原顺序）
+  });
+}
+function applyFilter() {
+  const q = ($("q").value || "").trim().toLowerCase();
+  let shown = 0;
+  // 分节也要说实话：0 命中时标题不能还写着「交付 preset（6 条）」—— 那看起来像
+  // "说有 6 条却一条都没显示"（审计实测两个分节标题始终显示）。逐节统计可见卡片。
+  const grids = [...document.querySelectorAll("#content .grid")];
+  const perGrid = grids.map(() => 0);
+  const onlyRun = ($("cf-run") || {}).checked, onlyHeld = ($("cf-held") || {}).checked;
+  // ⚠️ "在筛"不只是文本框非空 —— 结构化过滤也算。实测踩过：只看跑过的勾上后卡片只剩 3 张，
+  // 分节标题却还写着「（6 条）」（刚给文本搜索修好的那个谎，差点用另一个入口再犯一次）。
+  const filtering = !!(q || onlyRun || onlyHeld);
+  document.querySelectorAll(".card").forEach(c => {
+    const hitQ = !q || c.innerText.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
+    const hitR = !onlyRun || Number(c.dataset.runs || 0) > 0;
+    // 「含 holdout」必须按**当前输入框里**的窗口判（与卡片那句 ⚠ 同一个判据）——
+    // 此前用的是渲染那一刻的窗口，于是改过窗口后同一张卡上两个判据会互相矛盾（审计实测）。
+    let held = c.dataset.held === "1";
+    if (onlyHeld) {
+      const kind = c.id.startsWith("preset-") ? "preset" : "family";
+      const id = c.id.slice(kind.length + 1);
+      const lo = $("lo-" + kind + "-" + id), hi = $("hi-" + kind + "-" + id);
+      held = (lo && hi) ? overlaps([lo.value, hi.value], HOLDOUT) : held;
+    }
+    const hitH = !onlyHeld || held;
+    const hit = hitQ && hitR && hitH;
+    c.style.display = hit ? "" : "none";
+    if (hit) { shown++; perGrid[grids.indexOf(c.closest(".grid"))]++; }
+  });
+  grids.forEach((g, i) => {
+    const h = g.previousElementSibling, cnt = h && h.querySelector(".cnt");
+    if (!cnt) return;                       // 总数从元素自己身上读（别从文案里正则回捞）
+    const total = h.dataset.total, unit = h.dataset.unit;
+    cnt.textContent = filtering
+      ? `（${perGrid[i]} / ${total} 匹配${perGrid[i] ? "" : "：这一节没有命中"}）`
+      : `（${total} ${unit}）`;
+  });
+  // 「历史报告」表也跟着同一个搜索词过滤（找三天前那份报告的人第一反应就是往这里敲名字）
+  if (typeof REPORTS !== "undefined") {
+    document.querySelectorAll("#reports_body tbody tr").forEach(tr => {
+      tr.style.display = (!q || tr.innerText.toLowerCase().includes(q)) ? "" : "none";
+    });
+  }
+  $("count").textContent = filtering
+    ? `${shown} / ${CAT.presets.length + CAT.families.length} 张卡片匹配` : "";
+}
+
+async function loadCatalog() {
+  // **只渲染一次**。此前每跑完一次回测都整块重渲 ⇒ 用户改过的窗口、族参数、展开的源码
+  // 被静默清空（审计实测）。刷新台账是另一件事（refreshLedger），不要混在一起。
+  let fetched;
+  try {
+    fetched = await (await fetch("/api/catalog")).json();
+  } catch (exc) {
+    // 失败路径此前**完全静默**（审计实测：目录接口一挂，整页永远停在「正在读目录…」、
+    // 0 张卡片，只有 console 一条 TypeError）。错误要说出来，并给一个能按的重试。
+    $("banner").innerHTML = `<b class="neg">读不到目录：${esc(exc.message)}</b>
+      —— 本地服务还开着吗？<button class="mini" onclick="loadCatalog().then(refreshLedger)">重试</button>`;
+    $("content").innerHTML = `<div class="sub">目录没读到，卡片区留空。
+      台账与「历史报告」在下面，它们各自独立取数（目录挂了它们照样能看）。</div>`;
+    return;
+  }
+  CAT = fetched;
+  if (CAT.holdout) HOLDOUT = CAT.holdout;          // 出处：holdout 台账那个常量
+  if (CAT.train) TRAIN = CAT.train;                // 出处：wfv_search 的搜索期
+  if (CAT.train) FULL = [CAT.train[0], FULL[1]];
+  if (CAT.data_through) {                          // 右端跟着数据走（+1 天，右开区间才含最后一天）
+    const d = new Date(CAT.data_through.last_date + "T00:00:00");
+    d.setDate(d.getDate() + 1);
+    // ⚠️ 不能用 toISOString()：它按 **UTC** 印日期，本地 00:00 会被折回前一天 ——
+    // 实测就先踩到了这个（右端印成 2026-10-16，而右开区间又把它自己排除掉，
+    // 于是"修好丢两天"变成"still 丢一天"）。toLocaleDateString("sv") 给的是本地 YYYY-MM-DD。
+    FULL = [FULL[0], d.toLocaleDateString("sv")];
+  }
+  $("banner").innerHTML = `目录：<b>${CAT.presets.length}</b> 条 preset · <b>${CAT.families.length}</b> 个族 ·
+    其中 <b>${CAT.notes.holdout_presets}</b> 条 preset 的声明窗口含 holdout 天数；
+    页面上<b>被标红的是 ${(() => {
+      const p = CAT.presets.filter(e => overlaps(e.window, HOLDOUT)).length;
+      const f = CAT.families.filter(e => overlaps(FULL, HOLDOUT)).length;
+      return p + f;
+    })()} 张卡</b>（preset 按各自的声明窗，族按它们的默认窗口＝全窗）—— 两种都算「这次回测会读到
+    holdout」，只准读一次。
+    族的参数默认=网格中点，可在卡片里改（只列网格上的取值）；${esc(CAT.notes.multiplicity)}
+    ${CAT.data_through ? ` · 数据覆盖到 <b>${esc(CAT.data_through.last_date)}</b>
+      （${CAT.data_through.symbols} 个标的；今天 ${new Date().toLocaleDateString("sv")}，
+      ${CAT.data_through.days_ago} 天前）`
+      + (CAT.data_through.days_ago >= 5
+         ? `<div class="warn">⚠️ 已经 ${CAT.data_through.days_ago} 天没有新数据了（自然日差 ≥5 就提示，
+            周末正常不算）—— 可能需要跑一次取数：
+            <code>python src/download_ohlcv.py --source stockanalysis --universe all</code></div>`
+         : "") : ""}`
+    + ((CAT.stale_defs || []).length
+        ? `<div class="warn">⚠️ 这些定义体在<b>服务启动之后</b>被改过，服务读的还是旧值：
+           <code>${CAT.stale_defs.map(esc).join("</code> <code>")}</code> ——
+           重启服务才会生效（注入环境变量 <code>PYTHONDONTWRITEBYTECODE=1</code> 可以避免
+           另一类"改回去了却仍读到旧值"的字节码缓存问题）。</div>` : "");
+  const rr = await (await fetch("/api/runs")).json();
+  // 卡片上的「已跑 N 次」必须与 DSR 的 k 用同一个计数（都按**全文台账**数）——
+  // 此前这里数的是 /api/runs 的末 30 条，到第 31 次运行时界面会说"已跑 30"而 k 已是 31。
+  const runs = rr.by_strategy || {};
+  // 每条策略**最近一次**的读数。为什么放在卡片上：开发时第一个问题是"现在哪条最好"，
+  // 而此前卡片只有参数、没有任何测出来的东西 —— 那个排名只存在于一个命令行工具里
+  // （rank_strategies），页面上看不到。这些数字全都已经在台账里，不新增任何计算。
+  // 「最近一次」按**全台账**取（服务端 last_by_strategy）—— 此前从"最近 30 条"里现挑，
+  // 于是第 31 次运行之后，同一张卡会一边说「已跑 31 次」一边把「最近一次」停在更早那次。
+  LAST = rr.last_by_strategy || {};
+  $("content").innerHTML =
+    `<div class="bar" id="cbar">
+       <span class="sub">视图：</span>
+       <select id="csort" onchange="applyCardSort()" aria-label="卡片排序">
+         <option value="default">注册表顺序</option>
+         <option value="runs">跑得多的在前</option>
+         <option value="name">按名字</option>
+         <option value="last">按最近一次超额（高的在前）</option>
+       </select>
+       <label class="sub"><input type="checkbox" id="cf-run" onchange="applyFilter()"> 只看跑过的</label>
+       <label class="sub"><input type="checkbox" id="cf-held" onchange="applyFilter()"> 只看含 holdout 的窗口</label>
+       <span class="sub">（排序只移动卡片，不重渲 —— 你改过的窗口与族参数不会被吞掉）</span>
+     </div>
+     <h2 id="presets" data-total="${CAT.presets.length}" data-unit="条">交付 preset <span class="cnt">（${CAT.presets.length} 条）</span></h2>
+     <div class="grid">${CAT.presets.map(e => card(e, runs["preset:" + e.id])).join("")}</div>
+     <h2 id="families" data-total="${CAT.families.length}" data-unit="个">策略族（候选机制）<span class="cnt">（${CAT.families.length} 个）</span></h2>
+     <div class="grid">${CAT.families.map(e => card(e, runs["family:" + e.id])).join("")}</div>`;
+  document.querySelectorAll("input[type=date]").forEach(inp => inp.addEventListener("change", () => {
+    const rest = inp.id.replace(/^(lo|hi)-/, "");
+    const kind = rest.startsWith("preset-") ? "preset" : "family";
+    revalidate(kind, rest.slice(kind.length + 1));
+  }));
+  $("q").addEventListener("input", applyFilter);
+  document.addEventListener("keydown", (ev) => {
+    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "k") { ev.preventDefault(); $("q").focus(); }
+  });
+  applyPoolHint();
+  applyFilter();
+}
+
+// 重新读目录 = 重新拉 /api/catalog 并重渲卡片。**注意**：这只解决"页面是旧的"，
+// 不解决"服务是旧的"（注册表在服务启动时读一次）—— 所以文案与提示都写明要重启。
+async function reloadCatalog() {
+  await loadCatalog();
+  await refreshLedger();
+  applyPoolHint();
+}
+
+// 就地刷新"读数"：卡片上的「已跑 N 次」与「最近一次」+ 台账 + 历史报告。
+// 为什么不重渲卡片：重渲会吞掉用户改过的窗口与族参数（本仓库为此吃过一次亏）。
+async function refreshReadouts() {
+  const rr = await (await fetch("/api/runs")).json();
+  RUNS = rr.runs || []; TOTAL = rr.total || RUNS.length;
+  BYSTRAT = rr.by_strategy || {}; HOULDOUT_TOUCHES = rr.holdout_touches || 0;
+  CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
+  LAST = rr.last_by_strategy || {};
+  seedPoolFromRuns(RUNS);                      // 新标签页也能显示池子范围（见该函数的说明）
+  const rp = await (await fetch("/api/reports")).json();
+  REPORTS = rp.reports || []; REPORTS_TOTAL = rp.total;
+  document.querySelectorAll("#content .card").forEach(c => {
+    const kind = c.id.startsWith("preset-") ? "preset" : "family";
+    const id = c.id.slice(kind.length + 1);
+    const n = BYSTRAT[kind + ":" + id] || 0;
+    const cnt = $("cnt-" + c.id); if (cnt) cnt.innerHTML = `已跑 <b>${n}</b> 次`;
+    const box = $("last-" + c.id);
+    if (box) box.innerHTML = lastRunLine({ kind, id });      // 复用同一份渲染（口径只有一处）
+  });
+  renderLedger(); renderReports();
+}
+
+// 「载入全部」：把表从最近 30 条扩到全部（此前"想看一眼第 31 条"的唯一出路是去用 CSV 导出 ——
+// 那是把用户赶出界面）。只改**显示多少行**，不碰任何记账。
+async function loadAllRuns() {
+  try {
+    const rr = await (await fetch("/api/runs?limit=500")).json();
+    RUNS = rr.runs || []; TOTAL = rr.total || RUNS.length;
+    BYSTRAT = rr.by_strategy || {}; HOULDOUT_TOUCHES = rr.holdout_touches || 0;
+    CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
+    LAST = rr.last_by_strategy || {}; SKIPPED_LINES = rr.skipped_lines || 0;
+    HLEDGER = rr.holdout_ledger || null;
+    seedPoolFromRuns(RUNS);
+    renderLedger();
+  } catch (exc) {
+    document.getElementById("lbar").insertAdjacentHTML("beforeend",
+      `<div class="sub neg">载入全部失败：${esc(exc.message)}</div>`);
+  }
+}
+
+async function refreshLedger() {
+  try {
+    const rr = await (await fetch("/api/runs")).json();
+    RUNS = rr.runs || []; TOTAL = rr.total || RUNS.length;
+    BYSTRAT = rr.by_strategy || {};
+    HOULDOUT_TOUCHES = rr.holdout_touches || 0;
+    CLI_HOLDOUT_TOUCHES = (rr.cli_holdout_touches === undefined) ? null : rr.cli_holdout_touches;
+    SKIPPED_LINES = rr.skipped_lines || 0;
+    HLEDGER = rr.holdout_ledger || null;
+    CUR_SHA = rr.git_sha || ""; CUR_DIRTY = rr.git_dirty;
+    const rp = await (await fetch("/api/reports")).json();
+    REPORTS = rp.reports || []; REPORTS_TOTAL = rp.total;
+  } catch (exc) {
+    $("ledger").innerHTML = `<div class="sub neg">读台账失败：${esc(exc.message)} —— 刷新页面重试</div>`;
+    return;
+  }
+  renderLedger(); renderReports();
+}
+
+function renderLedger() {
+  // 「参数」列（审计实测：数据早就在 /api/runs 里，只是没渲染 ⇒ 同一族两次不同参数跑出来的
+  // 结果在纸面上无法分辨，而这张表就是拿来对比的）。「超额」必须写成「曝光匹配超额」：
+  // 它与报告摘要里那个 tot−bench 的「超额」**不是同一个量**（实测同一 job −19.59% vs −43.93pp）。
+  const cols = [["ts","时间"],["strategy_id","策略"],["window","窗口"],["params","参数"],
+                ["n_trades","笔数"],["excess","曝光匹配超额"],["_d","Δ超额（同配置）"],
+                // ⚠️ Δ 列的排序键必须是 `_d`（算出来的字段名）—— 曾写成 d_excess：
+                // 表头照样画、aria-sort 照样发，但点下去一行都不动（审计实测）。
+                ["dsr","DSR"],["n_trials_k","k"],["git_sha","代码"],["note","备注"]];
+  // ⚠️ 台账**空**的时候，lbar 里的东西**一个都不能少**（刷新读数 / 导出 CSV / holdout
+  // 纪律计数 / 当前代码版本）—— "首次使用"恰恰是最需要它们的时刻。此前这里有个提前
+  // return，空台账时整条栏一起消失（实测：连"现在这份代码是哪个 sha"都看不到，
+  // 而"我还没跑过、但 holdout 已经被读过"这件事也一起没了）。所以：**只**换掉表格那一块。
+  const emptyLedger = !RUNS.length;
+  // Δ = 与**同一配置**（同策略 + 同参数 + **同窗口**）的上一次比，按时间（不是按当前排序）。
+  // 为什么要算进窗口：只在同配置下这个差才有确定含义 —— 引擎是确定性的，同配置两次应当
+  // 一模一样；若它不是 0，变的东西就在配置**之外**（数据换了、或代码改了）。这正是"改完
+  // 重构再跑一次同配置、确认没动行为"的那条路。不同窗口/不同参数的对比靠上面的筛选看。
+  const prev = {};
+  [...RUNS].sort((a, b) => (a.ts > b.ts ? 1 : -1)).forEach(r => {
+    const k = keyOf(r);
+    if (k in prev && r.excess != null && prev[k].excess != null) {
+      r._d = r.excess - prev[k].excess;
+      r._dsha = prev[k].sha;      // 比的那一次是什么代码版本 —— Δ 怎么读离不开它
+    }
+    if (r.excess != null) prev[k] = {excess: r.excess, sha: r.git_sha};
+  });
+  const strat = $("lf") ? $("lf").value : "";
+  const shown = strat ? RUNS.filter(r => r.strategy_id === strat) : RUNS;
+  const rows = [...shown].sort((a, b) => {
+    let x = a[SORT.key], y = b[SORT.key];
+    if (Array.isArray(x)) x = x.join(); if (Array.isArray(y)) y = y.join();
+    return (x > y ? 1 : x < y ? -1 : 0) * SORT.dir;
+  });
+  // 下拉里的次数同样按全文（BYSTRAT），不能只用表里这 30 条
+  const opts = Object.entries(Object.keys(BYSTRAT).length
+      ? BYSTRAT : RUNS.reduce((m, r) => (m[r.strategy_id] = (m[r.strategy_id] || 0) + 1, m), {}))
+    .sort((a, b) => b[1] - a[1]);
+  // holdout 是"只准读一次"的那扇门 —— 它的次数必须显眼：卡片上写着的规矩，
+  // 这里给出被跨过几次（>0 就标黄），而不是让它当一句口号
+  // ⚠️ 口径必须写在这里：这个数是**平台台账**（web_runs.jsonl）里的，命令行跑的从来不进台账。
+  // 另一处来源是命令行产物的**文件名**（里面带着窗口）—— 能认出来的就一起数，认不出的（没按
+  // 页面给的命名跑）就说"认不出"。不说清这一点，读者会以为这 9/10 就是全部（审计实测）。
+  const cliHo = CLI_HOLDOUT_TOUCHES;
+  const scoped = `（平台台账 <b>${HOULDOUT_TOUCHES}</b> 次`
+    + (cliHo == null ? "" : ` + 命令行产物文件名里认得出的 <b>${cliHo}</b> 次`)
+    + `；没按页面命名跑的产物认不出）`;
+  const sk = SKIPPED_LINES > 0
+    ? ` · <span class="warn">⚠️ 台账里有 <b>${SKIPPED_LINES}</b> 行读不出来（已跳过）—— 那等于少记了
+        ${SKIPPED_LINES} 次试验，k 可能偏小；先去 <code>research/results/web_runs.jsonl</code> 看看坏行</span>`
+    : "";
+  // 权威 holdout 台账（与上面那个"平台自己数的"是**两本账**）：平台运行从不登记进去，
+  // 所以必须并排显示，否则读者会把上面那个数当成纪律账本上的次数。
+  const hl = (() => {
+    if (!HLEDGER) return "";
+    if (HLEDGER.error) return ` · <span class="warn">⚠️ 权威 holdout 台账读不出来：${esc(HLEDGER.error)}
+      —— 那本账坏了必须修（它记的是"哪段窗口被真读过"）</span>`;
+    const c = HLEDGER.claims, l = HLEDGER.locks;
+    const cur = HLEDGER.current_window_claimed
+      ? `<b>已被 claim</b>（用的是 ${esc((HLEDGER.last_claim && HLEDGER.last_claim.window) || "?")}）`
+      : `<b>从未被 claim</b>（唯一那条 claim 用的是 ${esc((HLEDGER.last_claim && HLEDGER.last_claim.window) || "?")}）`;
+    const reg = (HLEDGER.platform_crossers === undefined) ? ""
+      : `；平台的 <b>${HLEDGER.platform_crossers}</b> 条越界运行里 <b>${HLEDGER.platform_registered}</b> 条登记进了这本账`;
+    return `<div class="sub">权威 holdout 台账（<code>research/results/holdout_ledger.jsonl</code>）：
+      <b>${c}</b> 条 claim、<b>${l}</b> 条 lock（lock 只登记、不烧窗口）；共动过 ${HLEDGER.windows} 个窗口。
+      规范窗口 ${esc(HOLDOUT[0])}..${esc(HOLDOUT[1])} ${cur}${reg}。
+      <span title="两本账的区别：这一本由 wfv_search / family_search 通过 holdout.consume 写，
+      是「哪段 holdout 被真读过」的权威记录；平台上点一次回测不会写它（jobs.py 不调 consume），
+      所以上面那个'碰过 holdout 的运行'是平台自己数的第三本账。">两本账的区别</span></div>`;
+  })();
+  const ht = (HOULDOUT_TOUCHES > 0 || (cliHo || 0) > 0)
+    ? ` · <span class="warn">碰过 holdout 的运行 ${scoped} —— §5：只准读一次</span>${sk}`
+    : ` · 碰过 holdout 的运行：<b>0</b> 次 ${scoped}${sk}`;
+  const htLine = `<div class="sub">${ht.trim().replace(/^·\s*/, "")}</div>${hl}`;
+  renderCompareBar();
+  $("lbar").innerHTML = htLine + (emptyLedger
+      ? `还没有运行记录 —— 在任何一张策略卡片上点「回测」，这里会出现每一次的账。
+         <span class="sub">（同一策略跑两次或两条策略的对比就看下面这张表）</span> ·`
+      : `显示 <b>${shown.length}</b> / 表内 ${RUNS.length} 条${TOTAL > RUNS.length
+      ? `（表只取最近 ${RUNS.length} 条，盘上共 <b>${TOTAL}</b> 条）` : ""}${ht} ·`) + `
+    <select id="lf" aria-label="按策略筛选台账" onchange="renderLedger()">
+      <option value="">全部策略</option>
+      ${opts.map(([s, n]) => `<option value="${esc(s)}"${s === strat ? " selected" : ""}>${esc(s)}（${n}）</option>`).join("")}
+    </select>
+    <a class="btnlink mini" href="/api/runs.csv" download
+      title="台账「全部」记录的 CSV（表里只显示最近 30 条，导出不跟着截断）。
+⚠️ 表上的「Δ 超额（同配置）」不在 CSV 里：它是按 ts 排序后与「同一配置」
+（同策略 + 同参数 + 同窗口）的上一条比出来的，脚本可自行复算。">导出全部 CSV</a>
+    ${(typeof TOTAL === "number" && TOTAL > RUNS.length)
+      ? `<button class="mini" onclick="loadAllRuns()"
+           title="把台账表从最近 ${RUNS.length} 条扩到全部 ${TOTAL} 条（只多取行，不改任何记账）">
+           载入全部（共 ${TOTAL} 条）</button>` : ""}
+    <button class="mini" onclick="refreshReadouts()"
+      title="重新拉台账与报告清单，并就地更新卡片上的「已跑 N 次 / 最近一次」。
+不重渲卡片，所以改过的窗口与族参数不会被吞掉。另一个标签页跑完回来看这里时也要点它。">
+      刷新读数</button>
+    当前代码 <b>${esc(CUR_SHA || "?")}</b>${CUR_DIRTY
+      ? '<span class="warn">（工作区有未提交改动 —— 现在跑出来的结果标注不了确定的代码版本）</span>'
+      : ""} ·
+    <span class="sub">⚠️ Δ 只在<b>表内这 ${RUNS.length} 条</b>里找"上一次同配置"（k / 已跑次数按全台账算 ——
+      两个口径不同，第 31 次之后 Δ 可能显示"（第一次）"而其实不是）。
+      Δ = 与 <b>同一配置</b>（同策略 + 同参数 + <b>同窗口</b>）的上一次比。
+      引擎是确定性的 ⇒ 同配置重跑应当差 0；<b>不是 0 就说明变的东西在配置之外</b>（数据换了或代码改了）。</span>`;
+  // 列头用**真按钮**：原来的 `<th onclick>` 键盘 Tab 够不到（实测 tabIndex=-1），
+  // 而"对比两次运行"这件事只有靠排序才能做。aria-sort 让读屏也知道现在按哪列排。
+  if (!rows.length) {
+    // 空表不能一声不吭（审计实测：筛选到一条"运行都在更早记录里"的策略 ⇒ 表格空、零解释）
+    const total = BYSTRAT[strat] || 0;
+    $("ledger").innerHTML = `<div class="sub">${emptyLedger
+      ? `还没有运行记录 —— 在任何一张策略卡片上点「回测」，这里会出现每一次的账。`
+      : total
+      ? `这条策略共跑过 <b>${total}</b> 次，但都不在表里这 ${RUNS.length} 条内 ——
+         点上面的「载入全部（共 ${TOTAL} 条）」把它们取进来（也可以导出 CSV 看）。`
+      : `这条策略还没有运行记录 —— 在它的卡片上点「回测」。`}</div>`;
+    return;
+  }
+  // 「回填这一行」要用的完整配置（含参数）——**每次重渲都重建**，否则"载入全部"之后
+  // 旧行的 job_id 还指着上一版对象（行还在表里、点开却填了个不存在的东西）。
+  ROWCFG = {};
+  rows.forEach(r => { if (r.job_id) ROWCFG[r.job_id] = {
+    strategy_id: r.strategy_id, window: r.window, params: r.params }; });
+  $("ledger").innerHTML = `<table class="ledger"><thead><tr>${cols.map(([k, lab]) =>
+    `<th class="sortable" aria-sort="${SORT.key === k ? (SORT.dir > 0 ? "ascending" : "descending") : "none"}">`
+    + `<button class="thbtn" onclick="sortLedger('${k}')">${lab}${
+        SORT.key === k ? (SORT.dir > 0 ? " ▲" : " ▼") : ""}</button></th>`).join("")}
+    <th>报告</th></tr></thead><tbody>${rows.map(r => `<tr>
+      <td>${esc((r.ts || "").slice(0, 19))}</td>
+      <td><a href="#${esc(r.strategy_id.replace(":", "-"))}" style="color:#cbd5e1">${esc(r.strategy_id)}</a></td>
+      <td>${(r.window || []).length
+            ? `<a href="#${esc(r.strategy_id.replace(":", "-"))}" title="${r.job_id
+                 ? "把这张卡的窗口与参数填成这一行（不自动跑 —— 跑一次就要记一次 k）"
+                 : "这一行早于 job id 字段 —— 只能回填窗口，参数取不到"}"
+                 onclick="${r.job_id
+                   ? `fillConfig('${esc(r.job_id)}')`
+                   : `fillWindowOnly('${esc(r.strategy_id)}','${esc(r.window[0])}','${esc(r.window[1])}')`}"
+                 style="color:#cbd5e1">${esc(r.window.join(".."))}</a>`
+            : "—"}</td>
+      <td><code class="p">${esc(paramsOf(r.params, "params" in r ? null : "missing"))}</code></td>
+      <td>${r.n_trades ?? "—"}</td>
+      <td class="${(r.excess || 0) >= 0 ? "pos" : "neg"}">${pp(r.excess)}</td>
+      <td class="${r._d ? ((r._d > 0 ? "pos" : "neg")) : "sub"}" title="${r._d == null
+            ? "这个配置还没有跑过第二次"
+            : (r._dsha && r._dsha !== r.git_sha
+               ? "与上一次同配置比 —— 而且那次是另一个代码版本（" + r._dsha + "）：差 0 说明"
+                 + "那次改动没动行为，不是 0 说明它动了"
+               : "同配置重跑：差 0 说明行为没变；不是 0 就是数据或代码变了")}">${
+            r._d == null ? '<span class="sub">（第一次）</span>'
+            : (r._d === 0 ? '<span class="sub">0.00pp（行为一致）</span>'
+                          : (r._d > 0 ? "+" : "") + (r._d * 100).toFixed(2) + "pp")}</td>
+      <td>${num(r.dsr)}</td><td>${r.n_trials_k ?? "—"}</td><td>${codeCell(r)}</td>
+      <td>${esc((r.note || "").slice(0, 24))}</td>
+      <td>${haveReport(r.job_id)
+            ? `<a href="/report/${esc(r.job_id)}" target="_blank">打开</a>`
+            : (("job_id" in r)
+               ? `<span class="sub" title="盘上没有这份报告（可能被清理过）">—</span>`
+               : `<span class="sub" title="这条记录早于 job_id 记账（2026-10-18 之前）—— 报告可能还在
+「历史报告」里，但这条记录无法按 id 定位到它">— 无 id</span>`)}</td>
+    </tr>`).join("")}</tbody></table>`;
+}
+// 把某张卡的窗口填成这一对日期（不自动提交）：台账里看到"上次用这个窗口跑过"，
+// 能一键填回去 —— 但**跑不跑由人决定**，因为跑一次就要记一次 k（§5）。
+// 把台账里**这一行**的配置填回它的卡片：窗口 + 族参数，然后停在卡片上（不自动跑：
+// 跑一次就记一次 k，按下去是用户的决定）。
+//
+// ⚠️ 为什么不是"只填窗口"（2026-10-21 实测的缺陷）：族卡片上真正决定跑出来是什么的
+// 是那几个**参数下拉**（默认=网格中点）。只填窗口的话，用户点「回测」跑的是**另一个配置**，
+// 而提示写着"已填入上次的窗口"，看起来像复现。更糟的是它**不报错**：新跑那次进台账、
+// 推高 k —— 付了一次钱，拿到的却不是想复现的那次。所以这里整个配置一起填，填不进去的
+// 要**逐项说出来**（不在当前网格上的取值 = 那次用的是旧网格）。
+let ROWCFG = {};        // job_id → 那一行的 {strategy_id, window, params}（同一策略+窗口可能跑过多次、参数不同）
+function applyRunConfig(cfg) {
+  const [kind, id] = (cfg.strategy_id || "").split(":");
+  const out = {ok: false, applied: [], skipped: []};
+  if (!kind || !id || !$("lo-" + kind + "-" + id)) return out;
+  const lo = $("lo-" + kind + "-" + id), hi = $("hi-" + kind + "-" + id);
+  if (cfg.window && cfg.window.length === 2) { lo.value = cfg.window[0]; hi.value = cfg.window[1]; }
+  const p = cfg.params || {};
+  // 只有**族**有可编辑的参数下拉（preset 的参数由定义体决定）—— 所以只对族做这件事，
+  // 而不是"找不到元素就算没填进去"：后者会让每一行 preset 都报出一串"没应用的参数"。
+  if (kind === "family") Object.keys(p).forEach(k => {
+    const el = $("p-" + id + "-" + k);
+    if (!el) { out.skipped.push(k); return; }
+    const want = JSON.stringify(p[k]);
+    if ([...el.options].some(o => o.value === want)) { el.value = want; out.applied.push(k); }
+    else out.skipped.push(k);        // 不在预注册网格上 ⇒ 不静默取个近似的
+  });
+  revalidate(kind, id);
+  out.ok = true;
+  return out;
+}
+function fillConfig(jobId) {
+  const cfg = ROWCFG[jobId];
+  if (!cfg) return;
+  _noteFilled(cfg, applyRunConfig(cfg));
+}
+// 早于 job_id 字段的台账行：取不到那一行的参数，所以**只**回填窗口，并说清是"只"。
+function fillWindowOnly(strategyId, lo, hi) {
+  const cfg = {strategy_id: strategyId, window: [lo, hi], params: null};
+  _noteFilled(cfg, applyRunConfig(cfg), "（这一行早于 job id 字段，参数取不到）");
+}
+function _noteFilled(cfg, r, extra) {
+  if (!r.ok) return;
+  const [kind, id] = cfg.strategy_id.split(":");
+  const card = $(kind + "-" + id);
+  card.scrollIntoView({block: "start"});
+  const bar = card.querySelector(".bar");
+  const old = bar.querySelector(".filled"); if (old) old.remove();
+  const sp = document.createElement("span");
+  sp.className = "sub filled";
+  const what = r.applied.length ? `窗口 ${cfg.window.join("..")} 与 ${r.applied.length} 个族参数`
+                                : `窗口 ${cfg.window.join("..")}`;
+  sp.textContent = `← 已填入这一行的 ${what}`
+    + (extra || "")
+    + (kind === "preset" ? "（参数由定义体决定，页面上改不了）" : "")
+    + (r.skipped.length ? `；⚠️ ${r.skipped.length} 个参数（${r.skipped.join("、")}）不在当前网格上，`
+        + `没应用 —— 那一行用的是另一个网格` : "")
+    + `。点「回测」才真的跑（跑一次就记一次 k）`;
+  bar.appendChild(sp);
+}
+function keyOf(r) {
+  // 同配置 = 策略 + 参数 + 窗口。三个都相同才是"重跑同一个东西"。
+  return r.strategy_id + "|" + JSON.stringify(r.params || null)
+       + "|" + ((r.window || []).join(".."));
+}
+// 「跑完两条候选怎么比」—— 平台自己给逐项差值，并把两条纪律写在最前面：
+// ① k 不同 ⇒ DSR 不可直接比（这是 2026-10-20 的教训）；② 窗口/参数不同 ⇒ 其它项也不同口径。
+function renderCompareBar() {
+  const withJob = RUNS.filter(r => r.job_id);
+  if (withJob.length < 2) {
+    // 不够两条就说清为什么、还差什么（此前这里是**空**的 —— "跑完两条候选怎么比"是页面上
+    // 写着的能力，却在你还没跑够两条时**一个字都不出现**，像是没有这个功能）。
+    $("cmpbar").innerHTML = `<span class="sub">「跑完两条候选怎么比」：${
+      withJob.length === 1
+        ? `现在只有 <b>1</b> 次带任务 id 的运行 —— 再跑一次，这儿就能选甲/乙逐项比。`
+        : `还没有带任务 id 的运行 —— 在任何一张卡片上点「回测」，跑出两次就能比。`}</span>`;
+    $("cmpout").innerHTML = ""; return;
+  }
+  const label = (r) => `${(r.ts || "").slice(5, 16)} · ${r.strategy_id} · ${(r.window || []).join("..")} · k=${r.n_trials_k ?? "?"}`;
+  const prevA = ($("cmpA") || {}).value, prevB = ($("cmpB") || {}).value;
+  const sel = (id, def) => `<select id="${id}" aria-label="对比${id === "cmpA" ? "甲" : "乙"}">`
+    + withJob.map(r => `<option value="${esc(r.job_id)}"${r.job_id === (id === "cmpA" ? (prevA || def) : (prevB || def)) ? " selected" : ""}>${esc(label(r))}</option>`).join("")
+    + "</select>";
+  $("cmpbar").innerHTML = `对比两次运行：${sel("cmpA", withJob[0].job_id)} ↔ ${sel("cmpB", withJob[1].job_id)}
+    <button class="mini" onclick="doCompare()">比一比</button>
+    <span class="sub">（逐项差值 + k/窗口口径提醒 —— 两条候选怎么比就看这里）</span>`;
+}
+
+// 按**这次运行**生成 VERDICT 草稿。
+// 为什么要有它：§5 要求 VERDICT 与参数同时记录，而 VERDICT 里的数字是**手抄**的 —— 抄错一次
+// （抄成别的候选的、或抄成上一轮的），报告与判词就互相矛盾，而报告本身不会报错
+// （我 2026-10-20 亲自踩过：把基线的 VERDICT 一字不差复制给兄弟候选，于是两条报告的
+// 「结论行」必然一样 ⇒ 看起来像"结论没变"，其实是没比过）。
+// 所以草稿只给「数字与口径」，结论仍由人写；并明确写"尚未判定 ⇒ 不得用于实盘"。
+function verdictDraft(st) {
+  const m = st.metrics || {}, k = m.k_breakdown || {};
+  // 窗口在 status 的 request 里（st.window 是比较视图用的字段，不一定有）
+  const req = st.request || {};
+  const w = st.window || [req.lo, req.hi];
+  const num = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—"
+    : (typeof v === "number" ? _z0(v, d).toFixed(d) : String(v));
+  const pct = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v * 100, d).toFixed(d) + "%";
+  const pp = (v, d = 2) => (v === null || v === undefined || !isFinite(v)) ? "—" : _z0(v * 100, d).toFixed(d) + "pp";
+  const kPart = `k=${m.dsr_k}（= 声明 ${k.declared_or_grid || 0}`
+    + (k.inherited_from_parent ? ` + 继承自 ${k.inherited_parent} 的 ${k.inherited_from_parent} 次` : "")
+    + ` + 本条已跑 ${k.platform_runs_before || 0}）`;
+  return [
+    `【候选草稿 · 平台按本次运行生成；结论由人写，不要复制别的候选的那段】`,
+    `窗口 ${w[0]}..${w[1]}：成交 ${m.n_trades} 笔，敞口 ${pct(m.exposure, 1)}；`
+      + `曝光匹配超额 ${pp(m.excess)}，CAGR ${pct(m.cagr)}（同窗等权池 ${pct(m.bench_cagr)}）；`
+      + `DSR ${num(m.dsr, 3)}（${kPart}）；4 折为正 ${m.folds_positive ?? "—"}/4，`
+      + `胜率 ${pct(m.win_pct, 1)}，盈亏比 ${num(m.profit_factor, 2)}，最大回撤 ${pct(m.maxdd, 1)}。`,
+    // 判据④的数字：勾了运气对照才有。**整窗一个数**，与判据④要的逐折口径不是一回事 ——
+    // 写进判词时必须连口径一起写，否则下一个人会拿这个百分位去声称"过了判据④"。
+    ...(m.ctl_runs ? [`运气对照（同止损止盈、同笔数、同机会集随机入场 ${m.ctl_runs} 次）：`
+      + (m.ctl_pct == null ? "全部失败，没出百分位（对照组一笔都没成交）"
+         : `本窗口收益落在第 ${num(m.ctl_pct, 1)} 百分位`)
+      + `。⚠️ 这是整窗一个数；判据④要的是逐折 ≥3/4 折在随机分布中位以上，`
+      + `那要读 family_search / wfv_search 的逐折输出。`] : []),
+    `⛔ 尚未判定 ⇒ 「不得用于实盘、不得当作选股能力的证据」。`
+      + `把上面这些「本窗口」的数字写进结论，并说明它与哪些窗口/参数比过。`,
+    // ⚠️ 这段是**单窗读数**，不是交付判定。四条判据要 family_search / wfv_search 的裁决
+    // 输出 —— 平台给不出 ① 的池化口径与 ④ 的逐折口径（见代码地图「这一页能答到哪」）。
+    // 不写这一句，开发者会把这段当成交付判定粘进 VERDICT（这正是它最容易被误用的地方）。
+    `（这段是「本窗口一次运行」的读数，不是交付判定：四条判据（① 池化测试窗 CAGR ② 连续净值 CAGR ③ 4 折里 ≥3 折为正 ④ 4 折里 ≥3 折打赢随机入场）要 family_search / wfv_search 的裁决输出；平台给不出 ① 的池化口径与 ④ 的逐折口径。）`,
+    // 一笔都没成交时，上面的 0 全部是"零敞口"的算术结果，不构成任何策略证据 ——
+    // 草稿是直接粘进 VERDICT 的，所以这句话必须写在草稿里（写在页面上没用）。
+    ...(Number(m.n_trades) === 0 ? [`⚠️ 这次一笔都没成交：敞口 0 ⇒ 曝光匹配超额按定义精确为 0，`
+      + `「0 笔 / 0 超额 / 0 回撤」都不是策略表现，别把它们写进结论当证据。`
+      + `要判这条策略，得换一段它真的会开火的窗口。`] : []),
+  ].join("\n");
+}
+
+const RUNSTATUS = {};            // job id → 那次运行的完整状态（草稿要引用它的数字）
+
+function copyVerdictDraft(st) {
+  if (!st) { const el = document.getElementById("verdictDraftOut");
+             if (el) el.textContent = "没有这次运行的状态可引用（刷新一下页面再试）"; return; }
+  const text = verdictDraft(st);
+  // ⚠️ **先落字，再试剪贴板**：浏览器可能不给剪贴板权限、或 writeText 既不 resolve 也不 reject
+  //   （实测 headless 里就是这样）—— 那时用户就什么也看不到。所以正文先写进页面，
+  //   剪贴板只是"顺手也复制一份"。
+  const el = document.getElementById("verdictDraftOut");
+  if (el) el.textContent = text;
+  const mark = (ok) => {
+    const e = document.getElementById("verdictDraftOut");
+    if (e) e.textContent = (ok ? "已复制到剪贴板（正文在下面，可直接粘进定义体的 VERDICT）：\n"
+                                : "（剪贴板不可用，请手动选中下面这段）：\n") + text;
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      const pr = navigator.clipboard.writeText(text);
+      if (pr && pr.then) pr.then(() => mark(true), () => mark(false));
+      else mark(true);
+    } catch (exc) { mark(false); }
+  } else mark(false);
+}
+
+function zeroTradesNote(m) {
+  // 「一笔都没成交」是一个**必须单独说**的结果（2026-10-21 在合成市场上实测的一段窗口：
+  // 信号 0 个 ⇒ 成交 0 笔）：此时敞口 0、收益 0、超额按定义**精确为 0**，于是面板会给出
+  // 「+0.00pp」并配**绿色**（着色只看符号）—— 读起来像"与池子打平"，实际是"根本没参与"。
+  // 所以这一档：① 0 不涂色（见上面 cells 里的 zc()），② 在数字上面加这一句。
+  if (Number(m.n_trades) !== 0) return "";
+  return `<div class="verdict none">这段窗口里<b>一笔都没成交</b> —— 下面的 0 不是
+    「不赚不亏」而是「没参与」：平均敞口 0 ⇒ 曝光匹配超额按定义<b>精确为 0</b>（两条腿完全相同），
+    所以它<b>不能</b>当作「与池子打平」的证据；同窗等权池那个 CAGR 也可能是小窗口上的年化放大。
+    换一段窗口，或换一个这条策略真的会开火的窗口再看。</div>`;
+}
+function fmtCell(v, unit) {
+  if (v === null || v === undefined || (typeof v === "number" && !isFinite(v))) return "—";
+  if (unit === "pct") return (v * 100).toFixed(2) + "%";
+  if (unit === "pp") return (v * 100).toFixed(2) + "pp";
+  if (unit === "int") return String(v);
+  return Number(v).toFixed(3);
+}
+
+async function doCompare() {
+  const a = $("cmpA").value, b = $("cmpB").value;
+  if (!a || !b) return;
+  let d;
+  try { d = await (await fetch(`/api/compare/${a}/${b}`)).json(); }
+  catch (exc) { $("cmpout").innerHTML = `<div class="sub neg">对比失败：${esc(exc.message)}</div>`; return; }
+  if (d.error) { $("cmpout").innerHTML = `<div class="sub neg">${esc(d.error)}</div>`; return; }
+  const head = (x, tag) => `<b>${tag}</b> ${esc(x.strategy_id)} · ${esc((x.window || []).join(".."))} · k=${x.k ?? "?"}`
+    + (x.derived_from ? ` <span class="sub">（派生自 ${esc(x.derived_from)}）</span>` : "")
+    + (x.params ? ` <code class="p">${esc(paramsOf(x.params))}</code>` : "")
+    + (x.control_runs ? ` <span class="sub">· 运气对照 ${x.control_runs} 次`
+        + (x.ctl_pct == null ? "（全部失败，没出百分位）" : `，第 ${num(x.ctl_pct, 1)} 百分位`) + `</span>` : "");
+  const warn = [];
+  if (d.k_differs) warn.push(`⚠️ 两次的 <b>k 不同</b>（${d.a.k} vs ${d.b.k}）⇒ <b>DSR 不可直接比</b> —— 它俩的试验次数不同`);
+  if (d.window_differs) warn.push(`⚠️ 两次<b>窗口不同</b> ⇒ 除 DSR 外，其它指标也不是同口径比较`);
+  if (d.params_differ) warn.push(`⚠️ 两次<b>参数不同</b> —— 这是两个配置，不是同配置重跑`);
+  // 运气对照是勾选框（默认不跑）⇒ 常常只有一次有那个数。不标出来的话，"Δ"会拿一个数
+  // 减一个空格，读起来像"乙变好了"，实则只是乙多付了一次对照的开销。
+  if (d.control_mismatch) warn.push(`⚠️ 只有一次跑了<b>运气对照</b> ⇒「随机入场百分位」这一行<b>没有可比值</b>（那次跑了对照才有这个数）`);
+  $("cmpout").innerHTML = `<div class="card"><div class="sub">${head(d.a, "甲：")}</div>
+    <div class="sub">${head(d.b, "乙：")}</div>
+    ${warn.length ? `<div class="verdict none">${warn.join("<br>")}</div>` : ""}
+    <table class="rsum"><thead><tr><th>指标</th><th>甲</th><th>乙</th><th>Δ（乙−甲）</th></tr></thead><tbody>
+    ${d.rows.map(r => `<tr><td>${esc(r.label)}</td><td>${fmtCell(r.a, r.unit)}</td>
+      <td>${fmtCell(r.b, r.unit)}</td>
+      <td class="${r.delta === null ? "" : (r.delta >= 0 ? "pos" : "neg")}">${
+        r.delta === null ? "—" : (r.delta >= 0 ? "+" : "") + fmtCell(r.delta, r.unit)}</td></tr>`).join("")}
+    </tbody></table></div>`;
+}
+
+function renderReports() {
+  if (!REPORTS.length) { $("reports_body").innerHTML = `<div class="sub">（盘上还没有报告）</div>`; return; }
+  // ⚠️ 接口一直发着 total/shown（50 条上限），但页面从没显示过 —— 40 行台账那边有
+  // 「表只取最近 30 条，盘上共 40 条」，报告这边此前一个字都没有（边界实测抓到的半拉子修复）。
+  const trunc = (typeof REPORTS_TOTAL === "number" && REPORTS_TOTAL > REPORTS.length)
+    ? `<div class="sub">盘上共 <b>${REPORTS_TOTAL}</b> 份，下面只列最近 <b>${REPORTS.length}</b> 份 ——
+       更旧的仍在 <code>research/results/</code>（按名字里的 job id 可直接用 <code>/report/&lt;id&gt;</code> 打开）</div>`
+    : "";
+  $("reports_body").innerHTML = trunc + `<table class="ledger"><thead><tr><th>时间</th><th>策略</th>
+    <th>窗口</th><th>参数</th><th>大小</th><th>打开</th><th>逐笔</th></tr></thead><tbody>${REPORTS.map(r => `<tr>
+      <td>${new Date(r.mtime * 1000).toLocaleString().slice(0, 19)}</td>
+      <td>${esc(r.name)}</td><td>${esc((r.window || []).join(".."))}</td>
+      <td><code class="p">${esc(paramsOf(r.params, r.params ? null
+            : (inLedger(r.job_id) ? null : "unknown")))}</code></td>
+      <td>${r.kb} KB</td>
+      <td><a href="/report-file/${esc(r.file)}" target="_blank">打开报告</a></td>
+      <td>${r.has_trades ? `<a href="/api/trades/${esc(r.job_id)}.csv" download>CSV</a>`
+                         : '<span class="sub">—</span>'}</td>
+    </tr>`).join("")}</tbody></table>`;
+}
+// 「代码」列：这次是哪份代码跑的。
+// 为什么必须显眼：台账里已经混着好几个 sha（改一次代码跑一次就多一个），而"同配置重跑
+// Δ=0"这条判词**只有在同一份代码下**才等于"行为没变"；跨版本时它反而成了"那次改动没动
+// 行为"的证据 —— 但读的人得先知道比的是两个版本。sha 单独也不够：脏工作区照样返回同一个
+// sha（§6 归因，`obs.git_dirty` 的 docstring 就是这么写的）。
+function codeCell(r) {
+  const sha = r.git_sha || "?";
+  const stale = CUR_SHA && sha !== CUR_SHA && sha !== "unknown";
+  const flags = [stale ? "旧于当前" : "", r.git_dirty ? "脏树" : ""].filter(Boolean).join(" · ");
+  // ⚠️ 老记录里**没有** git_dirty 这个字段（它是后加的）——不能因此说"当时工作区干净"，
+  // 那是把一个未知说成了已知（实测 12 个旧 sha 全都没有该字段）。
+  const why = stale
+    ? `这次是旧代码（${sha}）下跑的；当前是 ${CUR_SHA} —— 两者不保证可比`
+    : (r.git_dirty === true
+        ? "跑的时候工作区有未提交改动 ⇒ 这次结果标注不了确定的代码版本"
+        : r.git_dirty === false ? "与当前代码同一版本，且当时工作区干净"
+                                : "与当前代码同一版本（当时的记录早于「工作区是否干净」这个字段，无从判断）");
+  return `<span class="${stale || r.git_dirty ? "sub" : ""}" title="${esc(why)}">${esc(sha)}${
+    flags ? `<span class="sub">（${esc(flags)}）</span>` : ""}</span>`;
+}
+// 参数列。⚠️ 三种"没有参数"要分开说，不能一律断言"在定义体里"（审计实测：那对 CLI `--out`
+// 的产物与早期未记 params 的记录都是**假话** —— 它们的参数根本不是从定义体来的，
+// 一条是命令行传的、一条是那会儿还没开始记）：
+//   missing —— 台账这条记录里根本没有 params 字段（早于参数记账）
+//   cli     —— 不是平台产出的（命令行 --out），参数在命令里，没进台账
+//   body    —— 平台记的是 null：这条策略确实把参数放在定义体里（信号型 preset）
+function paramsOf(p, why) {
+  if (p && Object.keys(p).length) return Object.entries(p).map(([k, v]) => k + "=" + v).join(" ");
+  if (why === "missing") return "（这条记录早于参数记账）";
+  if (why === "cli") return "（命令行传入，未记账）";
+  // unknown：这份报告对应的运行**根本不在台账里**（CLI --out 的产物、或台账被清理过）——
+  // 这时候说"参数在定义体里"是猜的（边界实测：造 60 份没有台账行的报告，页面一律这么写）
+  if (why === "unknown") return "（台账里没有这条运行）";
+  return "（在定义体里）";
+}
+// 这份报告对应的 job 在不在**当前这一页拿到的**台账里（台账表最多 30 条，所以措辞留了余地）
+function inLedger(jobId) {
+  return !!jobId && RUNS.some(r => r.job_id === jobId);
+}
+function sortLedger(key) { SORT = {key, dir: SORT.key === key ? -SORT.dir : -1}; renderLedger(); }
+function jumpToHash() {
+  const el = document.getElementById(location.hash.replace("#", ""));
+  if (el) { el.scrollIntoView({block: "start"}); el.style.borderColor = "var(--up)"; }
+}
+
+// ---------------------------------------------------------------- 回测
+
+function panel(jobId, kind, id, lo, hi, params, controlRuns, cmd) {
+  const d = document.createElement("div");
+  d.id = "job-" + jobId;
+  // `cmd`：这次任务**自己的**命令（刷新后从服务端找回的任务要传它）。
+  // 不传时按卡片当前输入现拼 —— 只有"刚点下回测"那条路径可以这么做（那时两者必然一致）。
+  const cmdText = cmd || cliCmd(kind, id);
+  d.innerHTML = `<div class="jhead"><b>${esc(kind)}:${esc(id)}</b>
+    <span class="sub">${esc(lo)} .. ${esc(hi)}${params ? " · 参数 " + esc(JSON.stringify(params)) : ""}
+     · job ${esc(jobId)}${controlRuns ? " · 运气对照 " + controlRuns + " 次" : ""}</span>
+    <div class="sub">完整命令：<code>${esc(cmdText)}</code></div></div>
+    <div class="steps jsteps"><div>… 已提交，等待执行</div></div><div class="jbody"></div>`;
+  $("result").appendChild(d);
+  return d;
+}
+
+async function run(kind, id) {
+  const lo = $("lo-" + kind + "-" + id).value, hi = $("hi-" + kind + "-" + id).value;
+  // ⚠️ 没填全要**当场**拦：旧判据把 "" 当成"最早"⇒ 空窗口能提交上去，服务端回
+  // "缺字段 lo"（一句服务端的话，而不是"你少填了一格"）。这里说清是哪个格子没填。
+  if (!lo || !hi) { alert("窗口没填全：起点与终点都要"); return; }
+  if (!(lo < hi)) { alert("窗口非法：起点必须早于终点"); return; }
+  const btn = $("btn-" + kind + "-" + id);
+  if (btn.disabled) return;                       // 双击守卫：一次点击 = 一次提交 = k+1
+  const params = currentParams(kind, id);
+  const controlRuns = $("ctl").checked ? 200 : 0;
+  const note = ($("note") || {}).value || "";
+  $("run").style.display = "block";
+  $("run").setAttribute("tabindex", "-1");   // 可编程聚焦（不进 Tab 序列）
+  $("runhead").classList.remove("sub");
+  $("runhead").innerHTML = `<b>正在回测…</b>`;
+  btn.disabled = true; btn.textContent = "回测中…";
+  try {
+    const r = await fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({kind, id, lo, hi, params, control_runs: controlRuns, note})});
+    const j = await r.json();
+    if (j.error) return fail(`提交失败：${j.error}`, btn);
+    T0[j.id] = Date.now();
+    trackInflight(j.id, true);
+    panel(j.id, kind, id, lo, hi, params, controlRuns);
+    $("run").scrollIntoView({block: "start"});
+    $("run").focus({preventScroll: true});   // 焦点跟着视图走 —— 否则焦点环停在已滚出屏幕的卡片上，
+                                             // 下一次 Tab 会把视图拽回卡片区（审计实测）
+    poll(j.id, kind, id);
+  } catch (exc) {
+    // 审计实测：把 /api/run 打挂后，页面永远停在「正在回测…」、结果区 0 个面板、
+    // 只有 console 一条 TypeError。一个**看起来在跑、其实永远不会完成**的按钮，
+    // 比一句报错坏得多 —— 它会让人一直等。错误就地写在卡片上，并滚到结果区。
+    return fail(exc.name === "TypeError" ? "连不上本地服务（它还开着吗？）" : exc.message, btn);
+  }
+  // ⚠️ 这里原先是一个 `setTimeout(…, 1500)` 的"守卫" —— 冷启动要 30–70 秒（页面自己就这么写），
+  // 1.5 秒后按钮就复活了，而任务还在跑 ⇒ 手还在卡片上的人再点一次就是**第二次提交**，k 再 +1
+  // （审计实测：真实点击后 1.52 秒按钮即复活，而同一时刻面板还在「已用 2s / 取消」）。
+  // 现在守卫是**真的在途状态**：按钮由 poll() 在终态才放行（见 releaseCardBtn）。
+}
+
+// 一次运行结束时才把卡片按钮放行。为什么放在 poll 而不是 run：run() 里的 try 在 poll() 之前
+// 就返回了（没有 await），所以那里根本不知道任务什么时候结束。
+function releaseCardBtn(kind, id) {
+  const b = $("btn-" + kind + "-" + id);
+  if (b) { b.disabled = false; b.textContent = "回测"; }
+}
+
+// 终态必须写回 #runhead —— 它是 #run 子树里**唯一**的 live region（role=status aria-live），
+// 而四类终态原先只写 .jbody（没有 role/aria-live）⇒ 读屏跑完永远静默，状态区一直停在
+// 「正在回测…」（审计 blocking）。顺带把那一格也收拾干净：原先"任务丢失"时它仍挂着
+// 看似在跑的「… 回测（成交 16 笔）已用 46s [取消]」，计时器冻在那里、取消按钮还是死的。
+function fin(headline, box, detail) {
+  const rh = $("runhead");
+  if (rh) rh.innerHTML = `<b>${esc(headline)}</b>` +
+    (detail ? ` <span class="sub">${esc(String(detail).slice(0, 300))}</span>` : "");
+  if (box) {
+    const j = box.querySelector(".jsteps");
+    if (j) j.innerHTML = (j.innerHTML || "") + `<div class="sub">—— 已结束（${esc(headline)}）——</div>`;
+    const b = box.querySelector(".jsteps button");
+    if (b) b.remove();                     // 取消按钮不能留成死按钮
+  }
+  const jb = box && box.querySelector(".jbody");
+  if (jb) jb.innerHTML = `<div class="verdict none">${esc(headline)}${detail ? "：" + esc(detail) : ""}</div>`;
+}
+
+function fail(msg, btn) {
+  // 注意：这里**没有** job id（提交就没成功，或记录在 poll 里），所以顶栏徽标要在
+  // poll 的两条早退路径上自己摘干净 —— 见下面 trackInflight(false) 的两处。
+  // 一处写两处看：结果区（滚过去了）**和**这张卡片自己的按钮旁边（手还在那儿）
+  $("runhead").innerHTML = `<b class="neg">${esc(msg)}</b>`;
+  $("run").scrollIntoView({block: "start"});
+  const bar = btn && btn.closest(".bar");
+  if (bar && !bar.querySelector(".failmsg")) {
+    const sp = document.createElement("span");
+    sp.className = "neg failmsg"; sp.textContent = "✗ " + msg;
+    bar.appendChild(sp);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = "回测"; }
+}
+
+const POLLFAIL = {};                              // jobId -> 连续失败次数
+// 步骤区。排队中的任务**一步都还没开始**，此前却把「取链路（首次约 30–70 秒）」当作当前
+// 步骤显示、计时器还在走 ⇒ 看起来像在干活（实际在等锁）。排队时如实说"排队中"。
+// 步骤区渲染。⚠️ 不能每轮（900ms）整块重写：取消按钮就住在里面，重写会把焦点**每秒销毁一次**
+// —— 键盘用户按不到它（审计实测：poll() 无条件 innerHTML 重写，焦点跟丢）。所以：
+// 只有"结构真的变了"（状态/步骤数/当前步骤名）才重建，否则只把计时那个 span 的数字改掉。
+function renderSteps(box, st, jobId, el) {
+  const key = [st.status, (st.steps || []).length, st.step || ""].join("|");
+  const holder = box.querySelector(".jsteps");
+  if (holder.dataset.stepKey === key) {
+    const t = holder.querySelector(".elapsed");
+    if (t) t.textContent = el == null ? "" : el.toFixed(0) + "s";
+    return;
+  }
+  holder.dataset.stepKey = key;
+  holder.innerHTML = stepsHtml(st, jobId, el);
+}
+
+function stepsHtml(st, jobId, el) {
+  const done = (st.steps || []).map(s =>
+    `<div>✓ ${esc(s.name)} <span class="sub">${s.seconds}s</span></div>`).join("");
+  if (st.status === "queued") {
+    return done + `<div>… <b>排队中</b> <span class="sub">服务端一次只跑一个任务 —— 前一个跑完才开始（已等 <span class="elapsed">${
+      el == null ? "" : el.toFixed(0) + "s"}</span>，</span>
+      <button class="mini" onclick="cancelJob('${esc(jobId || st.id || "")}')">取消</button></div>`;
+  }
+  if (st.status === "running") {
+    return done + `<div>… ${esc(st.step)} <span class="sub">已用 <span class="elapsed">${
+      el == null ? "" : el.toFixed(0) + "s"}</span>，</span>
+      <button class="mini" onclick="cancelJob('${esc(jobId || st.id || "")}')">取消</button>
+      <span class="sub">粗粒度：当前这一步跑完才停</span></div>`
+      + (CANCELREQ.has(jobId) || CANCELREQ.has(st.id)
+          ? `<div class="sub">已请求取消 —— 当前这一步跑完就停（已取消的运行<b>不进台账</b>）</div>` : "");
+  }
+  return done;
+}
+
+// 页面加载时把**在途任务**找回来：刷新/换新标签页/关了再开之后，面板、徽标、取消按钮
+// 全部重建（服务端 GET /api/jobs）。不这么做的话 job id 只活在被刷掉的那份 DOM 里，
+// 而页面会一边写着「还没跑过」一边在服务端继续跑 —— 那是假话，且会诱导用户再点一次回测（k +1）。
+async function recoverInflight() {
+  try {
+    const r = await (await fetch("/api/jobs")).json();
+    for (const job of (r.jobs || [])) {
+      T0[job.id] = Date.now() - (Number(job.seconds) || 0) * 1000;
+      // 参数 / 运气对照 / 备注都从**服务端找回的那份请求**来（不是卡片上的当前输入），
+      // 命令也按那份请求拼 —— 否则刷新后的面板会印出"像是这个任务、其实是另一套配置"的命令。
+      panel(job.id, job.kind, job.strategy, job.lo, job.hi, job.params, job.control_runs,
+            cliCmdFor(job.kind, job.strategy, job.lo, job.hi, job.params,
+                      job.control_runs, job.note));
+      const box = $("job-" + job.id);
+      if (box) box.querySelector(".jsteps").innerHTML = stepsHtml(job, job.id, null);
+      trackInflight(job.id, true);
+      const b = $("btn-" + job.kind + "-" + job.strategy);
+      if (b) { b.disabled = true; b.textContent = "回测中…"; }   // 卡片上也别让它再点一次
+      poll(job.id, job.kind, job.strategy);
+    }
+    if ((r.jobs || []).length) {
+      $("run").style.display = "block";
+      $("runhead").innerHTML = `<b>有 ${r.jobs.length} 个任务在跑</b>
+        <span class="sub">（页面加载时从服务端找回的）</span>`;
+    }
+  } catch (exc) { /* 找不回就算了 —— 但它绝不该把页面挡在别的地方 */ }
+}
+
+async function cancelJob(jobId) {
+  CANCELREQ.add(jobId);
+  const box = $("job-" + jobId);
+  try {
+    const r = await (await fetch("/api/cancel/" + jobId, {method: "POST"})).json();
+    if (!r.cancelled) {
+      CANCELREQ.delete(jobId);
+      if (box) box.querySelector(".jsteps").insertAdjacentHTML("beforeend",
+        `<div class="sub">这次已经结束了，不用取消</div>`);
+    }
+  } catch (exc) {
+    CANCELREQ.delete(jobId);
+    if (box) box.querySelector(".jsteps").insertAdjacentHTML("beforeend",
+      `<div class="neg">取消失败：${esc(exc.message)}</div>`);
+  }
+}
+
+async function poll(jobId, kind, id) {
+  const box = $("job-" + jobId);
+  let st;
+  try {
+    st = await (await fetch("/api/job/" + jobId)).json();
+    POLLFAIL[jobId] = 0;
+  } catch (exc) {
+    POLLFAIL[jobId] = (POLLFAIL[jobId] || 0) + 1;
+    if (POLLFAIL[jobId] >= 3) {
+      if (box) box.querySelector(".jsteps").innerHTML =
+        `<div class="neg">读不到任务状态（连续 ${POLLFAIL[jobId]} 次：${esc(exc.message)}）——
+          服务可能已停；任务仍在后台跑，刷新页面后到「运行台账」里看这一次是否落账。</div>`;
+      trackInflight(jobId, false);                // 状态都读不到了，不能再挂着一个"在跑"
+      return;                                     // 停轮询：不再无声地每 0.9 秒重试
+    }
+    setTimeout(() => poll(jobId, kind, id), 1500);
+    return;
+  }
+  // 判据必须**窄**：`st.error` 的本意只是拦"接口回了个 {error: …}（任务查不到）"，
+  // 而 status==="error" 的任务同样带着非空 error 字段（服务端就是这么设计字段的）——
+  // 用一个字段兼两件事，于是 896 行那条 `st.status === "error"` 分支永远不可达，
+  // 所有失败都退化成同一句「任务丢失」（审计 blocking，两名核验者独立复现）。
+  if (!st || st.status === undefined) {
+    trackInflight(jobId, false);
+    releaseCardBtn(kind, id);
+    fin("任务丢失", box, `服务端返回的不是任务对象（可能这个 job 早已不在内存里 —— 服务重启过？）。
+      盘上的结果仍可从「运行台账」与「历史报告」找回。`);
+    return;
+  }
+  if (st.status === "cancelled") {
+    trackInflight(jobId, false);
+    releaseCardBtn(kind, id);
+    fin("已取消", box, "已取消 —— " + (st.error || "") + "（这次不进台账：没有结果被看到，不计入 k）");
+    return;
+  }
+  if (st.status === "error") {
+    trackInflight(jobId, false);
+    releaseCardBtn(kind, id);
+    if (box) box.querySelector(".jsteps").innerHTML = stepsHtml(st);   // 服务端已返回的 steps 别丢
+    fin("失败", box, st.error || "（服务端没给原因）");
+    return;
+  }
+  if (st.pool_range && (!POOL || POOL[0] !== st.pool_range[0])) {
+    POOL = st.pool_range; applyPoolHint();
+    try { sessionStorage.setItem("pool", JSON.stringify(POOL)); } catch (e) { /* 隐私模式等 */ }
+    document.querySelectorAll("input[type=date]").forEach(i => revalidate(
+      i.id.includes("-preset-") ? "preset" : "family",
+      i.id.replace(/^(lo|hi)-(preset|family)-/, "")));
+  }
+  const el = (Date.now() - (T0[jobId] || Date.now())) / 1000;
+  if (box) renderSteps(box, st, jobId, el);
+  if (st.status === "running" || st.status === "queued") {
+    trackInflight(jobId, true); setTimeout(() => poll(jobId, kind, id), 900); return;
+  }
+  trackInflight(jobId, false);              // 结束（不管是 done 还是 error）就从徽标里摘掉
+  // ⚠️ 成功路径也必须放行按钮。守卫从"1.5 秒定时器"改成"真在途"之后，任何一条终态没放行
+  // 都会让那张卡的「回测」**永久禁用**——实测就踩到了这个（刷新恢复后卡片一直写着"回测中…"，
+  // 而任务早就跑完了）。终态共四条：done / error / cancelled / 任务丢失，一条都不能漏。
+  releaseCardBtn(kind, id);
+  refreshReadouts().catch(() => {});        // 跑完立刻把卡片读数与台账刷新（不静默陈旧）
+  if (st.status === "error") {
+    if (box) box.querySelector(".jbody").innerHTML = `<div class="verdict none">${esc(st.error)}</div>`;
+    return;
+  }
+  const m = st.metrics, k = m.k_breakdown, cls = (v) => v >= 0 ? "pos" : "neg";
+  // 「一笔都没成交」是一个**必须单独说**的结果（2026-10-21 实测 fixture 上的一段窗口：
+  // 信号 0 个 ⇒ 0 笔）：此时敞口 0、收益 0、超额按定义**精确为 0**，于是面板会给出
+  // 「+0.00pp」并配**绿色**（cls 只看符号）—— 读起来像"与池子打平"，实际是"根本没参与"。
+  // 所以这一档里：① 0 不涂色（中性），② 在数字上面加一句说清它是什么。
+  const noTrades = Number(m.n_trades) === 0;
+  const zc = (c) => (noTrades ? "" : c);
+  const cells = [["成交笔数", m.n_trades, ""], ["自身收益", pct(m.own_ret), zc(cls(m.own_ret))],
+    ["CAGR", pct(m.cagr), zc(cls(m.cagr))], ["平均敞口", pct(m.exposure, 1), ""],
+    ["同窗等权池 CAGR", pct(m.bench_cagr), cls(m.bench_cagr)],
+    ["曝光匹配超额", pp(m.excess) + (m.excess_clamped
+        ? ` <span class="sub" title="这个窗口有一部分早于池子指数的覆盖范围（池子要预热）——
+口径只比较了两者共同覆盖的那些交易日；被裁掉的区间不参与超额">（只比了一部分）</span>` : ""),
+      zc(cls(m.excess))],
+    ["超额/敞口", pp(m.excess_per_exposure, 1), zc(cls(m.excess_per_exposure))],
+    ["beta", num(m.beta, 2), ""], ["alpha 年化", pct(m.alpha_annual), zc(cls(m.alpha_annual))],
+    ["t(alpha)", num(m.t_alpha, 2), ""], ["判据折为正", m.folds_positive + "/4", ""],
+    // 判据④的数字（此前只有"跑过 200 次"这句计数在标题里，读数只能打开报告才看得到）
+    ...(m.ctl_runs ? [["随机入场百分位",
+        (m.ctl_pct == null ? "未出数" : "第 " + num(m.ctl_pct, 1) + " 百分位")
+        + ` <span class="sub">（${m.ctl_runs} 次随机入场`
+        + (m.ctl_failed ? `，${m.ctl_failed} 次没成交` : "") + `；整窗一个数）</span>`, ""]] : []),
+    ["最大回撤", pct(m.maxdd, 1), zc("neg")], ["E[R]", num(m.E_R), zc(cls(m.E_R))],
+    ["胜率", pct(m.win_pct, 1), ""], ["盈亏比 PF", num(m.profit_factor, 2), ""],
+    ["最好 10% 占总 R", pct(m.top_decile_share, 1), ""], ["DSR", num(m.dsr), ""],
+    ["DSR 的 k", `${m.dsr_k} <span class="sub">(声明 ${k.declared_or_grid || 0}`
+      + (k.inherited_from_parent
+         ? ` + 继承自 <b>${esc(k.inherited_parent)}</b> 的 ${k.inherited_from_parent} 次`
+         : "")
+      + ` + 本条已跑 ${k.platform_runs_before || 0})</span>`, ""]];
+  // 每个数字都要能查到"它是什么、什么单位、往哪边好"—— 此前 19 个格子里除两个以外，
+  // 界面上没有一处给定义、单位或方向（DSR 是 0–1 概率、E[R] 是 R 倍数、t(alpha) 是 t 值…）。
+  const METRIC_HELP = {
+    "成交笔数": "本次窗口内完成的交易笔数（一笔一进一出）。",
+    "自身收益": "本窗口内账户权益的总收益率（不含杠杆放大，含费用与分红）。",
+    "CAGR": "同窗口的年化收益率（按 365.25/交易日折算）。",
+    "平均敞口": "持仓市值占权益的日均比例；空仓日算 0。越低越接近「大部分时间在场外」。",
+    "同窗等权池 CAGR": "同一窗口里「无脑等权持有整个池子」的年化收益 —— 基准线。",
+    "曝光匹配超额": "把闲置资金按等权池计息之后的超额（空仓时精确为 0）。单位 pp；与报告摘要里那个"
+      + "「总收益 − 基准」那个「超额」不是同一个量。",
+    "超额/敞口": "曝光匹配超额 ÷ 平均敞口 —— 每单位敞口换来的超额（单位 pp）。",
+    "beta": "策略日收益对同窗池日收益的回归斜率（1 = 与池子同涨同跌）。",
+    "alpha 年化": "扣掉 beta 暴露后的年化超额收益（单位 %）。",
+    "t(alpha)": "alpha 的 t 值（HAC 调整）；|t| < 2 时 alpha 与 0 无法区分。",
+    "判据折为正": "把窗口切成 4 折，收益为正的折数（x/4）。",
+    "随机入场百分位": "运气对照：同止损止盈、同笔数、在同一机会集里「随机」入场 N 次，本配置的收益"
+      + "落在这些随机策略的第几百分位（越高越不像运气）。⚠️ 这里算的是「整个窗口一个数」；"
+      + "预注册判据④要的是「逐折」≥3/4 折在随机分布中位以上 —— 那是 family_search / wfv_search "
+      + "的逐折输出，不是这个格子。没勾「运气对照」就没有这个数。",
+    "最大回撤": "窗口内权益从峰值回落的最大幅度（越低越好）。",
+    "E[R]": "每笔的期望收益，以「计划风险（1R）」为单位：+1R = 赚到一个止损宽度。",
+    "胜率": "盈利笔数占全部成交笔数的比例。",
+    "盈亏比 PF": "总盈利 ÷ 总亏损（>1 才是正期望）。",
+    "最好 10% 占总 R": "最赚的那 10% 的交易贡献了总 R 的多少 —— 越高说明越依赖尾部。",
+    "DSR": "通缩夏普（0–1 的概率式指标）：把「试了多少次」折算进去之后的显著性。越高越好。",
+    "DSR 的 k": "DSR 的分母 = 该 preset 声明的 n_comparisons（或族网格组数）+ 这次之前在本平台跑过的次数。",
+  };
+  fin(`完成 · 成交 ${m.n_trades} 笔 · 用时 ${st.seconds}s`, box, st.hint || "");
+  RUNSTATUS[st.id] = st;                       // 草稿要引用「这次运行」的数字
+  if (box) {
+    box.querySelector(".jbody").innerHTML = `
+      <div class="sub">完成，用时 ${esc(st.seconds)}s ·
+        报告自检 ${st.selfcheck && st.selfcheck.length
+          ? "<b class='neg'>失败：" + esc(st.selfcheck.join("；")) + "</b>" : "通过"}
+        ${st.hint ? " · " + esc(st.hint) : ""}</div>
+      ${zeroTradesNote(m)}
+      <div class="metrics">${cells.map(([lab, val, c]) =>
+        `<div title="${esc(METRIC_HELP[lab] || "")}"><span>${lab}</span><b class="${c}">${val}</b></div>`).join("")}</div>
+      <div class="bar"><a class="btnlink" href="${st.report}" target="_blank">在新窗口打开逐笔报告</a>
+        <a class="btnlink mini" href="${st.report}" download>下载报告 HTML</a>
+        ${st.trades_csv ? `<a class="btnlink mini" href="${esc(st.trades_csv)}" download
+          title="逐笔那 21 列的机器可读版（含窗口/成本/价格口径的注释行）；
+pandas.read_csv(..., comment='#') 可直接读">下载逐笔 CSV</a>` : ""}
+        <button class="mini" onclick="copyVerdictDraft(RUNSTATUS['${esc(st.id)}'])"
+          title="按「这次运行的数字」生成一段 VERDICT 草稿（窗口/笔数/超额/CAGR/DSR/k 的构成…），
+粘进候选定义体的 VERDICT 里再补你的判断。之所以要这个：结论里引用的数字一旦抄错
+（抄成别的候选的、或抄成上一轮的），报告与判词就会互相矛盾 —— 这是我 2026-10-20 亲自踩的坑
+（复制了基线的 VERDICT，于是两条报告的结论行一模一样）。">
+          复制 VERDICT 草稿</button>
+        <span class="sub">报告自包含（无外链、无脚本）—— 下面就是它；它也进了「历史报告」</span></div>
+      <div class="sub" id="verdictDraftOut" style="white-space:pre-wrap"></div>
+      <iframe src="${st.report}" loading="lazy" title="逐笔报告预览（自包含 HTML）"></iframe>`;
+  }
+  refreshLedger();                       // 只刷台账/历史，**不**重渲目录（否则会吞掉用户输入）
+}
+
+// 目录与台账**各自独立**取数：此前台账被串在 loadCatalog 的 then 链上 ⇒ 目录接口一挂，
+// 连「还没有运行记录」都不渲染（审计实测）。两条路径各自失败、各自可见，跳锚点不依赖它们。
+// ⚠️ 卡片是在 loadCatalog 里渲的，而 REPORTS（"这份报告还在不在盘上"的判据）要等
+// refreshLedger 才拿到 ⇒ 少了这一步，首屏每张卡都会把「最近一次·报告」写成「报告已不在盘上」。
+loadCatalog().then(refreshLedger).then(refreshReadouts).then(recoverInflight).then(jumpToHash);
+</script>
+</body></html>

@@ -2,7 +2,9 @@
 
 「Nasdaq 上市股票 → 周线趋势 → 单腿期权」这条链路的数据底座。**只做取数与落盘，不做交易。**
 
-数据源全部是合规的公开接口（Yahoo Finance via yfinance + marketdata.app），不碰券商通道。
+数据源是**公开、无鉴权的行情接口**：`yfinance`（Yahoo）与 `stockanalysis.com`（备用源，
+本机 Yahoo 被边缘封锁时走它）。两条路径都不碰券商通道。
+⚠️ 本文此前写「+ marketdata.app」——那只是当年评估过的备选，代码里**零命中**（2026-10-17 审计）。
 
 ---
 
@@ -22,7 +24,11 @@ usagent/
   data/
     usagent.db                 # SQLite，全部数据
     universe_nasdaq_all.json   # Nasdaq 全量普通股 3,030 只（含市值/价格）
-    universe_oi100.csv         # 期权 OI>=100 的 596 只  ← 默认工作池
+    universe_oi100.csv         # 期权 OI>=100 的 596 只（**已不是工作池**：见下）
+                               # 取数名单 = universe_nasdaq_all.json（3,030 只）——
+                               # 每日任务与校验闸门共用 config.DAILY_UNIVERSE；
+                               # ⚠️ 引擎**不读这个配置**：它读库（SELECT DISTINCT symbol
+                               # FROM ohlcv），再逐日按流动性过滤 ⇒ 最后一日真正可交易约 690 只
     universe_tight.csv         # 再叠加价差<=3tick 且 <=15% 的 49 只
   src/
     config.py           # 全部可调参数集中在这里
@@ -41,25 +47,27 @@ usagent/
 
 ## 环境
 
-用 base 的 Python 3.14.6（`yfinance 1.7.0`）。**不是** `tradingagents` conda env（那边 yfinance 是 1.5.2 且缺依赖）。
-
 ```bash
-PY=/opt/homebrew/Caskroom/miniconda/base/bin/python
-$PY -c "import yfinance,pandas; print(yfinance.__version__, pandas.__version__)"
-# 期望：1.7.0 3.0.5
+# 解释器**不写死某一台机器的路径**（审计 G2：文档曾把 /opt/homebrew/... 当环境契约，
+# 而那台机器上的路径在本机早就失效了）。依赖版本钉在 requirements.txt。
+python3 -m pip install -r requirements.txt
+PY=${PY:-python3}
+$PY -c "import yfinance, pandas; print(yfinance.__version__, pandas.__version__)"
+# 期望：1.7.0 3.0.5（版本必须与 requirements.txt 一致 —— §0 的"同输入⇒同输出"
+# 在没有依赖锁定时做不到，而数字变了会被误读成策略的问题）
 ```
 
-不需要装任何东西。落盘用 SQLite（Python 内置），**没有用 parquet 因为这台机器没装 pyarrow**。
+落盘用 SQLite（Python 内置），**不用 parquet**（不引额外依赖）。
 
 ---
 
 ## 首次运行
 
 ```bash
-cd /Users/holeon/code/usagent
+cd <仓库根>
 
-# 1) 3 年日线全量回补（596 只约 35 分钟；每只 ~3-5s，这是 Yahoo 的固有速度）
-$PY -u src/download_ohlcv.py --universe oi100
+# 1) 3 年日线全量回补（全池 3,030 只；实测单只中位 ~1.3s ⇒ 串行约 60-70 分钟）
+$PY -u src/download_ohlcv.py --universe all --source stockanalysis
 
 # 2) 抓一次当日期权链快照（596 只约 110 分钟）
 $PY -u src/snapshot_options.py --universe oi100
@@ -67,8 +75,8 @@ $PY -u src/snapshot_options.py --universe oi100
 # 3) 算 IV / IV Rank
 $PY -u src/derive_iv.py
 
-# 4) 校验
-$PY -u src/validate.py
+# 4) 校验（**目标池 = 引擎真正读的那一份**；机器可读结论可选）
+$PY -u src/validate.py --universe all --json logs/checks.json
 ```
 
 **中途被限流或断网没关系** —— 全部写入都是幂等的（`INSERT OR REPLACE`），
@@ -79,15 +87,48 @@ $PY -u src/validate.py
 ## 每日运行
 
 ```bash
-bash src/run_daily.sh
+bash src/run_daily.sh --dry-run     # 先看今天的计划（池子 / 源 / 命令行）
+bash src/run_daily.sh               # 跑；任一阶段失败 ⇒ 非零退出 + 告警
+python3 src/obs.py --tail 10        # 最近 10 行运行台账（logs/runs.jsonl）
+python3 src/obs.py --alerts         # 只看告警（logs/alerts.jsonl）
 ```
+
+主体在 **`src/daily.py`**（2026-10-17 机构就绪审计后从 shell 搬进来的）。三件事变了：
+
+1. **池子与数据源来自 `src/config.py` 单一来源**：此前这里写死 `--universe oi100`（596 只），
+   而引擎与面板读**全库 3,030 只** ⇒ 每日任务不覆盖真正的机会集，且"数据新鲜"判的是全库
+   `MAX(date)`（由那 596 只决定）⇒ **判据看不见这件事**。现在每日任务、校验闸门、引擎共用
+   `config.DAILY_UNIVERSE` / `DAILY_SOURCE`。
+2. **每一步留痕**：`logs/runs.jsonl` 一行一阶段（时间 / git sha / 成败 / 耗时 / 校验结论），
+   失败另写 `logs/alerts.jsonl` 并打印到 stderr；可选投递到 `$USAGENT_ALERT_WEBHOOK`
+   （**地址只从环境变量读，不落仓库**）。
+3. **"失败继续跑后续步骤"是有意为之**：取数失败时仍要跑校验，才能区分"取数没跑成"与
+   "库真的坏了"。退出码仍是任一步失败即非零。
+
+**成本（实测）**：全池 3,030 只、`--recent 10` 增量，单只中位 ~1.25s ⇒ 串行约 **63 分钟**。
+cron 定在北京 10:00，而链路的入场价钉在美东 T+1 开盘（北京 21:30 夏令时 / 22:30 冬令时）⇒ **余量 ≥ 11 小时**，
+串行可接受。下一步优化（单独一轮，它要动数据层的取数路径）：给 `download_ohlcv` 加
+`--workers N`（6 并发实测 ≈ 11 分钟）。
+
+### 提交前：让"红着提交"不发生
+
+```bash
+bash tools/install_git_hooks.sh     # 装 pre-commit（调用 tools/preflight.sh，<5 秒）
+bash tools/preflight.sh --full      # 想跑全量时
+```
+
+`tools/preflight.sh` 跑（实测整脚本 ≈2-3 秒）：仓库卫生（机器相关路径 / 写死解释器 / 依赖钉版）、装载契约、
+覆盖判据、**离线行为锁**。它存在的直接原因（2026-10-17 审计）：CI 早就有，但**没有任何东西
+强制它** —— 实测因此红着提交过一次（写死本机路径的文件在"596 passed"之后才 `git add`）。
+⚠️ 诚实边界：本地钩子能被 `--no-verify` 绕过，也管不到别人的克隆。**真正的强制是远端的分支
+保护 + 必过检查**（仓库设置，不是代码）。
 
 挂 cron（**先确认时点，见下**）：
 
 ```bash
 crontab -e
 # 北京 10:00，周一至周五（机器时区须为北京）
-0 10 * * 1-5  cd /Users/holeon/code/usagent && bash src/run_daily.sh >> logs/daily.log 2>&1
+0 10 * * 1-5  cd <仓库根> && bash src/run_daily.sh >> logs/daily.log 2>&1
 ```
 
 ### ⚠️ 运行时刻是这套东西唯一真正会「做错」的地方
@@ -117,6 +158,40 @@ crontab -e
 
 
 ---
+
+## 策略平台（本地页面：看策略 → 点回测 → 看逐笔）
+
+```bash
+python3 -m webapp.server --open        # → http://127.0.0.1:8765  （只绑本机）
+```
+
+页面上一眼看到**全部策略与参数**：
+
+* **6 条 preset**：引擎口径（与 CLI / 报告**同一个** `describe_engine_spec` 函数渲染）、
+  `n_comparisons`、`validated`、锁窗口，以及**它自己的 VERDICT**（§5：负面证据与参数必须同屏，
+  不能只展示参数）；
+* **15 个策略族**：机制叙述、预注册网格与组数、固定轴、排序分口径、对照臂，
+  以及"哪条已交付的 preset 用的就是它"。族的默认参数取**网格中点**（确定性、不看结果）。
+
+点「回测」→ 跑完直接给**逐笔报告**（就是 `research/html_report.py` 那份公共能力：
+K 线 + 入场/出场价 + SL/TP 线 + 信号日条件清单 + 权益曲线，自包含、无外链）+
+一屏指标（成交笔数、自身收益、平均敞口、同窗池 CAGR、**曝光匹配超额**、beta/alpha t、
+判据折数、maxDD、E[R]、胜率、PF、最好 10% 占总 R、DSR 与其 k）。
+
+**性能**：面板/指标那一步（35–66 s）在常驻进程里缓存 ⇒ 首次点击约 26–70 s，
+**之后每次只要几秒**（实测 6.2 s：取链路 0 s + 信号 4.2 s + 回测 0.1 s + 渲染 1.8 s）。
+
+**三条纪律（都写在页面上，不靠自觉）**：
+
+1. **只绑 127.0.0.1** —— 这个页面能一键跑回测、读本地库、写报告文件，不该暴露到网络上；
+2. **每点一次都记账**（`research/results/web_runs.jsonl` + `logs/runs.jsonl`），且 **DSR 的 k
+   随之上涨**并在页面上显示成"声明 N + 平台已跑 M"。能一键重跑的界面天然诱发 p-hacking ——
+   纪律的做法不是禁止点击，而是让点击次数可见（§5 迭代记账）；
+3. **窗口与 holdout 重叠会标红**（holdout 只准读一次，台账里已有 claim）。
+
+模块（刻意很小）：`webapp/catalog.py` 只读注册表翻成人话 · `webapp/jobs.py` 任务/缓存/台账 ·
+`webapp/server.py` stdlib HTTP（无第三方依赖）· `webapp/static/index.html` 自包含页面。
+
 
 ## 数据口径（这些设定是刻意的，改之前先读理由）
 

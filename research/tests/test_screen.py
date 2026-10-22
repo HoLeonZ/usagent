@@ -1,6 +1,8 @@
 """筛选器测试。不联网、不读真库。"""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -169,3 +171,34 @@ def test_measure_defaults_the_family_to_the_number_of_tested_tiers(ind):
                        hi=str(ind["date"].max().date()))
     assert m.attrs["family_size"] == len(screen.COMPARED_TIERS) == 4
     assert m.attrs["t_crit"] == pytest.approx(2.498, abs=0.01)
+
+
+# ---------------------------------------------------------------- 与引擎同源（F4）
+
+def test_v21_full_tier_is_exactly_the_engines_own_selection(ind):
+    """`v21_full` 必须**就是**引擎的 v21 —— 手抄条件迟早与引擎分叉（审计 F4）。
+
+    此前这一层多一个 `ma20 > ma60`（引擎的 A 组没有这一条），于是用户在候选清单里
+    跟着的那个"历史基准率"量的是**另一个策略**。现在它由 `signals.select_entries`
+    直接给出，所以两者的 (date, symbol) 命中集合必须逐个相同。
+    """
+    from research import signals
+    from research.screen import _masks
+    df = ind
+    m = _masks(df)["v21_full"]
+    d0 = str(df["date"].min().date())
+    d1 = str((df["date"].max() + pd.Timedelta(days=1)).date())
+    eng = signals.select_entries(df, start_date=d0, end_date=d1)
+    got = set(map(tuple, df.loc[m, ["date", "symbol"]].to_numpy()))
+    want = set(map(tuple, eng[["date", "symbol"]].to_numpy()))
+    assert got == want, (
+        f"screen 的 v21_full 与引擎的 v21 不一致：多 {len(got - want)} 条、少 "
+        f"{len(want - got)} 条（例：{(got - want) or (want - got)}）")
+
+
+def test_v21_full_is_not_hand_copied_conditions():
+    """源码级护栏：这一层不得再出现手抄的条件组合。"""
+    src = (Path(__file__).resolve().parents[2] / "research" / "screen.py").read_text()
+    assert '"v21_full": trend & pullback' not in src, \
+        "v21_full 又被手抄成条件组合了 —— 它会与引擎分叉"
+    assert "signals.select_entries" in src

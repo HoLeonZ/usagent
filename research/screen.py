@@ -1,4 +1,4 @@
-"""筛选器 —— 把 596 只收窄成人能过目的候选,并**同时报告这组条件的历史基准率**。
+"""筛选器 —— 把 整个池子收窄成人能过目的候选,并**同时报告这组条件的历史基准率**。
 
 为什么这个工具长这样(读之前先读这段)
 ======================================
@@ -49,6 +49,8 @@ import numpy as np
 import pandas as pd
 
 from research import indicators as I
+from research import signals
+from research import universe as mod_universe
 from research.metrics import bonferroni_t_threshold
 from research import panel as P
 from research import presets as PS
@@ -67,7 +69,8 @@ TIER_DESC = {
     "trend": "A 趋势:close>MA60 ∧ MA20>MA60 ∧ above_ma60_ratio≥0.6693 ∧ mom120≥0.18",
     "trend_pullback": "A + B 回调:down_streak∈[3,10] ∧ ret1∈[-8.8%,-2%]",
     "trend_pullback_macd": "A + B + D MACD 衰减:|bar|<|bar_prev| ∧ dif>0 ∧ dea>0",
-    "v21_full": "A + B + D + E 流动性 + close≥MA60×1.0121(v21 原样)",
+    "v21_full": "**引擎的 v21 本身**（由 signals.select_entries 给出，不再手抄条件；"
+                "不含 regime 门 —— 这一层量的是条件本身的信息量）",
 }
 
 
@@ -75,8 +78,14 @@ def _masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     """逐层掩码。每层都是上一层再 ∧ 一个条件。"""
     sp = PS.V21_SIGNAL_PARAMS
 
+    # 池资格在最底层（§3 PIT Mandate）：每一层都从 ready 派生，所以基准层
+    # ("base" = 各层条件的历史基准率) 也自动变成**池内**基准率 ——
+    # 拿全池当基准会把"策略买不到的票"混进分母（审计 C1 同源缺陷）。
+    eligible = mod_universe.require_eligible_mask(df)
+
     ready = (
-        df["ma60"].notna() & df["ma120"].notna() & df["mom120"].notna()
+        eligible
+        & df["ma60"].notna() & df["ma120"].notna() & df["mom120"].notna()
         & df["amount60"].notna() & df["macd_bar"].notna()
         & df["macd_bar_prev"].notna() & df["above_ma60_ratio"].notna()
         & df["prev_close"].notna()
@@ -101,12 +110,27 @@ def _masks(df: pd.DataFrame) -> dict[str, pd.Series]:
     liq = (df["amount60"] >= sp["min_amount"]) & (df["amount60"] <= sp["max_amount"])
     buf = df["close"] >= df["ma60"] * (1 + sp["close_ma60_buffer"])
 
+    # ⚠️ `v21_full` **不再手抄条件**（审计 F4）：它必须**就是引擎的 v21**。
+    # 此前这一层是手写的 `trend & pullback & macd & liq & buf`，而手写版多了一个
+    # `ma20 > ma60`（引擎的 A 组没有这一条）—— 于是用户在候选清单里跟着的那个
+    # "历史基准率"量的是**另一个策略**。手抄的条件迟早会与引擎分叉，所以这里改成
+    # 直接调用 `signals.select_entries`（引擎自己的入口），按 (date, symbol) 取命中。
+    #
+    # 已知且**显式**的差别：这一层不含 F（regime 门）。理由是本工具的用途是量
+    # "条件本身携带多少信息"，而 regime 是外部择时门；这句话写在层描述里，不藏着。
+    v21 = signals.select_entries(
+        df, start_date=str(df["date"].min().date()),
+        end_date=str((df["date"].max() + pd.Timedelta(days=1)).date()))
+    hit = pd.MultiIndex.from_frame(v21[["date", "symbol"]]) if len(v21) else None
+    idx = pd.MultiIndex.from_frame(df[["date", "symbol"]])
+    v21_full = pd.Series(idx.isin(hit) if hit is not None else False, index=df.index)
+
     return {
         "base": ready,
         "trend": trend,
         "trend_pullback": trend & pullback,
         "trend_pullback_macd": trend & pullback & macd,
-        "v21_full": trend & pullback & macd & liq & buf,
+        "v21_full": v21_full & ready,
     }
 
 
@@ -274,17 +298,28 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--family-size", type=int, default=None,
                     help="本次比较的族规模(默认=层级数);换 horizon/窗口再跑要自己加进去")
+    ap.add_argument("--out", default=None, metavar="PATH",
+                    help="把结论写成**带凭证的产物**（ts/git sha/数据 vintage + 清单 + 同层基准率）；"
+                         "不写就只打印。凭证是「这份数字是哪份代码+哪份数据算的」的唯一答案")
+    ap.add_argument("--note", default="", help="写进凭证产物的备注（例如为什么要跑这一次）")
     ap.add_argument("--start", default="2024-04-09", help="测量起点(预热之后)")
     ap.add_argument("--end", default="2026-10-14")
     a = ap.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
-    p = P.load_full_panel()
+    # 诊断脚本没有 preset，用项目默认的 PIT 取池口径（显式，不靠隐含默认）
+    p = P.load_full_panel(universe=mod_universe.DEFAULT_SPEC)
     ind = I.compute_all(p)
 
     if a.measure:
         m = measure(ind, a.horizon, lo=a.start, hi=a.end, family_size=a.family_size)
         _print_measure(m)
+        if a.out:
+            _write_artifact(a.out, ind=ind, kind="measure", as_of=None, tier=None,
+                            horizon=a.horizon, window=[a.start, a.end],
+                            table=m, note=a.note,
+                            params={"family_size": a.family_size,
+                                    "universe": str(mod_universe.DEFAULT_SPEC)})
         return 0
 
     as_of = a.as_of or str(ind["date"].max().date())
@@ -310,12 +345,100 @@ def main() -> int:
                   "不要把它当作看涨理由。")
         elif not np.isfinite(t) or abs(t) < t_crit:
             print("  ⚠️ 该层与股票池基准**无统计差别** —— 筛出来的票不比随机票更好。"
-                  "\n     它的价值在于把 596 只收窄到几十只供你过目,不在于预测方向。"
+                  "\n     它的价值在于把整个池子收窄到几十只供你过目,不在于预测方向。"
                   "\n     方向判断得由你补。(见 README「这个工具不做什么」)")
         else:
             print("  ℹ️ 该层历史上优于基准,但注意:n/h 的重叠采样已按 sqrt(h) 折减,"
                   "\n     且样本只覆盖一段上涨市,不代表未来。")
+    if a.out:
+        _write_artifact(a.out, ind=ind, kind="candidates", as_of=as_of, tier=a.tier,
+                        horizon=a.horizon, window=[a.start, a.end], table=c,
+                        benchmark=(None if row.empty else row.iloc[0].to_dict()),
+                        base_mean=float(base), note=a.note,
+                        params={"family_size": a.family_size, "top": a.top,
+                                "universe": str(mod_universe.DEFAULT_SPEC)})
     return 0
+
+
+def _nan_safe(obj):
+    """把 NaN/±Inf 变成 None —— 否则 `json.dumps` 会写出裸 `NaN`，那不是合法 JSON。
+
+    对抗核验实测：窄窗口上 benchmark/base_mean 是裸 `float('nan')`，产物因此**不是合法 JSON**
+    （严格解析器直接报错），而 pandas 的 `to_json` 那条路会写成 null ⇒ 同一个文件里两种写法。
+    """
+    if isinstance(obj, float):
+        return None if (obj != obj or obj in (float("inf"), float("-inf"))) else obj
+    if isinstance(obj, dict):
+        return {k: _nan_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_nan_safe(v) for v in obj]
+    return obj
+
+
+def _artifact_valid(kind: str, table, benchmark, base_mean) -> tuple[bool, str]:
+    """产物里的数**是否足以支撑判读**。不够就显式标出来 —— 不许让下游把"有凭证"当成
+    "凭证可信"（对抗核验：窄窗口上 stdout 说"样本不足,无法评估"，产物却照样写、照样打印
+    "凭证产物已写"，只有一堆 NaN）。"""
+    import math
+    def _finite(x) -> bool:
+        try:
+            return x is not None and math.isfinite(float(x))
+        except (TypeError, ValueError):
+            return False
+    if len(table) == 0:
+        return False, "空表：本次没有产出任何行"
+    if kind == "candidates":
+        if benchmark is None:
+            return False, "该层没有可比基准行（样本不足或该层为空）"
+        if not _finite(benchmark.get("mean")):
+            return False, "该层的基准均值不是有限数（样本不足）"
+        return True, ""
+    if not any(_finite(v) for v in (table["mean"] if "mean" in table else [])):
+        return False, "表里没有任何有限均值（样本不足）"
+    return True, ""
+
+
+def _write_artifact(path, *, ind, kind, as_of, tier, horizon, window, table,
+                    benchmark=None, base_mean=None, note="", params=None) -> None:
+    """决策凭证落盘（2026-10-17 机构就绪审计的第 ③ 项）。
+
+    为什么必须有：实测这个工具此前只 `print()`（`grep -cE "to_csv|json.dump|write_text"`
+    = 0），于是从"信号"到"下单"这一段**没有任何可对账的凭证** —— 事后既答不出
+    "这 20 只是哪份代码 + 哪份数据算的"，也无法把实现与当时的判断比。
+    凭证字段刻意少而硬：时间（带时区）、代码版本、数据 vintage；再叠上这次的口径与参数。
+    """
+    import json
+    from pathlib import Path
+
+    import obs                                   # src/ 已在 sys.path（research/__init__ 的垫片）
+    from research.panel import data_vintage
+
+    valid, reason = _artifact_valid(kind, table, benchmark, base_mean)
+    payload = _nan_safe({
+        "schema": "usagent.screen.artifact/v1",
+        "kind": kind,
+        "manifest": obs.manifest(data_vintage=data_vintage(ind)),
+        # 参数要够复核判词：漏了 family_size 就复原不出 t 门槛（对抗核验实测）
+        "params": {"tier": tier, "as_of": as_of, "horizon": horizon, "window": window,
+                   **(params or {})},
+        "valid": valid,
+        "invalid_reason": reason,
+        "note": note,
+        "base_mean": base_mean,
+        "benchmark": benchmark,
+        "n_rows": int(len(table)),
+        "table": json.loads(table.to_json(orient="records")),
+    })
+    out = Path(path)
+    text = json.dumps(payload, ensure_ascii=False, indent=1, default=str, allow_nan=False)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        # 写失败要说人话并**非零退出**：用户显式要了凭证却没有凭证，不是"无害的观测失败"
+        raise SystemExit(f"凭证写入失败 {out}：{type(exc).__name__}: {exc}") from exc
+    mark = "" if valid else f"（⚠️ 无效读数：{reason}）"
+    print(f"\n（凭证产物已写 {out}：含 ts / git sha / 数据 vintage{mark}）")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+# golden baseline（**合成市场**版，§6 行为锁）—— 无需真库，任何机器都能跑。
+# 只放哈希与计数，不放任何收益数字（§7）。
+# 重生成:GOLDEN_FIXTURE_REGEN=1 python -m pytest research/tests/test_golden_fixture_lock.py
+# 重生成 = 承认交易列表漂移，必须在 commit message 里说明原因与量级。
+case=fixture_us_uptrend_pullback_v1
+preset=us_uptrend_pullback_v1
+start=2024-01-01
+end=2025-01-01
+vintage=rows=12480;symbols=24;from=2023-01-02;to=2024-12-27;prices=615e97e64e7020447079ba801055481d
+n_trades=3
+trades_sha256=9e5e1921201ecebe4db0ff49b81cf7578f83d911ff39e6d1d8ef83d9b26d3fbd
+equity_sha256=3c7e0c0a9dcd195344c841fe1e62357705af0409e4883c541ca033eebcfce76e

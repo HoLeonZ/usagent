@@ -5,7 +5,7 @@
 case=us_reversal_dip_v1
 preset=us_reversal_dip_v1
 window=2024-04-09..2026-10-14
-vintage=rows=425332;symbols=596;from=2023-10-16;to=2026-10-13
-n_trades=98
-trades_sha256=06713f321a1691d2f321dfa6793fd5a5cdeecf1c487eb46d458ea89c32a42514
-equity_sha256=b601aaceebc481cdd5da0f48ff9cae81be0808a12020e738e249b54c693c16f0
+vintage=rows=1968713;symbols=3028;from=2023-10-17;to=2026-10-16;prices=6f9fb0d6abffb1be6631fff137aaa8eb
+n_trades=114
+trades_sha256=9c08fb334c1357dd7456ae31525a0f2ae2448ccbfe28d14dea55449f4e76fb9a
+equity_sha256=74a4ed22e05845abc3358fbf629047387daba559af6bb43e5da8602fb65d7799

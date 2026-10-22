@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from research import broker, families as F, indicators, metrics, panel as mod_panel
+from research import overlay as overlay_fn
 from research import presets, regime, search_12m as S, wfv_search as W
 
 logger = logging.getLogger("family_search")
@@ -41,8 +42,17 @@ logger = logging.getLogger("family_search")
 #      这里的常数只作自检 —— 实测重算值必须与它们吻合)。
 UPB = {"signal": {"min_dist_high252": -0.1, "max_stoch_k": 70.0},
        "exit": {"sl_mult": 2.0, "tp_mult": 3.0, "max_hold": 10}}
-TARGET_POOLED_TEST = 0.1419        # 记录值(pooled test mean CAGR)
-TARGET_CONTINUOUS = 0.0815         # 记录值(连续净值 CAGR)
+# 记录值（**自检用**：本文件会用同一条代码路径重算，实测值必须与它们吻合）。
+# ⚠️ 2026-10-17 口径大修后**重算过**：取池换成 PIT 流动性池（去掉幸存者/前视）、
+#    加上价差成本、组合层风险上限、窗口末尾清算之后，这条基准线**由正转负**：
+#        池化测试窗 +14.19% → -7.71%   连续净值 +8.15% → -4.57%
+#        且**逐折全负**（旧口径下是正的）。
+#    含义：10 个族要"战胜"的这条线本身已经是个亏钱策略了 ——
+#    「战胜 uptrend-pullback」在旧口径下是一个**实质**主张，在新口径下要弱得多
+#    （打败一条负的线不等于创造价值；真正的判据是曝光匹配那一条）。
+#    这条常数只是**自检**：口径一变它就该跟着变，变了要说明原因（§6）。
+TARGET_POOLED_TEST = -0.077061
+TARGET_CONTINUOUS = -0.045735
 
 EXIT_GRID = W.EXIT_GRID            # 与上轮同一个退出网格
 SIZE_FIXED = W.SIZE_FIXED          # risk 1% / mp 2
@@ -63,6 +73,7 @@ def pooled(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None,
     # ⚠️ 保留**按窗口对齐**的版本(None = 该窗无信号)。只留紧凑列表会让调用方
     #    (随机对照按窗口索引、基准取平均)错位 —— 实测在 lhr(3/4 窗无信号)上越界崩过。
     by_win: list[float | None] = []
+    per_win_rets: list[tuple[tuple[str, str], list[float]]] = []
     for lo, hi in windows_:
         sig = (F.select(ind, family_id, fparams or {}, lo, hi, reg=reg)
                if family_id is not None else None)
@@ -71,6 +82,8 @@ def pooled(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None,
         # (与 uptrend-pullback 用的同一把尺)。没有它,「买被打下去的票」在牛市里跑出的
         # 高 CAGR 会被误读成选股能力。
         bench.append(_bench_cagr(reg, lo, hi))
+        if r.get("daily_ret") is not None:
+            per_win_rets.append(((lo, hi), r["daily_ret"]))
         if r["cagr"] is None:
             no_sig += 1
             tcounts.append(0)
@@ -85,7 +98,8 @@ def pooled(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None,
         tcounts.append(r["trades"])
     out = {"n_windows": len(windows_), "n_no_signals": no_sig, "trades_per_window": tcounts,
            "n_trades": int(sum(tcounts)), "n_bench": len(bench),
-           "cagrs_by_window": by_win}
+           "cagrs_by_window": by_win,
+           "pooled_daily_ret": metrics.pool_windows_rets(per_win_rets)}
     if not cagrs:
         out.update({"mean_cagr": None, "worst_dd": None, "mean_dd": None,
                     "mean_sharpe": None, "mean_e_r": None, "cagrs": [],
@@ -129,23 +143,25 @@ def overlay(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None) -> di
     for lo, hi in windows_:
         sig = (F.select(ind, family_id, fparams or {}, lo, hi, reg=reg)
                if family_id is not None else None)
-        if sig is not None and sig.empty:
+        if sig is None:
+            raise ValueError("overlay() 必须给 family_id 或一段现成的信号表 —— "
+                             "`family_id=None` 曾经把 sig=None 交给 broker，那条路是死的。"
+                             "preset 请改用 research.overlay.excess_vs_pool()")
+        if sig.empty:
             benchs.append(_bench_cagr(reg, lo, hi))
             continue
-        res = broker.simulate(S.make_preset(cfg or {}), sig, ind, start=lo, end=hi)
+        res = broker.simulate(S.make_preset(cfg or {}), sig, ind, start=lo, end=hi,
+                              regime_ok=(regime.regime_ok_dates(reg)
+                                         if reg is not None else None))
         eq = res["equity"].set_index("date")
         if len(eq) < 3:
             benchs.append(_bench_cagr(reg, lo, hi))
             continue
-        sret = eq["equity"].pct_change().fillna(0.0)
-        w = eq["exposure"].shift(1).fillna(0.0)          # 前一日敞口(因果)
-        b = bret.reindex(eq.index).fillna(0.0)
-        ov = (w * sret + (1.0 - w) * b)
-        days = (eq.index[-1] - eq.index[0]).days
-        c = float((1.0 + ov).prod() ** (365.25 / days) - 1.0) if days > 0 else float("nan")
-        outs.append(c)
+        # 公式的**唯一定义**在 research/overlay.py —— 这里只做逐窗折算与折叠。
+        o = overlay_fn.overlay_from_equity(eq, bret)
+        outs.append(o["cagr"])
         benchs.append(_bench_cagr(reg, lo, hi))
-        expos.append(float(w.mean()))
+        expos.append(o["exposure"])
     if not outs:
         return {"cagr": None, "bench": None, "excess": None, "n": 0}
     cb = float(np.nanmean(benchs)) if benchs else float("nan")
@@ -155,13 +171,9 @@ def overlay(ind, reg, windows_, *, family_id=None, fparams=None, cfg=None) -> di
 
 
 def _bench_cagr(reg: pd.DataFrame, lo: str, hi: str) -> float:
-    """同一窗口上等权池指数的 CAGR(与 uptrend-pullback 的基准是同一把尺)。"""
-    idx = reg.set_index("date")["ew_index"]
-    b = idx[(idx.index >= pd.Timestamp(lo)) & (idx.index < pd.Timestamp(hi))]
-    if len(b) < 2:
-        return float("nan")
-    days = (b.index[-1] - b.index[0]).days
-    return float((b.iloc[-1] / b.iloc[0]) ** (365.25 / days) - 1.0) if days > 0 else float("nan")
+    """同一窗口上等权池指数的 CAGR。委托给 `regime.window_benchmark_cagr`（唯一定义）。"""
+    from research.regime import window_benchmark_cagr
+    return window_benchmark_cagr(reg, lo, hi)
 
 
 def continuous(ind, reg, lo, hi, *, family_id=None, fparams=None, cfg=None) -> dict:
@@ -215,6 +227,33 @@ def _fmt(tag: str, i: dict) -> str:
             f"超额 {i.get('excess', float('nan'))*100:+7.2f}pp  "
             f"maxDD {i['mean_dd']*100:+5.1f}%  敞口 {i.get('mean_exposure', float('nan'))*100:4.1f}%  "
             f"成交 {i['n_trades']:3d}  空信号窗 {i['n_no_signals']}/{i['n_windows']}")
+
+
+def c1_on_common_windows(f_by: list, b_by: list, bar_pooled: float
+                         ) -> tuple[bool, str]:
+    """判据① 的取值：**只在共同窗口集上比**，集合不同就退回共同窗重算并出声。
+
+    为什么（审计 B5）：本族的 `mean_cagr` 只在**它有信号的那些窗**上取均值，基准线同理。
+    两批样本不一样时，"均值比均值"比的就不只是策略 —— 一个只在 2 个窗出信号的族，
+    可能在另外 2 个基准线亏钱的窗里根本没参与过。集合不同 ⇒ 退回交集重算。
+    纯函数，便于单独测（内联在裁决循环里的话没法测）。
+    """
+    n = max(len(f_by), len(b_by))
+    f = list(f_by) + [None] * (n - len(f_by))
+    b = list(b_by) + [None] * (n - len(b_by))
+    common = [i for i in range(n) if f[i] is not None and b[i] is not None]
+    only_f = [i for i in range(n) if f[i] is not None and b[i] is None]
+    only_b = [i for i in range(n) if f[i] is None and b[i] is not None]
+    if not (only_f or only_b):
+        return bool(np.mean(f) > float(bar_pooled)), ""
+    if not common:
+        return False, "⚠️ 与基准线**没有一个共同窗** ⇒ ①无法判定（按不通过处理）"
+    m_f = float(np.mean([f[i] for i in common]))
+    m_b = float(np.mean([b[i] for i in common]))
+    note = (f"  ⚠️ 与基准线的有效窗口集不同（本族独有 {len(only_f)} 窗 / 基准独有 "
+            f"{len(only_b)} 窗）⇒ ①改用**共同 {len(common)} 窗**重算："
+            f"本族 {m_f*100:+.2f}% vs 基准 {m_b*100:+.2f}%")
+    return bool(m_f > m_b), note
 
 
 def report_family(ind, reg, family_id: str, train, test, *,
@@ -280,10 +319,19 @@ def report_family(ind, reg, family_id: str, train, test, *,
     win90 = sum(1 for x in pcts if x >= 90)
     print(f"  随机对照:≥中位 {win50}/{len(pcts)} 窗   ≥p90 {win90}/{len(pcts)} 窗"
           f"(后者是**描述性**披露:合成复核指出按中位口径 ④ 形同虚设,但判据不事后退让)")
-    dsr = metrics.deflated_sharpe_ratio(te["mean_sharpe"], n_trials=max(N_TRIALS["n"], 1),
-                                        n_returns=max(2, te["n_trades"]))
-    print(f"  DSR(Sharpe {te['mean_sharpe']:+.2f}, k={N_TRIALS['n']}) = "
-          f"{dsr['deflated_sharpe']:.3f}")
+    # DSR 从**一条收益序列**算（审计 B3）：此前的口径是"逐窗 Sharpe 的均值 +
+    # 成交笔数当 T"，那不是任何一条序列的 DSR。拿不到可拼接序列就不报。
+    _rets = te.get("pooled_daily_ret")
+    if _rets:
+        dsr = metrics.deflated_sharpe_from_returns(
+            _rets, n_trials=max(N_TRIALS["n"], 1), label=f"{family_id} 测试期拼接")
+        print(f"  DSR({dsr['n_returns']} 个日收益,年化 Sharpe {dsr['observed_sharpe']:+.2f},"
+              f"偏度 {dsr['skewness']:+.2f},峰度 {dsr['kurtosis']:.1f},k={N_TRIALS['n']}) = "
+              f"{dsr['deflated_sharpe']:.3f}")
+    else:
+        dsr = {"deflated_sharpe": float("nan"), "n_trials": max(N_TRIALS["n"], 1),
+               "reason": "no_poolable_returns"}
+        print("  DSR：**不报** —— 无可拼接的收益序列（窗口重叠或全窗无信号）")
     return {"family_id": family_id, "family_params": fb, "exit": ex, "overlay": ov,
             "overlay_cont": ov_cont,
             "train": tr, "test": te, "continuous": cont, "null_pcts": pcts,
@@ -305,9 +353,9 @@ def main(argv=None) -> int:
     if a.k_offset:
         print(f"(n_trials 起点 = {a.k_offset},来自之前的轮次;本轮的 DSR 按累计 k 计算)")
 
-    p = mod_panel.load_full_panel()
-    ind = F.add_family_indicators(indicators.compute_all(p))    # 族指标只算一次
     preset = presets.get_preset("us_uptrend_pullback_v1")
+    p = mod_panel.load_panel_for_preset(preset)
+    ind = F.add_family_indicators(indicators.compute_all(p))    # 族指标只算一次
     reg = regime.compute_regime(ind, **(preset.get("regime") or {}))
     train, test = windows()
     lo, hi = W.SEARCH_LO, W.SEARCH_HI
@@ -320,6 +368,14 @@ def main(argv=None) -> int:
     # ---- 基准线:uptrend-pullback 的 WFV 配置,走 cfg 路径(不带 signals_df)
     upb_cfg = {**UPB["signal"], **UPB["exit"], **SIZE_FIXED}
     upb_te = pooled(ind, reg, test, cfg=upb_cfg)
+    # ── 机会集对齐（审计 C2）──────────────────────────────────────────────
+    # 基准线带 v21 的**流动性上界**（amount60 ≤ $3e8，A 股口径，在这个池子上几乎全被
+    # 击穿），而族型策略**没有**这一条。不把上界去掉，"族战胜基准线"就混进了
+    # "族少受一条 A 股遗留条件的限制"。所以**两条线都算**：
+    #   * 带界 —— 历史记录口径，保留给人对照；
+    #   * 无界 —— 与族**同一机会集**的口径，判据① 用它。
+    _noband_cfg = {**upb_cfg, "max_amount": None}
+    upb_te_noband = pooled(ind, reg, test, cfg=_noband_cfg)
     upb_cont = continuous(ind, reg, lo, hi, cfg=upb_cfg)
     print(f"\n[基准] uptrend-pullback WFV 配置 {UPB}")
     print(_fmt("测试窗", upb_te))
@@ -331,8 +387,15 @@ def main(argv=None) -> int:
           f"{(upb_cont['cagr']-upb_cont['bench'])*100:+.2f}pp(连续)。")
     if abs(upb_te["mean_cagr"] - TARGET_POOLED_TEST) > 0.02:
         print(f"  ⚠️ 重算的池化测试窗 {upb_te['mean_cagr']*100:+.2f}% 与记录值 "
-              f"{TARGET_POOLED_TEST*100:+.2f}% 差得超过 2pp —— 先查基准线,再比其它族")
-    bar_pooled, bar_cont = upb_te["mean_cagr"], upb_cont["cagr"]
+              f"{TARGET_POOLED_TEST*100:+.2f}% 差得超过 2pp。"
+              f"\n     若你确实改了口径/取池/成本：更新 TARGET_* 并说明成因（§6）；"
+              f"\n     若不知道为什么会变：**先查基准线**，再拿它去比其它族。")
+    bar_pooled, bar_cont = upb_te_noband["mean_cagr"], upb_cont["cagr"]
+    _d = (upb_te_noband["mean_cagr"] - upb_te["mean_cagr"])
+    print(f"  ⚠️ 机会集对齐（C2）：基准线带 A 股流动性上界时池化测试窗 "
+          f"{upb_te['mean_cagr']*100:+.2f}%，**去掉上界**（与族同口径）后 "
+          f"{upb_te_noband['mean_cagr']*100:+.2f}% ⇒ 上界让基准线偏 "
+          f"{_d*100:+.2f}pp。判据① **用无界那条**（同机会集才可比）。")
     print("\n  判据用的是**同窗口同口径**的比较(§5):池化测试窗与连续净值。"
           "\n  参考:该家族在任何窗口上的最高数是 12m_target 在 2024-10-14..2025-10-14 上的"
           "+51.57%(那是另一个窗口,拿它当线会变成比窗口而不是比策略)。")
@@ -343,6 +406,17 @@ def main(argv=None) -> int:
     # ---- 最终裁决
     print("\n" + "=" * 100)
     print(f"裁决(四条判据;基准线:池化测试窗 {bar_pooled*100:+.2f}% / 连续净值 {bar_cont*100:+.2f}%)")
+    # 判据的**零边缘假阳性率**（审计 B6）：不写清楚，"四条同时满足"会被读成
+    # 一件比它更强的事 —— 其中两条各自都有 5/16 的概率在毫无边缘时为真。
+    _nr = metrics.judgement_null_rates(len(test))
+    print("  判据的零边缘假阳性率（各折独立近似，仅给数量级）:")
+    for _k, _v in _nr["rates"].items():
+        print(f"    {_k:<28s} ≈ {_v*100:.1f}%")
+    print(f"    ⇒ 四条**同时**为真 ≈ {_nr['joint']*100:.1f}%"
+          f"（独立近似；实际因判据间相关而不同）—— 这不是 α=5% 的证据标准")
+    print("    ⚠️ ③④ 用的是**固定次数**（≥3 折）⇒ 折数越多越松"
+          "（P(≥3|4 折)=31.2% vs P(≥3|6 折)=65.6%）。要收紧就该改成**比例**或固定 α，"
+          "而不是「多切几折」—— 那是反方向。")
     print("=" * 100)
     for r in results:
         if r.get("verdict") == "no_signals":
@@ -353,7 +427,11 @@ def main(argv=None) -> int:
         n_eff = sum(1 for c in te["cagrs_by_window"] if c is not None)
         pos = sum(1 for c in te["cagrs"] if c > 0)
         won_null = sum(1 for p in r["null_pcts"] if p >= 50)
-        c1 = te["mean_cagr"] > bar_pooled
+        # ① 必须在**共同窗口集**上比（审计 B5）：本族的 mean_cagr 只在它有信号的那些窗上取均值，
+        # 基准线同理 —— 两批样本不一样时，"均值比均值"比的就不只是策略。
+        # 集合不同 ⇒ 退回共同窗重算，并把这件事说出来。
+        c1, note = c1_on_common_windows(te["cagrs_by_window"], upb_te["cagrs_by_window"],
+                                        bar_pooled)
         c2 = cont["cagr"] > bar_cont
         c3 = (n_eff >= 3) and (pos >= 3)
         c4 = won_null >= 3
@@ -364,6 +442,8 @@ def main(argv=None) -> int:
               f"| ①{_tick(c1)} ②{_tick(c2)} ③{pos}/{n_eff} ④{won_null}/{len(r['null_pcts'])} "
               f"(p90 {r['win90']}/{len(r['null_pcts'])})"
               f"\n               → {verdict}  DSR {r['dsr']['deflated_sharpe']:.3f}")
+        if note:
+            print(note)
     print("\n归因说明(§5(e) 要求报超额,但两种口径都要读懂):")
     print("  * 所有族与基准线跑的是**同一套 sizing**(risk 1% / mp 2)⇒ 敞口在同一个量级")
     print("    (实测线 7.4%),所以**原始 CAGR 的比较本身就是敞口匹配的** —— 这是预注册 ①② 的口径。")
