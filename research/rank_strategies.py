@@ -29,11 +29,23 @@ for _p in (str(ROOT), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import obs                                                            # noqa: E402  凭证头（§6 归因）
 from research import broker, families, golden_baseline as G, indicators   # noqa: E402
 from research import metrics, overlay, panel as panel_mod, presets, regime as regime_mod  # noqa: E402
+from research.panel import data_vintage                               # noqa: E402  数据是哪一批
 
 COMMON = ("2024-04-09", "2026-10-14")
 OUT = ROOT / "research" / "results" / "strategy_ranking.json"
+# 「怎么读这份文件」——**同一份字符串**印在终端、也写进落盘的 JSON（此前只有终端有）。
+READING_NOTES = (
+    "读法提醒：① 「超额」是曝光匹配口径（闲置资金按等权池计息）⇒ 择时得零分，"
+    "只有'在场时打赢池子'才算数；② 共同窗「不是样本外」；"
+    "③ DSR 的 k 逐行不同，别跨行比；④ 零敞口的对照那条线是 0.00pp。",
+    "① 「超额」是曝光匹配口径（闲置资金按等权池计息）⇒ 择时得零分，只有'在场时打赢池子'才算数。",
+    "② 共同窗不是样本外（这一行数字不能当样本外证据）。",
+    "③ DSR 的 k 逐行不同（各自策略的试验次数不同）⇒ 别跨行比 DSR。",
+    "④ 零敞口的那条对照线是 0.00pp（定义如此：两条腿完全相同），不是'跑平了'。",
+)
 
 
 def load_chain():
@@ -114,6 +126,24 @@ HDR = (f"{'策略':32s} {'笔':>4s} {'自身收益':>9s} {'CAGR':>8s} {'敞口':
        f"{'maxDD':>8s} {'R中位':>6s} {'DSR@k':>9s}")
 
 
+def payload(rows: list[dict], panel: pd.DataFrame) -> dict:
+    """落盘的那一份：**凭证头 + 数据 vintage + 共同窗 + 读法提醒 + 行**。
+
+    为什么不是一裸列 rows（2026-10-22 实测）：脚本读到这份文件时，不知道它是哪份代码、
+    哪份数据算的；人几个月后打开它，看到一个「超额」列，不知道那是曝光匹配口径，
+    也不知道共同窗**不是样本外** —— 那四条"读法提醒"此前只印在终端里。终端里的话既然是
+    "读这份文件"的规矩，就该写进文件（与 run_baseline 的 JSON 同一套：manifest +
+    data_vintage）。
+    """
+    return {
+        "manifest": obs.manifest(),                 # ts + git sha + 脏树（§6 归因）
+        "data_vintage": data_vintage(panel),        # 这份数据是哪一批（复现历史数字要用）
+        "window": list(COMMON),
+        "notes": list(READING_NOTES[1:]),
+        "rows": rows,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="回测所有策略并排名（preset / 族 / 对照）")
     ap.add_argument("--families", action="store_true", help="连 10 个族一起跑（慢一些）")
@@ -168,12 +198,13 @@ def main() -> int:
             rows.append(r)
             print(_row(r))
 
-    Path(a.out).write_text(json.dumps(rows, ensure_ascii=False, indent=1, default=str),
+    # ⚠️ 落盘的 JSON 以前是**一裸列 rows** —— 没有代码版本、没有数据 vintage、
+    # 也没有那四条"读法提醒"（提醒只印在终端里）。见 payload() 的说明。
+    Path(a.out).write_text(json.dumps(payload(rows, panel), ensure_ascii=False, indent=1,
+                                     default=str),
                            encoding="utf-8")
     print(f"\n已写 {a.out}")
-    print("读法提醒：① 「超额」是曝光匹配口径（闲置资金按等权池计息）⇒ 择时得零分，"
-          "只有'在场时打赢池子'才算数；② 共同窗**不是样本外**；"
-          "③ DSR 的 k 逐行不同，别跨行比；④ 零敞口的对照那条线是 0.00pp。")
+    print(READING_NOTES[0])
     return 0
 
 

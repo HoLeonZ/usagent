@@ -49,3 +49,25 @@ def test_windows_and_controls_are_labelled():
     src = Path(R.__file__).read_text(encoding="utf-8")
     assert "含 holdout 天数，非样本外" in src
     assert "DO_NOTHING" in src
+
+
+def test_the_written_json_carries_provenance_and_the_reading_notes():
+    """落盘的 JSON 必须带**凭证头 + 数据 vintage + 读法提醒** —— 不能只是一裸列 rows。
+
+    为什么：终端里印的那四条"读法提醒"（超额是曝光匹配口径 / 共同窗不是样本外 /
+    DSR 的 k 逐行不同 / 零敞口那条是 0.00pp）就是**读这份文件**的规矩。此前它们只在
+    终端里，落盘的 JSON 一裸列 rows —— 脚本读它不知道是哪份代码算的，人几个月后打开它
+    也不知道「超额」是哪个口径。
+    """
+    import pandas as pd
+    panel = pd.DataFrame({"symbol": ["A", "B"], "date": pd.to_datetime(["2025-01-02", "2025-01-03"]),
+                          "raw_close": [1.0, 2.0], "volume": [10, 20]})
+    p = R.payload([{"name": "x"}], panel)
+    assert "manifest" in p and p["manifest"].get("git_sha"), p.keys()
+    assert "data_vintage" in p and "rows=" in p["data_vintage"], p.get("data_vintage")
+    assert p["window"] == list(R.COMMON)
+    notes = " ".join(p["notes"])
+    assert "曝光匹配口径" in notes, p["notes"]
+    assert "不是样本外" in notes, p["notes"]
+    assert "k 逐行不同" in notes, p["notes"]
+    assert p["rows"] == [{"name": "x"}]

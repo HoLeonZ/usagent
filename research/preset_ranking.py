@@ -18,8 +18,10 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]        # 模块相对 —— 不许写死本机绝对路径
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "src"))
 
+import obs                                                             # noqa: E402  凭证头（§6 归因）
 from research import golden_baseline as G, indicators, metrics, overlay   # noqa: E402
 from research import panel as panel_mod, presets, regime as regime_mod    # noqa: E402
+from research.panel import data_vintage                                # noqa: E402  数据是哪一批
 
 OUT = ROOT / "research" / "results" / "preset_ranking_corrected.json"
 
@@ -80,7 +82,19 @@ def main() -> int:
               f"{r['folds_positive']}/4 {(r['r_median'] if r['r_median'] is not None else float('nan')):+7.2f}")
     dn = next(r for r in rows if r["preset"] == "DO_NOTHING")
     print(f"\n不变量检查：DO_NOTHING 的超额 = {dn['excess']:+.10%}（修好之后必须恰好 0）")
-    OUT.write_text(json.dumps(rows, ensure_ascii=False, indent=1))
+    # 落盘的那份：与 rank_strategies 同一套（凭证头 + 数据 vintage + 读法提醒 + 行）。
+    # 此前是一裸列 rows —— 那条"DO_NOTHING 的超额必须恰好 0"的不变量只在终端里，
+    # 文件读者无从知道哪一行是它、也看不出这个 0 是被验过的。
+    OUT.write_text(json.dumps({
+        "manifest": obs.manifest(),                 # ts + git sha + 脏树（§6 归因）
+        "data_vintage": data_vintage(panel),        # 这份数据是哪一批
+        "notes": [
+            "「超额」是曝光匹配口径（闲置资金按等权池计息）。",
+            "DO_NOTHING 那一行是「不变量见证」：它的超额必须恰好 0（修好之后）。",
+            "各 preset 的窗口不同（见每行的 window）⇒ 跨行比要先看窗口。",
+        ],
+        "rows": rows,
+    }, ensure_ascii=False, indent=1))
     print(f"已写 {OUT}")
     return 0
 

@@ -24,6 +24,7 @@ from pathlib import Path
 import pandas as pd
 
 import db
+import obs
 from config import COLLECT_OPTIONS, DAILY_UNIVERSE, load_universe
 from trading_calendar import expected_sessions, last_session_on_or_before
 
@@ -408,6 +409,9 @@ def _write_report() -> None:
     failed = [c for c in CHECKS if not c[1]]
     payload = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        # 代码侧的凭证（§6 归因）：这份结论是**哪份代码**跑出来的 ——
+        # 只有一个 ts 答不出"结论变了是因为数据换了还是代码改了"。
+        "manifest": obs.manifest(),
         "universe": _UNIVERSE_NAME,
         "passed": len(CHECKS) - len(failed),
         "total": len(CHECKS),

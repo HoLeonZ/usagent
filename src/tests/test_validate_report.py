@@ -39,6 +39,9 @@ def test_write_report_writes_counts_and_every_check(tmp_path, monkeypatch):
     assert d["passed"] == 1 and d["total"] == 2 and d["failed"] == ["乙"]
     assert d["universe"] == "all" and d["ts"]
     assert [c["name"] for c in d["checks"]] == ["甲", "乙"]
+    # 代码侧的凭证（§6 归因）：只有一个 ts 答不出"结论变了是因为数据换了还是代码改了"
+    assert d["manifest"]["git_sha"], d
+    assert "git_dirty" in d["manifest"], d["manifest"].keys()
 
 
 def test_summary_exit_code_matches_failures(tmp_path, monkeypatch, capsys):
