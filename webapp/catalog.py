@@ -30,9 +30,12 @@ from core.preset_contract import describe_engine_spec        # noqa: E402
 from research import families, presets                       # noqa: E402
 
 # 交付物的窗口若与这段重叠，页面上必须标红：holdout 只准读一次，且台账里已有 claim。
-HOLDOUT = ("2025-10-14", "2026-10-13")
-# 训练窗的定义处（WFV 的搜索期）—— 页面从这里取，别在自己那份里再写一遍
+# ⚠️ **从预注册常量取**，不在这里抄一份日期（下面 import 的 W 就是它的定义处）。
+# 此前这里是 `HOLDOUT = ("2025-10-14", "2026-10-13")` 的字面量，注释却写着
+# "与 holdout 台账、重叠判据同一个常量" —— 那是一份**副本**：改预注册却漏改这里，
+# 平台就会对着旧的边界报警（而这条边界正是它唯一要守住的东西）。
 from research import wfv_search as W                       # noqa: E402
+HOLDOUT = (W.HOLDOUT_LO, W.HOLDOUT_HI)
 
 
 def touches_holdout(window: tuple[str, str], holdout: tuple[str, str] = HOLDOUT) -> bool:

@@ -30,6 +30,7 @@ import pandas as pd
 from core.preset_contract import describe_engine_spec
 
 from research import signals          # condition_rows 要用 V21 的阈值做对照
+from research import wfv_search as _W  # 搜索期/holdout 的**唯一**定义处（第五件事要用）
 
 PRE_SIG_BARS = 60          # 卡片左侧多看多少根 K 线
 POST_EXIT_BARS = 8         # 卡片右侧多看多少根
@@ -249,8 +250,9 @@ def candles_svg(win: pd.DataFrame, tr: pd.Series, sig_date: pd.Timestamp,
     return "".join(p)
 
 
-def equity_svg(eq: pd.DataFrame, bench: pd.Series | None) -> str:
-    """权益曲线 + 基准对比。"""
+def equity_svg(eq: pd.DataFrame, bench: pd.Series | None,
+               n_symbols: int | None = None) -> str:
+    """权益曲线 + 基准对比。`n_symbols` = 池子里的标的数（图例要如实写，不能写死）。"""
     n = len(eq)
     if n < 2:
         return '<div class="nodata">无权益数据</div>'
@@ -276,7 +278,12 @@ def equity_svg(eq: pd.DataFrame, bench: pd.Series | None) -> str:
         pts = " ".join(f"{PL+i*step:.1f},{PT+(H-PT-PB)-(v-lo)/(hi-lo)*(H-PT-PB):.1f}"
                        for i, v in enumerate(arr))
         p.append(f'<polyline points="{pts}" class="{cls}"/>')
-    p.append(f'<text x="{PL+8}" y="{PT+12}" class="ax {"bench-tx"}">— 基准(596只等权,日再平衡)</text>')
+    # ⚠️ 池子规模必须**算出来**，不能写死：此前这里印的是「基准(596只等权,日再平衡)」——
+    # 596 是当时那份数据的数，换一份数据/换一个池子，它就变成一句**假话**，而它就写在
+    # 图表的图例里（读者默认它是当前这份的）。现在从面板里数标的数，取不到就不写数。
+    _ns = f"{int(n_symbols)}只" if n_symbols else ""
+    p.append(f'<text x="{PL+8}" y="{PT+12}" class="ax {"bench-tx"}">'
+             f'— 基准({_ns}等权,日再平衡)</text>')
     p.append(f'<text x="{PL+8}" y="{PT+26}" class="ax strat-tx">— 策略</text>')
     p.append('</svg>')
     return "".join(p)
@@ -542,6 +549,23 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     # 否则读者会把这个差当成策略的边缘、拿它去印证别处的数字。
     _diff_note = ("⚠️ 这个差是「本策略 CAGR − 同窗等权池 CAGR」，<b>没有</b>把闲置资金按等权池计息；"
                   "平台结果面板里的「曝光匹配超额」是<b>另一个量</b>（曝光匹配口径），两个数不要互相印证。")
+    # 第五件事：**这一窗是不是样本外**。报告此前完全不提 holdout —— 而交付物的声明窗里
+    # 就有含 holdout 天数的（平台上会标红），读报告的人却看不到"这一段不是样本外"。
+    # ⚠️ 反过来也要说清：「不含 holdout」≠「样本外」—— 落在搜索期里的窗口是**样本内**的。
+    # 窗口是左闭右开 [lo, hi)，所以"读了 holdout"的充要条件是 hi > ho_lo and lo <= ho_hi。
+    try:
+        _t_lo, _t_hi = pd.Timestamp(summary["lo"]), pd.Timestamp(summary["hi"])
+        _touches = _t_hi > pd.Timestamp(_W.HOLDOUT_LO) and _t_lo <= pd.Timestamp(_W.HOLDOUT_HI)
+    except Exception:                                   # noqa: BLE001 —— 窗口缺失时别把报告弄挂
+        _touches = None
+    _ho_item = ("" if _touches is None else
+                (f'⚠️ 这一窗<b>含 holdout 天数</b>（{_W.HOLDOUT_LO}..{_W.HOLDOUT_HI}）—— '
+                 f'它<b>不是样本外证据</b>：拿这一窗的数字去支持结论，等于又读了一次'
+                 f'「只准读一次」的那个窗口。'
+                 if _touches else
+                 f'本窗口<b>不含</b> holdout 天数（{_W.HOLDOUT_LO}..{_W.HOLDOUT_HI}）。'
+                 f'⚠️ 但「不含 holdout」<b>不等于</b>「样本外」—— 落在搜索期'
+                 f'（{_W.SEARCH_LO}..{_W.SEARCH_HI}）里的窗口是样本内的。'))
     parts.append('<div class="warn"><h3>读这份报告之前必须知道的五件事</h3><ul>'
                  f'<li>本策略在<b>本窗口</b> <b>CAGR {summary["cagr"]*100:+.2f}%</b>,'
                  f'同期无脑等权持有 CAGR {bench_cagr*100:+.2f}% —— '
@@ -554,6 +578,7 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
                  f'按 §5,{_k_eff} 次试验的选择偏差折算后门槛还要更高{_k_note}。</li>'
                  '<li><b>卡片右侧显示出场之后的价格</b>(供复盘),那是展示,不参与信号。'
                  '信号日清单只用当日及之前的数据 —— 已由截断重算独立验证。</li>'
+                 f'<li>{_ho_item}</li>'
                  '</ul></div>')
 
     # ---- 目录：这份报告实测 91 张卡 / 108 屏，此前 5 个 h2 连 id 都没有、也没有一处
@@ -585,7 +610,9 @@ def render_html(trades: pd.DataFrame, eq: pd.DataFrame, ind: pd.DataFrame,
     parts.append('</div>')
 
     parts.append('<h2 id="s-equity">权益曲线 vs 基准</h2><div class="card">')
-    parts.append(equity_svg(eq, bench))
+    _nsym = (int(ind["symbol"].nunique())
+             if (ind is not None and "symbol" in getattr(ind, "columns", [])) else None)
+    parts.append(equity_svg(eq, bench, n_symbols=_nsym))
     parts.append('</div>')
 
     parts.append('<h2 id="s-config">配置</h2><div class="card"><table class="conds">')

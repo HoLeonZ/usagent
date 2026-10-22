@@ -122,6 +122,38 @@ def test_no_machine_specific_paths_in_tracked_files():
     assert not hits, "仓库里出现机器相关的绝对路径：\n" + "\n".join(hits)
 
 
+def test_the_holdout_boundary_is_defined_in_exactly_one_place():
+    """预注册的那条分界线（搜索期 / holdout）只能有**一处**定义。
+
+    为什么值得一条锁（2026-10-22 实测）：它此前至少有三份：
+      * `research/wfv_search.py` 的 `SEARCH_LO/HI`、`HOLDOUT_LO/HI`（预注册正文，正主）；
+      * `webapp/catalog.py` 又抄了一份**字面量**（注释还写着"与 holdout 台账、重叠判据
+        同一个常量"——那是副本），平台据此给"与 holdout 重叠"标红；
+      * `research/event_attribution.py` 抄了一份 `TRAIN`，外加一个**没人用**的 `HOLDOUT`。
+    改了预注册却漏改副本 ⇒ 平台的警示与归因阶段的闸门会对着**旧的边界**工作，
+    而且不会报错。这类副本越多，纪律越像口号。
+
+    只认"赋值里的字面量"，不认散文里的提及（注释与文档里写日期是正常的、也是必要的）。
+    """
+    pat = re.compile(r'^\s*(?:HOLDOUT|HOLDOUT_LO|HOLDOUT_HI|SEARCH_LO|SEARCH_HI)'
+                     r'(?:\s*,\s*(?:HOLDOUT|HOLDOUT_LO|HOLDOUT_HI|SEARCH_LO|SEARCH_HI))*'
+                     r'\s*=\s*[\(\[]?\s*["\'](\d{4}-\d\d-\d\d)["\']', re.M)
+    found: list[str] = []
+    where: set[str] = set()
+    for d in ("research", "webapp", "src", "tools"):
+        for f in sorted((ROOT / d).rglob("*.py")):
+            if "tests" in f.parts or f.name == "conftest.py":
+                continue
+            for m in pat.finditer(f.read_text(encoding="utf-8")):
+                where.add(str(f.relative_to(ROOT)))
+                found.append(f"{f.relative_to(ROOT)} → {m.group(1)}")
+    # 一个文件里可以同时定义搜索期与 holdout（那正是预注册正文所在的地方）；
+    # **别处**不许再写一份字面量。
+    assert where == {"research/wfv_search.py"}, \
+        f"这条分界线只能在预注册那一个文件里定义，别处有副本：{sorted(where)}"
+    assert "2025-10-14" in " ".join(found), found
+
+
 def test_dependencies_are_pinned():
     req = ROOT / "requirements.txt"
     assert req.exists(), ("没有 requirements.txt —— 不钉版本时，同一份代码在另一台机器上"

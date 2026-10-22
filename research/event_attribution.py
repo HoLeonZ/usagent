@@ -39,12 +39,19 @@ for _p in (str(ROOT), str(ROOT / "src")):
 from research import earnings as mod_earnings          # noqa: E402
 from research import golden_baseline as G              # noqa: E402
 from research import indicators, metrics, overlay, panel as panel_mod, presets  # noqa: E402
+# ⚠️ 训练窗 / holdout 的**分界线只许有一处定义**（`wfv_search` 的预注册常量）。
+# 此前这里自己又写了一份 `TRAIN`/`HOLDOUT` 字面量：`HOLDOUT` 压根没人用（**死常量**），
+# 而 `TRAIN` 与 `wfv_search.SEARCH_LO/HI` 是同两条日期 —— 改了预注册却漏改这里，
+# 「归因阶段不许看 holdout」这道闸门就会**静默失效**（它正是为防这件事而存在的）。
+from research.wfv_search import HOLDOUT_LO, HOLDOUT_HI, SEARCH_LO, SEARCH_HI  # noqa: E402
 
 logger = logging.getLogger("event_attr")
 
-# 训练窗 = 18 个月里去掉最后一年；这里取"数据起点 + 预热"到 holdout 前一天
-TRAIN = ("2024-04-09", "2025-10-13")
-HOLDOUT = ("2025-10-14", "2026-10-13")
+# 训练窗 = 18 个月里去掉最后一年；这里取"数据起点 + 预热"到 holdout 前一天。
+# 值**来自预注册常量**（上面的 import），本文件不再抄一份日期。
+TRAIN = (SEARCH_LO, SEARCH_HI)
+# （原先这里还定义过一个 `HOLDOUT = (...)` 字面量，但全仓库没人用它 —— 删掉：
+#  一个没人用、又长得像纪律边界的东西，只会让下一个改窗口的人以为改了它就有用。）
 FORWARD_CALENDAR_DAYS = 26          # 与 preset 的 max_hold=18 个交易日相称
 OUT_DEFAULT = ROOT / "research" / "results" / "event_attribution.json"
 

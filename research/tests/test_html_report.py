@@ -41,10 +41,17 @@ def chain(tmp_path_factory):
         dbmod.DB_PATH = old
 
 
-def _render(chain, *, preset="us_reversal_dip_v1", family=None, explain=None, note=""):
+def _raw(chain, *, preset="us_reversal_dip_v1", family=None, note=""):
+    """跑一次并把零件原样交出来（要改 summary 的窗口再渲染时用）。"""
     panel, ind = chain
     res, eq, ind2, bench, summary, auto_explain = RR.run(
         *WIN, preset, 0, family=family, note=note)
+    return res, eq, ind2, bench, summary, auto_explain
+
+
+def _render(chain, *, preset="us_reversal_dip_v1", family=None, explain=None, note=""):
+    res, eq, ind2, bench, summary, auto_explain = _raw(chain, preset=preset, family=family,
+                                                       note=note)
     doc = H.render_html(res["trades"], eq, ind2, summary["signal"], bench, summary,
                         explain=explain if explain is not None else auto_explain)
     return doc, len(res["trades"]), summary
@@ -316,6 +323,48 @@ def test_the_report_says_which_code_produced_it(chain):
     assert H.selfcheck(doc, n) == []
     assert "代码版本" in doc, "报告页脚没有凭证头（这份结果说不清出自哪份代码）"
     assert "生成于" in doc
+
+
+def test_the_chart_legend_states_the_real_pool_size(chain):
+    """图例里的池子规模必须**算出来** —— 写死就是一句会过期的假话。
+
+    实测：图例此前硬编码「基准(596只等权,日再平衡)」—— 596 是当时那份数据的标的数，
+    换一份数据/换一个池子它就成了假话，而它就写在图表图例里（读者默认它是当前这份的）。
+    """
+    doc, n, _ = _render(chain)
+    assert H.selfcheck(doc, n) == []
+    assert "596" not in doc, "图例里还有写死的池子规模"
+    assert "等权,日再平衡" in doc
+
+
+def test_the_must_know_block_counts_its_own_items_and_says_whether_the_window_is_holdout(chain):
+    """「必须知道的五件事」—— 标题里的数必须等于真实条数，且要回答"这一窗是不是样本外"。
+
+    两条都是实测出来的：
+      * 标题写着「五件事」，而列表只有 **4** 条（标题与内容对不上，是最容易被读者发现、
+        也最伤信任的那类错）；
+      * 报告**完全不提 holdout** —— 而交付物的声明窗里就有含 holdout 天数的（平台会标红），
+        读报告的人却看不到"这一段不是样本外"。
+    ⚠️ 反过来也要说清：「不含 holdout」≠「样本外」（落在搜索期里的窗口是样本内的），
+    所以第五件事在两种情形下说的话不一样。
+    """
+    doc, n, _ = _render(chain)                       # 默认窗口在搜索期内
+    assert H.selfcheck(doc, n) == []
+    i = doc.index("<h3>读这份报告之前必须知道的")
+    block = doc[i:doc.index("</ul>", i)]
+    title = re.search(r"<h3>([^<]+)</h3>", block).group(1)
+    n_items = block.count("<li>")
+    assert ("五" in title and n_items == 5) or str(n_items) in title, \
+        f"标题「{title}」与条数 {n_items} 对不上"
+    assert "不含" in block and "不等于" in block, "没说清「不含 holdout」≠「样本外」"
+    # 窗口跨进 holdout ⇒ 必须明说不是样本外（用合成 summary 的窗口测：夹具数据到不了 2025-10）
+    res, eq, ind2, bench, summary, auto_explain = _raw(chain)
+    for lo, hi, need in (("2025-10-01", "2025-10-20", "含 holdout 天数"),
+                         ("2025-10-14", "2026-10-13", "含 holdout 天数")):
+        s = dict(summary, lo=lo, hi=hi)
+        d2 = H.render_html(res["trades"], eq, ind2, s["signal"], bench, s, explain=auto_explain)
+        j = d2.index("<h3>读这份报告之前必须知道的")
+        assert need in d2[j:d2.index("</ul>", j)], f"{lo}..{hi} 没被标成含 holdout"
 
 
 def test_family_rows_render_the_third_state_not_a_checkmark(chain):
